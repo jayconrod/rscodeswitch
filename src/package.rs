@@ -73,6 +73,7 @@ impl fmt::Display for Function {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Bool,
     Float64,

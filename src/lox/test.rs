@@ -27,6 +27,7 @@ fn interpret_test() -> Result<(), String> {
     let tokens = token::lex(&path, &data, &mut lmap).map_err(err_to_string)?;
     let ast = syntax::parse(&tokens, &lmap).map_err(err_to_string)?;
     let pkg = compile::compile(&ast, &lmap).map_err(err_to_string)?;
+    eprintln!("{}", pkg);
 
     let mut got = Vec::new();
     let mut interp = Interpreter::new(&mut got, pkg);

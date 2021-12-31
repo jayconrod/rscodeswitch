@@ -29,16 +29,24 @@ struct Env<'a> {
     asm: Assembler,
     scope: HashMap<&'a str, ScopeEntry>,
     next: u32,
+    kind: EnvKind,
 }
 
 impl<'a> Env<'a> {
-    fn new() -> Env<'a> {
+    fn new(kind: EnvKind) -> Env<'a> {
         Env {
             asm: Assembler::new(),
             scope: HashMap::new(),
             next: 0,
+            kind,
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EnvKind {
+    Global,
+    Function,
 }
 
 struct ScopeEntry {
@@ -51,6 +59,7 @@ struct ScopeEntry {
 #[derive(Clone, Copy)]
 enum Storage {
     Global(u32),
+    Local(u16),
 }
 
 impl<'a> Compiler<'a> {
@@ -59,7 +68,7 @@ impl<'a> Compiler<'a> {
             lmap: lmap,
             globals: Vec::new(),
             functions: Vec::new(),
-            env_stack: vec![Env::new()],
+            env_stack: vec![Env::new(EnvKind::Global)],
         }
     }
 
@@ -85,7 +94,10 @@ impl<'a> Compiler<'a> {
     }
 
     fn declare(&mut self, decl: &Decl<'a>) -> Result<(), Error> {
-        let name = decl.name();
+        let name = match decl.name() {
+            Some(t) => t,
+            None => return Ok(()),
+        };
         if let Some(prev) = self.env().scope.get(name.text) {
             let begin = prev.def_begin_pos;
             let end = prev.def_end_pos;
@@ -98,17 +110,27 @@ impl<'a> Compiler<'a> {
                 ),
             });
         }
-        let mut env = self.env();
-        env.scope.insert(
+        let (def_begin_pos, def_end_pos) = decl.pos();
+        let storage = match self.env().kind {
+            EnvKind::Global => Storage::Global(self.env().next),
+            EnvKind::Function => {
+                let i = u16::try_from(self.env().next).map_err(|_| Error {
+                    position: self.lmap.position(name.from, name.to),
+                    message: format!("too many local variables"),
+                })?;
+                Storage::Local(i)
+            }
+        };
+        self.env().scope.insert(
             name.text,
             ScopeEntry {
-                def_begin_pos: decl.begin_pos(),
-                def_end_pos: decl.end_pos(),
-                storage: Storage::Global(env.next),
+                def_begin_pos,
+                def_end_pos,
+                storage,
                 defined: true,
             },
         );
-        env.next += 1;
+        self.env().next += 1;
         Ok(())
     }
 
@@ -121,22 +143,32 @@ impl<'a> Compiler<'a> {
                     // TODO: nil
                     unimplemented!();
                 }
+                if self.env().kind != EnvKind::Global {
+                    // Globals must be declared before anything is compiled.
+                    // Everything else gets declared here.
+                    self.declare(decl)?;
+                }
                 let mut ent = self.env().scope.get_mut(name.text).unwrap();
                 ent.defined = true;
                 match ent.storage {
-                    Storage::Global(i) => self.env().asm.storeglobal(i),
+                    Storage::Global(i) => {
+                        self.env().asm.storeglobal(i);
+                        self.globals.push(Global {
+                            name: String::from(name.text),
+                        });
+                    }
+                    Storage::Local(_) => {
+                        // Skip the storelocal instruction. We should be storing
+                        // into the last slot, and there should be no other
+                        // temporaries, so storelocal would be a no-op.
+                    }
                 }
-
-                self.globals.push(Global {
-                    name: String::from(name.text),
-                });
             }
             Decl::Function { name, body, .. } => {
-                self.env_stack.push(Env::new());
-                for stmt in &body.stmts {
-                    self.compile_stmt(stmt)?;
+                self.env_stack.push(Env::new(EnvKind::Function));
+                for decl in &body.decls {
+                    self.compile_decl(decl)?;
                 }
-
                 self.env().asm.ret();
 
                 let mut env = self.env_stack.pop().unwrap();
@@ -147,6 +179,7 @@ impl<'a> Compiler<'a> {
                 };
                 self.functions.push(f);
             }
+            Decl::Stmt(stmt) => self.compile_stmt(stmt)?,
         }
         Ok(())
     }
@@ -157,8 +190,8 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(e)?;
                 self.env().asm.pop();
             }
-            Stmt::Print(e) => {
-                self.compile_expr(e)?;
+            Stmt::Print { expr, .. } => {
+                self.compile_expr(expr)?;
                 self.env().asm.sys(inst::SYS_PRINT);
             }
         }
@@ -195,13 +228,21 @@ impl<'a> Compiler<'a> {
                 Storage::Global(i) => {
                     self.env().asm.loadglobal(i);
                 }
+                Storage::Local(i) => {
+                    self.env().asm.loadlocal(i);
+                }
             },
             Expr::Assign(l, r) => {
                 self.compile_expr(r)?;
                 match l {
                     LValue::Var(t) => match self.resolve(t)? {
                         Storage::Global(i) => {
+                            self.env().asm.dup();
                             self.env().asm.storeglobal(i);
+                        }
+                        Storage::Local(i) => {
+                            self.env().asm.dup();
+                            self.env().asm.storelocal(i);
                         }
                     },
                 }

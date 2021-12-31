@@ -3,15 +3,18 @@ use std::mem::swap;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 11.
+// Next opcode: 14.
+pub const DUP: u8 = 13;
 pub const FALSE: u8 = 8;
 pub const FLOAT64: u8 = 2;
 pub const LOADGLOBAL: u8 = 9;
+pub const LOADLOCAL: u8 = 11;
 pub const NANBOX: u8 = 6;
 pub const NOP: u8 = 1;
 pub const POP: u8 = 3;
 pub const RET: u8 = 4;
 pub const STOREGLOBAL: u8 = 10;
+pub const STORELOCAL: u8 = 12;
 pub const SYS: u8 = 5;
 pub const TRUE: u8 = 7;
 
@@ -19,8 +22,9 @@ pub const SYS_PRINT: u8 = 1;
 
 pub fn size(op: u8) -> usize {
     match op {
-        FALSE | NANBOX | NOP | POP | RET | TRUE => 1,
+        DUP | FALSE | NANBOX | NOP | POP | RET | TRUE => 1,
         SYS => 2,
+        LOADLOCAL | STORELOCAL => 3,
         LOADGLOBAL | STOREGLOBAL => 5,
         FLOAT64 => 9,
         _ => panic!("unknown opcode"),
@@ -29,14 +33,17 @@ pub fn size(op: u8) -> usize {
 
 pub fn mnemonic(op: u8) -> &'static str {
     match op {
+        DUP => "dup",
         FALSE => "false",
         FLOAT64 => "float64",
         LOADGLOBAL => "loadglobal",
+        LOADLOCAL => "loadlocal",
         NANBOX => "nanbox",
         NOP => "nop",
         POP => "pop",
         RET => "ret",
         STOREGLOBAL => "storeglobal",
+        STORELOCAL => "storelocal",
         SYS => "sys",
         TRUE => "true",
         _ => panic!("unknown opcode"),
@@ -65,6 +72,10 @@ impl Assembler {
         insts
     }
 
+    pub fn dup(&mut self) {
+        self.write_u8(DUP);
+    }
+
     pub fn false_(&mut self) {
         self.write_u8(FALSE);
     }
@@ -77,6 +88,11 @@ impl Assembler {
     pub fn loadglobal(&mut self, index: u32) {
         self.write_u8(LOADGLOBAL);
         self.write_u32(index);
+    }
+
+    pub fn loadlocal(&mut self, index: u16) {
+        self.write_u8(LOADLOCAL);
+        self.write_u16(index);
     }
 
     pub fn nanbox(&mut self) {
@@ -100,6 +116,11 @@ impl Assembler {
         self.write_u32(index);
     }
 
+    pub fn storelocal(&mut self, index: u16) {
+        self.write_u8(STORELOCAL);
+        self.write_u16(index);
+    }
+
     pub fn sys(&mut self, sys: u8) {
         self.write_u8(SYS);
         self.write_u8(sys);
@@ -111,6 +132,12 @@ impl Assembler {
 
     fn write_u8(&mut self, n: u8) {
         self.insts.push(n)
+    }
+
+    fn write_u16(&mut self, n: u16) {
+        for b in n.to_le_bytes() {
+            self.insts.push(b)
+        }
     }
 
     fn write_u32(&mut self, n: u32) {
@@ -132,7 +159,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("  ")?;
         f.write_str(mnemonic(insts[p]))?;
         match insts[p] {
-            FALSE | NANBOX | NOP | POP | RET | TRUE => {
+            DUP | FALSE | NANBOX | NOP | POP | RET | TRUE => {
                 f.write_str("\n")?;
             }
             FLOAT64 => {
@@ -147,6 +174,13 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
                     return Err(fmt::Error);
                 }
                 let n = u32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
+                write!(f, " {}\n", n)?;
+            }
+            LOADLOCAL | STORELOCAL => {
+                if p + 3 > insts.len() {
+                    return Err(fmt::Error);
+                }
+                let n = u16::from_le_bytes(insts[p + 1..p + 3].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
             SYS => {

@@ -24,35 +24,48 @@ pub enum Decl<'a> {
     Var {
         name: Token<'a>,
         init: Option<Expr<'a>>,
+        begin_pos: Pos,
+        end_pos: Pos,
     },
     Function {
         name: Token<'a>,
         param_names: Vec<Token<'a>>,
         body: Block<'a>,
+        begin_pos: Pos,
+        end_pos: Pos,
     },
+    Stmt(Stmt<'a>),
 }
 
 impl<'a> Decl<'a> {
-    pub fn name(&self) -> &Token<'a> {
+    pub fn name(&self) -> Option<Token<'a>> {
         match self {
-            Decl::Var { name, .. } => name,
-            Decl::Function { name, .. } => name,
+            Decl::Var { name, .. } => Some(*name),
+            Decl::Function { name, .. } => Some(*name),
+            Decl::Stmt(_) => None,
         }
     }
 
-    pub fn begin_pos(&self) -> Pos {
-        self.name().from
-    }
-
-    pub fn end_pos(&self) -> Pos {
-        self.name().to
+    pub fn pos(&self) -> (Pos, Pos) {
+        match self {
+            Decl::Var {
+                begin_pos, end_pos, ..
+            } => (*begin_pos, *end_pos),
+            Decl::Function {
+                begin_pos, end_pos, ..
+            } => (*begin_pos, *end_pos),
+            Decl::Stmt(stmt) => stmt.pos(),
+        }
     }
 }
 
-impl<'a> Display for Decl<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<'a> Decl<'a> {
+    fn fmt_indent(&self, f: &mut fmt::Formatter<'_>, level: usize) -> fmt::Result {
+        for _ in 0..level {
+            f.write_str("  ")?;
+        }
         match self {
-            Decl::Var { name, init } => {
+            Decl::Var { name, init, .. } => {
                 f.write_str("var ")?;
                 f.write_str(name.text)?;
                 if let Some(e) = init {
@@ -65,6 +78,7 @@ impl<'a> Display for Decl<'a> {
                 name,
                 param_names,
                 body,
+                ..
             } => {
                 f.write_str("function ")?;
                 f.write_str(name.text)?;
@@ -78,20 +92,32 @@ impl<'a> Display for Decl<'a> {
                 f.write_str(") ")?;
                 body.fmt(f)
             }
+            Decl::Stmt(stmt) => stmt.fmt(f),
         }
     }
 }
 
+impl<'a> Display for Decl<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_indent(f, 0)
+    }
+}
+
 pub struct Block<'a> {
-    pub stmts: Vec<Stmt<'a>>,
+    pub decls: Vec<Decl<'a>>,
+    pub begin_pos: Pos,
+    pub end_pos: Pos,
 }
 
 impl<'a> Block<'a> {
+    fn pos(&self) -> (Pos, Pos) {
+        (self.begin_pos, self.end_pos)
+    }
+
     fn fmt_indent(&self, f: &mut fmt::Formatter<'_>, level: usize) -> fmt::Result {
         f.write_str("{\n")?;
-        for stmt in &self.stmts {
-            stmt.fmt_indent(f, level + 1)?;
-            f.write_str(";\n")?;
+        for decl in &self.decls {
+            decl.fmt_indent(f, level + 1)?;
         }
         for _ in 0..level {
             f.write_str("  ")?;
@@ -108,7 +134,22 @@ impl<'a> Display for Block<'a> {
 
 pub enum Stmt<'a> {
     Expr(Box<Expr<'a>>),
-    Print(Box<Expr<'a>>),
+    Print {
+        expr: Box<Expr<'a>>,
+        begin_pos: Pos,
+        end_pos: Pos,
+    },
+}
+
+impl<'a> Stmt<'a> {
+    fn pos(&self) -> (Pos, Pos) {
+        match self {
+            Stmt::Expr(e) => e.pos(),
+            Stmt::Print {
+                begin_pos, end_pos, ..
+            } => (*begin_pos, *end_pos),
+        }
+    }
 }
 
 impl<'a> Stmt<'a> {
@@ -118,9 +159,9 @@ impl<'a> Stmt<'a> {
         }
         match self {
             Stmt::Expr(e) => e.fmt(f),
-            Stmt::Print(e) => {
+            Stmt::Print { expr, .. } => {
                 f.write_str("print ")?;
-                e.fmt(f)
+                expr.fmt(f)
             }
         }
     }
@@ -139,6 +180,17 @@ pub enum Expr<'a> {
     Assign(LValue<'a>, Box<Expr<'a>>),
 }
 
+impl<'a> Expr<'a> {
+    fn pos(&self) -> (Pos, Pos) {
+        match self {
+            Expr::Bool(t) => (t.from, t.to),
+            Expr::Number(t) => (t.from, t.to),
+            Expr::Var(t) => (t.from, t.to),
+            Expr::Assign(l, r) => (l.pos().0, r.pos().1),
+        }
+    }
+}
+
 impl<'a> Display for Expr<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -152,6 +204,14 @@ impl<'a> Display for Expr<'a> {
 
 pub enum LValue<'a> {
     Var(Token<'a>),
+}
+
+impl<'a> LValue<'a> {
+    fn pos(&self) -> (Pos, Pos) {
+        match self {
+            LValue::Var(t) => (t.from, t.to),
+        }
+    }
 }
 
 impl<'a> Display for LValue<'a> {
@@ -192,41 +252,46 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     fn parse_decl(&mut self) -> Result<Decl<'a>, Error> {
         let type_ = self.peek();
         match type_ {
-            Type::Var => self.parse_var(),
-            Type::Function => self.parse_function(),
-            _ => Err(self.error(format!("expected declaration, found {}", type_))),
+            Type::Var => self.parse_var_decl(),
+            Type::Function => self.parse_function_decl(),
+            _ => self.parse_stmt().map(|stmt| Decl::Stmt(stmt)),
         }
     }
 
-    fn parse_var(&mut self) -> Result<Decl<'a>, Error> {
-        self.expect(Type::Var)?;
+    fn parse_var_decl(&mut self) -> Result<Decl<'a>, Error> {
+        let begin_pos = self.expect(Type::Var)?.from;
         let name = self.expect(Type::Ident)?;
         let type_ = self.peek();
         let init = match type_ {
             Type::Assign => {
                 self.take();
                 let init = self.parse_expr()?;
-                self.expect(Type::Semi)?;
                 Some(init)
             }
-            Type::Semi => {
-                self.take();
-                None
-            }
+            Type::Semi => None,
             _ => return Err(self.error(format!("expected '=' or ';', found {}", type_))),
         };
-        Ok(Decl::Var { name, init })
+        let end_pos = self.expect(Type::Semi)?.to;
+        Ok(Decl::Var {
+            name,
+            init,
+            begin_pos,
+            end_pos,
+        })
     }
 
-    fn parse_function(&mut self) -> Result<Decl<'a>, Error> {
-        self.expect(Type::Function)?;
+    fn parse_function_decl(&mut self) -> Result<Decl<'a>, Error> {
+        let begin_pos = self.expect(Type::Function)?.from;
         let name = self.expect(Type::Ident)?;
         let param_names = self.parse_params()?;
         let body = self.parse_block()?;
+        let end_pos = body.pos().1;
         Ok(Decl::Function {
             name,
             param_names,
             body,
+            begin_pos,
+            end_pos,
         })
     }
 
@@ -247,13 +312,17 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_block(&mut self) -> Result<Block<'a>, Error> {
-        self.expect(Type::LBrace)?;
-        let mut stmts = Vec::new();
+        let begin_pos = self.expect(Type::LBrace)?.from;
+        let mut decls = Vec::new();
         while self.peek() != Type::RBrace {
-            stmts.push(self.parse_stmt()?);
+            decls.push(self.parse_decl()?);
         }
-        self.expect(Type::RBrace)?;
-        Ok(Block { stmts })
+        let end_pos = self.expect(Type::RBrace)?.to;
+        Ok(Block {
+            decls,
+            begin_pos,
+            end_pos,
+        })
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt<'a>, Error> {
@@ -270,10 +339,14 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_print_stmt(&mut self) -> Result<Stmt<'a>, Error> {
-        self.expect(Type::Print)?;
-        let e = self.parse_expr()?;
-        self.expect(Type::Semi)?;
-        Ok(Stmt::Print(Box::new(e)))
+        let begin_pos = self.expect(Type::Print)?.from;
+        let expr = Box::new(self.parse_expr()?);
+        let end_pos = self.expect(Type::Semi)?.to;
+        Ok(Stmt::Print {
+            expr,
+            begin_pos,
+            end_pos,
+        })
     }
 
     fn parse_expr(&mut self) -> Result<Expr<'a>, Error> {

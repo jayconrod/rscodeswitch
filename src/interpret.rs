@@ -34,11 +34,18 @@ impl<'a> Interpreter<'a> {
 
             let mut stack = Stack::new();
             let mut sp = stack.end();
+            let fp = sp;
             let mut ip = &func.insts[0] as *const u8;
             let mut types = Vec::new();
 
             loop {
                 match *ip {
+                    inst::DUP => {
+                        let v = *(sp as *mut u64);
+                        sp -= 8;
+                        *(sp as *mut u64) = v;
+                        types.push(types[types.len() - 1]);
+                    }
                     inst::FALSE => {
                         sp -= 8;
                         *(sp as *mut u64) = 0;
@@ -56,6 +63,13 @@ impl<'a> Interpreter<'a> {
                         sp -= 8;
                         *(sp as *mut u64) = v;
                         types.push(Type::Nanbox)
+                    }
+                    inst::LOADLOCAL => {
+                        let i = *((ip as usize + 1) as *const u16) as usize;
+                        let v = *((fp as usize - (i + 1) * 8) as *const u64);
+                        sp -= 8;
+                        *(sp as *mut u64) = v;
+                        types.push(types[i]);
                     }
                     inst::NANBOX => {
                         match types.pop().unwrap() {
@@ -80,6 +94,13 @@ impl<'a> Interpreter<'a> {
                         sp += 8;
                         types.pop();
                         self.global_slots[i] = v;
+                    }
+                    inst::STORELOCAL => {
+                        let i = *((ip as usize + 1) as *const u16) as usize;
+                        let v = *(sp as *mut u64);
+                        sp += 8;
+                        types.pop();
+                        *((fp as usize - (i + 1) * 8) as *mut u64) = v;
                     }
                     inst::SYS => {
                         let sys = *((ip as usize + 1) as *const u8);
