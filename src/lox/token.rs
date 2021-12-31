@@ -13,6 +13,7 @@ pub enum Type {
     Semi,
     Function,
     Print,
+    Bool,
     Number,
     Ident,
 }
@@ -29,6 +30,7 @@ impl fmt::Display for Type {
             Type::Semi => ";",
             Type::Function => "'function'",
             Type::Print => "'print'",
+            Type::Bool => "bool",
             Type::Number => "number",
             Type::Ident => "identifier",
         };
@@ -112,8 +114,10 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 }
                 let text = unsafe { from_utf8_unchecked(&self.data[self.p..end]) };
                 let type_ = match text {
+                    "false" => Type::Bool,
                     "function" => Type::Function,
                     "print" => Type::Print,
+                    "true" => Type::Bool,
                     _ => Type::Ident,
                 };
                 self.add_token(end, type_);

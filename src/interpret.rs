@@ -1,5 +1,6 @@
 use crate::inst;
-use crate::package::Function;
+use crate::nanbox;
+use crate::package::{Function, Type};
 
 use std::error;
 use std::fmt;
@@ -10,37 +11,76 @@ pub fn interpret(w: &mut dyn Write, func: &Function) -> Result<(), Error> {
         let mut stack = Stack::new();
         let mut sp = stack.end();
         let mut ip = &func.insts[0] as *const u8;
+        let mut types = Vec::new();
 
         loop {
             match *ip {
+                inst::FALSE => {
+                    sp -= 8;
+                    *(sp as *mut u64) = 0;
+                    types.push(Type::Bool);
+                }
                 inst::FLOAT64 => {
                     let n = f64::from_le_bytes(*((ip as usize + 1) as *const [u8; 8]));
                     sp -= 8;
                     *(sp as *mut f64) = n;
+                    types.push(Type::Float64);
+                }
+                inst::NANBOX => {
+                    match types.pop().unwrap() {
+                        Type::Bool => {
+                            let b = *(sp as *mut bool);
+                            let v = nanbox::from_bool(b);
+                            *(sp as *mut u64) = v;
+                        }
+                        Type::Float64 | Type::Nanbox => (),
+                    };
+                    types.push(Type::Nanbox);
                 }
                 inst::NOP => (),
                 inst::POP => {
                     sp += 8;
+                    types.pop();
                 }
                 inst::RET => return Ok(()),
                 inst::SYS => {
                     let sys = *((ip as usize + 1) as *const u8);
                     match sys {
                         inst::SYS_PRINT => {
-                            let n = *(sp as *const f64);
-                            write!(w, "{}", n).map_err(|_| Error {
-                                message: format!("error printing value"),
-                            })?;
+                            let v = *(sp as *mut u64);
                             sp = sp + 8;
+                            sys_print(w, v, types.pop().unwrap())?;
                         }
                         _ => panic!("unknown sys"),
                     }
+                }
+                inst::TRUE => {
+                    sp -= 8;
+                    *(sp as *mut u64) = 1;
+                    types.push(Type::Bool);
                 }
                 _ => panic!("unknown opcode"),
             }
             ip = ((ip as usize) + inst::size(*ip)) as *const u8;
         }
     }
+}
+
+fn sys_print(w: &mut dyn Write, v: u64, type_: Type) -> Result<(), Error> {
+    let r = match type_ {
+        Type::Bool => {
+            write!(w, "{}\n", v != 0)
+        }
+        Type::Float64 => {
+            write!(w, "{}\n", f64::from_bits(v))
+        }
+        Type::Nanbox => {
+            write!(w, "{}\n", nanbox::debug_str(v))
+        }
+    };
+    r.map_err(|_| Error {
+        message: String::from("error printing value"),
+    })
 }
 
 struct Stack {

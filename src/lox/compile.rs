@@ -73,12 +73,29 @@ impl<'a> Compiler<'a> {
 
     fn compile_expr(&mut self, expr: &Expr) -> Result<(), Error> {
         match expr {
+            Expr::Bool(t) => {
+                match t.text {
+                    "true" => {
+                        self.env().asm.true_();
+                    }
+                    "false" => {
+                        self.env().asm.false_();
+                    }
+                    _ => {
+                        return Err(Error {
+                            position: self.lmap.position(t.from, t.to),
+                            message: format!("not a real bool: '{}'", t.text),
+                        })
+                    }
+                };
+            }
             Expr::Number(t) => {
                 let n = t.text.parse().map_err(|_| Error {
                     position: self.lmap.position(t.from, t.to),
                     message: format!("could not express '{}' as 64-bit floating point", t.text),
                 })?;
                 self.env().asm.float64(n);
+                self.env().asm.nanbox();
             }
         }
         Ok(())

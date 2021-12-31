@@ -35,3 +35,9 @@ impl fmt::Display for Function {
         f.write_str("}}")
     }
 }
+
+pub enum Type {
+    Bool,
+    Float64,
+    Nanbox,
+}

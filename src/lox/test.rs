@@ -24,7 +24,7 @@ fn interpret_test() {
 
     let mut got = Vec::new();
     interpret(&mut got, f).unwrap();
-    let got_str = str::from_utf8(&got).unwrap();
+    let got_str = str::from_utf8(&got).unwrap().trim();
     let want_str = expected_output(str::from_utf8(&data).unwrap());
     assert_eq!(got_str, want_str);
   }

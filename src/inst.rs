@@ -1,17 +1,23 @@
 use std::fmt;
 use std::mem::swap;
 
+// List of instructions.
+// Keep sorted by name.
+// Next opcode: 9.
+pub const FALSE: u8 = 8;
 pub const FLOAT64: u8 = 2;
+pub const NANBOX: u8 = 6;
 pub const NOP: u8 = 1;
 pub const POP: u8 = 3;
 pub const RET: u8 = 4;
 pub const SYS: u8 = 5;
+pub const TRUE: u8 = 7;
 
 pub const SYS_PRINT: u8 = 1;
 
 pub fn size(op: u8) -> usize {
     match op {
-        NOP | POP | RET => 1,
+        FALSE | NANBOX | NOP | POP | RET | TRUE => 1,
         SYS => 2,
         FLOAT64 => 9,
         _ => panic!("unknown opcode"),
@@ -20,11 +26,14 @@ pub fn size(op: u8) -> usize {
 
 pub fn mnemonic(op: u8) -> &'static str {
     match op {
+        FALSE => "false",
         FLOAT64 => "float64",
+        NANBOX => "nanbox",
         NOP => "nop",
         POP => "pop",
         RET => "ret",
         SYS => "sys",
+        TRUE => "true",
         _ => panic!("unknown opcode"),
     }
 }
@@ -51,9 +60,17 @@ impl Assembler {
         insts
     }
 
+    pub fn false_(&mut self) {
+        self.write_u8(FALSE);
+    }
+
     pub fn float64(&mut self, n: f64) {
         self.write_u8(FLOAT64);
         self.write_f64(n);
+    }
+
+    pub fn nanbox(&mut self) {
+        self.write_u8(NANBOX);
     }
 
     pub fn nop(&mut self) {
@@ -73,6 +90,10 @@ impl Assembler {
         self.write_u8(sys);
     }
 
+    pub fn true_(&mut self) {
+        self.write_u8(TRUE);
+    }
+
     fn write_u8(&mut self, n: u8) {
         self.insts.push(n)
     }
@@ -90,7 +111,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("  ")?;
         f.write_str(mnemonic(insts[p]))?;
         match insts[p] {
-            NOP | POP | RET => {
+            FALSE | NANBOX | NOP | POP | RET | TRUE => {
                 f.write_str("\n")?;
             }
             FLOAT64 => {

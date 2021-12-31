@@ -103,13 +103,15 @@ impl<'a> Display for Stmt<'a> {
 }
 
 pub enum Expr<'a> {
+    Bool(Token<'a>),
     Number(Token<'a>),
 }
 
 impl<'a> Display for Expr<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::Number(n) => f.write_str(n.text),
+            Expr::Bool(t) => f.write_str(t.text),
+            Expr::Number(t) => f.write_str(t.text),
         }
     }
 }
@@ -210,6 +212,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     fn parse_expr(&mut self) -> Result<Expr<'a>, Error> {
         let type_ = self.peek();
         match type_ {
+            Type::Bool => Ok(Expr::Bool(self.take())),
             Type::Number => Ok(Expr::Number(self.take())),
             _ => Err(self.error(format!("expected expression, found {}", type_))),
         }
