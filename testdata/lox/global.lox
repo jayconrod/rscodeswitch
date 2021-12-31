@@ -1,0 +1,7 @@
+function main() {
+  print g; // Output: 12
+  g = 34;
+  print g; // Output: 34
+}
+
+var g = 12;

@@ -11,8 +11,10 @@ pub enum Type {
     RBrace,
     Comma,
     Semi,
+    Assign,
     Function,
     Print,
+    Var,
     Bool,
     Number,
     Ident,
@@ -28,8 +30,10 @@ impl fmt::Display for Type {
             Type::RBrace => "}",
             Type::Comma => ",",
             Type::Semi => ";",
+            Type::Assign => "=",
             Type::Function => "'function'",
             Type::Print => "'print'",
+            Type::Var => "'var'",
             Type::Bool => "bool",
             Type::Number => "number",
             Type::Ident => "identifier",
@@ -97,6 +101,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 b'}' => Type::RBrace,
                 b',' => Type::Comma,
                 b';' => Type::Semi,
+                b'=' => Type::Assign,
                 _ => Type::EOF,
             };
             if let Type::EOF = type_ {
@@ -118,6 +123,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
                     "function" => Type::Function,
                     "print" => Type::Print,
                     "true" => Type::Bool,
+                    "var" => Type::Var,
                     _ => Type::Ident,
                 };
                 self.add_token(end, type_);

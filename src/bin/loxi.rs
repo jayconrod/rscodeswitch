@@ -1,4 +1,4 @@
-use codeswitch::interpret::interpret;
+use codeswitch::interpret::Interpreter;
 use codeswitch::lox::compile;
 use codeswitch::lox::syntax;
 use codeswitch::lox::token;
@@ -32,10 +32,11 @@ fn run(args: &[String]) -> Result<(), String> {
         let tokens = token::lex(&filename, &data, &mut lmap).map_err(err_to_string)?;
         let ast = syntax::parse(&tokens, &lmap).map_err(err_to_string)?;
         let pkg = compile::compile(&ast, &lmap).map_err(err_to_string)?;
-        let f = pkg
-            .function_by_name("main")
-            .ok_or(String::from("main function not found"))?;
-        interpret(&mut stdout(), f).map_err(err_to_string)?;
+
+        let mut w = stdout();
+        let mut interp = Interpreter::new(&mut w, pkg);
+        interp.interpret("init").map_err(err_to_string)?;
+        interp.interpret("main").map_err(err_to_string)?;
     }
     Ok(())
 }

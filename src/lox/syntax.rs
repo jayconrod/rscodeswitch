@@ -1,5 +1,5 @@
 use crate::lox::token::{Token, Type};
-use crate::pos::{Error, LineMap};
+use crate::pos::{Error, LineMap, Pos};
 use std::boxed::Box;
 use std::fmt;
 use std::fmt::Display;
@@ -21,6 +21,10 @@ impl<'a> Display for File<'a> {
 }
 
 pub enum Decl<'a> {
+    Var {
+        name: Token<'a>,
+        init: Option<Expr<'a>>,
+    },
     Function {
         name: Token<'a>,
         param_names: Vec<Token<'a>>,
@@ -28,9 +32,35 @@ pub enum Decl<'a> {
     },
 }
 
+impl<'a> Decl<'a> {
+    pub fn name(&self) -> &Token<'a> {
+        match self {
+            Decl::Var { name, .. } => name,
+            Decl::Function { name, .. } => name,
+        }
+    }
+
+    pub fn begin_pos(&self) -> Pos {
+        self.name().from
+    }
+
+    pub fn end_pos(&self) -> Pos {
+        self.name().to
+    }
+}
+
 impl<'a> Display for Decl<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Decl::Var { name, init } => {
+                f.write_str("var ")?;
+                f.write_str(name.text)?;
+                if let Some(e) = init {
+                    f.write_str(" = ")?;
+                    e.fmt(f)?;
+                }
+                f.write_str(";")
+            }
             Decl::Function {
                 name,
                 param_names,
@@ -105,6 +135,8 @@ impl<'a> Display for Stmt<'a> {
 pub enum Expr<'a> {
     Bool(Token<'a>),
     Number(Token<'a>),
+    Var(Token<'a>),
+    Assign(LValue<'a>, Box<Expr<'a>>),
 }
 
 impl<'a> Display for Expr<'a> {
@@ -112,6 +144,20 @@ impl<'a> Display for Expr<'a> {
         match self {
             Expr::Bool(t) => f.write_str(t.text),
             Expr::Number(t) => f.write_str(t.text),
+            Expr::Var(t) => f.write_str(t.text),
+            Expr::Assign(l, r) => write!(f, "{} = {}", l, r),
+        }
+    }
+}
+
+pub enum LValue<'a> {
+    Var(Token<'a>),
+}
+
+impl<'a> Display for LValue<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LValue::Var(t) => f.write_str(t.text),
         }
     }
 }
@@ -119,7 +165,7 @@ impl<'a> Display for Expr<'a> {
 pub fn parse<'a>(tokens: &[Token<'a>], lmap: &LineMap) -> Result<File<'a>, Error> {
     let mut p = Parser {
         tokens: tokens,
-        tset: lmap,
+        lmap: lmap,
         next: 0,
     };
     p.parse_file()
@@ -127,7 +173,7 @@ pub fn parse<'a>(tokens: &[Token<'a>], lmap: &LineMap) -> Result<File<'a>, Error
 
 struct Parser<'a, 'b, 'c> {
     tokens: &'b [Token<'a>],
-    tset: &'c LineMap,
+    lmap: &'c LineMap,
     next: usize,
 }
 
@@ -146,9 +192,30 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     fn parse_decl(&mut self) -> Result<Decl<'a>, Error> {
         let type_ = self.peek();
         match type_ {
+            Type::Var => self.parse_var(),
             Type::Function => self.parse_function(),
             _ => Err(self.error(format!("expected declaration, found {}", type_))),
         }
+    }
+
+    fn parse_var(&mut self) -> Result<Decl<'a>, Error> {
+        self.expect(Type::Var)?;
+        let name = self.expect(Type::Ident)?;
+        let type_ = self.peek();
+        let init = match type_ {
+            Type::Assign => {
+                self.take();
+                let init = self.parse_expr()?;
+                self.expect(Type::Semi)?;
+                Some(init)
+            }
+            Type::Semi => {
+                self.take();
+                None
+            }
+            _ => return Err(self.error(format!("expected '=' or ';', found {}", type_))),
+        };
+        Ok(Decl::Var { name, init })
     }
 
     fn parse_function(&mut self) -> Result<Decl<'a>, Error> {
@@ -210,11 +277,74 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr<'a>, Error> {
-        let type_ = self.peek();
+        self.parse_precedence(Precedence::Assignment)
+    }
+
+    fn parse_precedence(&mut self, prec: Precedence) -> Result<Expr<'a>, Error> {
+        let can_assign = prec <= Precedence::Assignment;
+        let t = self.tokens[self.next];
+        let rule = self.get_rule(t.type_);
+        let mut e = match rule.prefix {
+            Some(prefix) => prefix(self, can_assign),
+            None => Err(self.error(format!("expected expression, found {}", t.type_))),
+        }?;
+
+        loop {
+            let rule = self.get_rule(self.peek());
+            if prec > rule.precedence {
+                break;
+            }
+            e = rule.infix.unwrap()(self, e, can_assign)?;
+        }
+        if can_assign && self.peek() == Type::Assign {
+            return Err(self.error(format!("invalid assignment")));
+        }
+
+        Ok(e)
+    }
+
+    fn parse_var_expr(&mut self, can_assign: bool) -> Result<Expr<'a>, Error> {
+        let t = self.expect(Type::Ident)?;
+        if can_assign && self.peek() == Type::Assign {
+            let l = LValue::Var(t);
+            self.take();
+            let r = self.parse_expr()?;
+            Ok(Expr::Assign(l, Box::new(r)))
+        } else {
+            Ok(Expr::Var(t))
+        }
+    }
+
+    fn parse_bool_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
+        Ok(Expr::Bool(self.expect(Type::Bool)?))
+    }
+
+    fn parse_num_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
+        Ok(Expr::Number(self.expect(Type::Number)?))
+    }
+
+    fn get_rule<'d>(&self, type_: Type) -> ParseRule<'a, 'b, 'c, 'd> {
         match type_ {
-            Type::Bool => Ok(Expr::Bool(self.take())),
-            Type::Number => Ok(Expr::Number(self.take())),
-            _ => Err(self.error(format!("expected expression, found {}", type_))),
+            Type::Bool => ParseRule {
+                prefix: Some(&Parser::parse_bool_expr),
+                infix: None,
+                precedence: Precedence::None,
+            },
+            Type::Number => ParseRule {
+                prefix: Some(&Parser::parse_num_expr),
+                infix: None,
+                precedence: Precedence::None,
+            },
+            Type::Ident => ParseRule {
+                prefix: Some(&Parser::parse_var_expr),
+                infix: None,
+                precedence: Precedence::None,
+            },
+            _ => ParseRule {
+                prefix: None,
+                infix: None,
+                precedence: Precedence::None,
+            },
         }
     }
 
@@ -239,7 +369,21 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
 
     fn error(&self, message: String) -> Error {
         let t = &self.tokens[self.next];
-        let position = self.tset.position(t.from, t.to);
+        let position = self.lmap.position(t.from, t.to);
         Error { position, message }
     }
+}
+
+#[derive(Clone, Copy)]
+struct ParseRule<'a, 'b, 'c, 'd> {
+    prefix: Option<&'d dyn Fn(&'d mut Parser<'a, 'b, 'c>, bool) -> Result<Expr<'a>, Error>>,
+    infix:
+        Option<&'d dyn Fn(&'d mut Parser<'a, 'b, 'c>, Expr<'a>, bool) -> Result<Expr<'a>, Error>>,
+    precedence: Precedence,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+enum Precedence {
+    None,
+    Assignment,
 }

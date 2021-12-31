@@ -1,33 +1,42 @@
-use crate::interpret::interpret;
+use crate::interpret::Interpreter;
 use crate::lox::compile;
 use crate::lox::syntax;
 use crate::lox::token;
 use crate::pos::LineMap;
 
+use std::fmt;
 use std::fs;
 use std::str;
 
 #[test]
-fn interpret_test() {
-  for fi in fs::read_dir("testdata/lox").unwrap() {
-    let path = String::from(fi.unwrap().path().to_str().unwrap());
-    if !path.ends_with(".lox") {
-      continue;
-    }
+fn interpret_test() -> Result<(), String> {
+  fn err_to_string<T: fmt::Display>(err: T) -> String {
+    format!("{}", err)
+  }
+
+  for fi in fs::read_dir("testdata/lox").map_err(err_to_string)? {
+    let fi = fi.map_err(err_to_string)?;
+    let path_buf = fi.path();
+    let path = match path_buf.to_str() {
+      Some(path) if path.ends_with(".lox") => path,
+      _ => continue,
+    };
 
     let mut lmap = LineMap::new();
-    let data = fs::read(&path).unwrap();
-    let tokens = token::lex(&path, &data, &mut lmap).unwrap();
-    let ast = syntax::parse(&tokens, &lmap).unwrap();
-    let pkg = compile::compile(&ast, &lmap).unwrap();
-    let f = pkg.function_by_name("main").unwrap();
+    let data = fs::read(&path).map_err(err_to_string)?;
+    let tokens = token::lex(&path, &data, &mut lmap).map_err(err_to_string)?;
+    let ast = syntax::parse(&tokens, &lmap).map_err(err_to_string)?;
+    let pkg = compile::compile(&ast, &lmap).map_err(err_to_string)?;
 
     let mut got = Vec::new();
-    interpret(&mut got, f).unwrap();
-    let got_str = str::from_utf8(&got).unwrap().trim();
-    let want_str = expected_output(str::from_utf8(&data).unwrap());
+    let mut interp = Interpreter::new(&mut got, pkg);
+    interp.interpret("init").map_err(err_to_string)?;
+    interp.interpret("main").map_err(err_to_string)?;
+    let got_str = str::from_utf8(&got).map_err(err_to_string)?.trim();
+    let want_str = expected_output(str::from_utf8(&data).map_err(err_to_string)?);
     assert_eq!(got_str, want_str);
   }
+  Ok(())
 }
 
 fn expected_output(mut data: &str) -> String {
