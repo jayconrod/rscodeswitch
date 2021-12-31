@@ -7,6 +7,7 @@ use codeswitch::pos::LineMap;
 use std::env;
 use std::fmt;
 use std::fs;
+use std::io::stdout;
 use std::process;
 
 fn main() {
@@ -34,7 +35,7 @@ fn run(args: &[String]) -> Result<(), String> {
         let f = pkg
             .function_by_name("main")
             .ok_or(String::from("main function not found"))?;
-        interpret(f)
+        interpret(&mut stdout(), f).map_err(err_to_string)?;
     }
     Ok(())
 }

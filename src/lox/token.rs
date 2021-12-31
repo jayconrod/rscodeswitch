@@ -76,7 +76,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
 
     fn lex(&mut self) -> Result<(), Error> {
         while self.p < self.data.len() {
-            // Skip whitespace.
+            // Skip whitespace and comments.
             let b = self.data[self.p];
             if b == b' ' || b == b'\t' {
                 self.p += 1;
@@ -105,6 +105,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
 
             // Everything else.
             if self.is_ident_first(b) {
+                // Identifier.
                 let mut end = self.p + 1;
                 while end < self.data.len() && self.is_ident(self.data[end]) {
                     end += 1;
@@ -118,7 +119,9 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 self.add_token(end, type_);
                 continue;
             }
+
             if b.is_ascii_digit() {
+                // Number.
                 let mut end = self.p + 1;
                 while end < self.data.len() && self.data[end].is_ascii_digit() {
                     end += 1;
@@ -131,6 +134,17 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 continue;
             }
 
+            if b == b'/' && self.p + 1 < self.data.len() && self.data[self.p + 1] == b'/' {
+                // Comment.
+                let mut end = self.p + 2;
+                while end < self.data.len() && self.data[end] != b'\n' {
+                    end += 1;
+                }
+                self.p = end;
+                continue;
+            }
+
+            // Unrecognized character or non-UTF-8 byte.
             if b.is_ascii() {
                 return self.error(format!("unexpected character: '{}'", b));
             } else {
