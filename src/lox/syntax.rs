@@ -134,6 +134,7 @@ impl<'a> Display for Block<'a> {
 
 pub enum Stmt<'a> {
     Expr(Box<Expr<'a>>),
+    Block(Box<Block<'a>>),
     Print {
         expr: Box<Expr<'a>>,
         begin_pos: Pos,
@@ -145,6 +146,7 @@ impl<'a> Stmt<'a> {
     fn pos(&self) -> (Pos, Pos) {
         match self {
             Stmt::Expr(e) => e.pos(),
+            Stmt::Block(b) => b.pos(),
             Stmt::Print {
                 begin_pos, end_pos, ..
             } => (*begin_pos, *end_pos),
@@ -159,6 +161,7 @@ impl<'a> Stmt<'a> {
         }
         match self {
             Stmt::Expr(e) => e.fmt(f),
+            Stmt::Block(b) => b.fmt_indent(f, level),
             Stmt::Print { expr, .. } => {
                 f.write_str("print ")?;
                 expr.fmt(f)
@@ -328,6 +331,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     fn parse_stmt(&mut self) -> Result<Stmt<'a>, Error> {
         match self.peek() {
             Type::Print => self.parse_print_stmt(),
+            Type::LBrace => Ok(Stmt::Block(Box::new(self.parse_block()?))),
             _ => self.parse_expr_stmt(),
         }
     }

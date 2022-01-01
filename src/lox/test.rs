@@ -21,6 +21,9 @@ fn interpret_test() -> Result<(), String> {
       Some(path) if path.ends_with(".lox") => path,
       _ => continue,
     };
+    if path != "testdata/lox/local.lox" {
+      continue;
+    }
 
     let mut lmap = LineMap::new();
     let data = fs::read(&path).map_err(err_to_string)?;

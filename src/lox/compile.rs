@@ -47,6 +47,7 @@ impl<'a> Env<'a> {
 enum EnvKind {
     Global,
     Function,
+    Block,
 }
 
 struct ScopeEntry {
@@ -73,10 +74,10 @@ impl<'a> Compiler<'a> {
     }
 
     fn finish(&mut self) -> Box<Package> {
-        self.env().asm.ret();
+        self.asm().ret();
         let init = Function {
             name: String::from("init"),
-            insts: self.env().asm.finish(),
+            insts: self.asm().finish(),
             package: 0 as *mut Package,
         };
         self.functions.push(init);
@@ -113,7 +114,7 @@ impl<'a> Compiler<'a> {
         let (def_begin_pos, def_end_pos) = decl.pos();
         let storage = match self.env().kind {
             EnvKind::Global => Storage::Global(self.env().next),
-            EnvKind::Function => {
+            EnvKind::Function | EnvKind::Block => {
                 let i = u16::try_from(self.env().next).map_err(|_| Error {
                     position: self.lmap.position(name.from, name.to),
                     message: format!("too many local variables"),
@@ -152,7 +153,7 @@ impl<'a> Compiler<'a> {
                 ent.defined = true;
                 match ent.storage {
                     Storage::Global(i) => {
-                        self.env().asm.storeglobal(i);
+                        self.asm().storeglobal(i);
                         self.globals.push(Global {
                             name: String::from(name.text),
                         });
@@ -169,7 +170,7 @@ impl<'a> Compiler<'a> {
                 for decl in &body.decls {
                     self.compile_decl(decl)?;
                 }
-                self.env().asm.ret();
+                self.asm().ret();
 
                 let mut env = self.env_stack.pop().unwrap();
                 let f = Function {
@@ -188,11 +189,24 @@ impl<'a> Compiler<'a> {
         match stmt {
             Stmt::Expr(e) => {
                 self.compile_expr(e)?;
-                self.env().asm.pop();
+                self.asm().pop();
+            }
+            Stmt::Block(b) => {
+                let next = self.env().next;
+                self.env_stack.push(Env::new(EnvKind::Block));
+                self.env().next = next;
+                for decl in &b.decls {
+                    self.compile_decl(decl)?;
+                }
+                let delta = self.env().next - next;
+                self.env_stack.pop();
+                for _ in 0..delta {
+                    self.asm().pop();
+                }
             }
             Stmt::Print { expr, .. } => {
                 self.compile_expr(expr)?;
-                self.env().asm.sys(inst::SYS_PRINT);
+                self.asm().sys(inst::SYS_PRINT);
             }
         }
         Ok(())
@@ -203,10 +217,10 @@ impl<'a> Compiler<'a> {
             Expr::Bool(t) => {
                 match t.text {
                     "true" => {
-                        self.env().asm.true_();
+                        self.asm().true_();
                     }
                     "false" => {
-                        self.env().asm.false_();
+                        self.asm().false_();
                     }
                     _ => {
                         return Err(Error {
@@ -221,15 +235,15 @@ impl<'a> Compiler<'a> {
                     position: self.lmap.position(t.from, t.to),
                     message: format!("could not express '{}' as 64-bit floating point", t.text),
                 })?;
-                self.env().asm.float64(n);
-                self.env().asm.nanbox();
+                self.asm().float64(n);
+                self.asm().nanbox();
             }
             Expr::Var(t) => match self.resolve(t)? {
                 Storage::Global(i) => {
-                    self.env().asm.loadglobal(i);
+                    self.asm().loadglobal(i);
                 }
                 Storage::Local(i) => {
-                    self.env().asm.loadlocal(i);
+                    self.asm().loadlocal(i);
                 }
             },
             Expr::Assign(l, r) => {
@@ -237,12 +251,12 @@ impl<'a> Compiler<'a> {
                 match l {
                     LValue::Var(t) => match self.resolve(t)? {
                         Storage::Global(i) => {
-                            self.env().asm.dup();
-                            self.env().asm.storeglobal(i);
+                            self.asm().dup();
+                            self.asm().storeglobal(i);
                         }
                         Storage::Local(i) => {
-                            self.env().asm.dup();
-                            self.env().asm.storelocal(i);
+                            self.asm().dup();
+                            self.asm().storelocal(i);
                         }
                     },
                 }
@@ -253,6 +267,17 @@ impl<'a> Compiler<'a> {
 
     fn env(&mut self) -> &mut Env<'a> {
         self.env_stack.last_mut().unwrap()
+    }
+
+    fn asm(&mut self) -> &mut Assembler {
+        let mut i = self.env_stack.len() - 1;
+        loop {
+            if self.env_stack[i].kind != EnvKind::Block {
+                return &mut self.env_stack[i].asm;
+            }
+            assert!(i > 0);
+            i -= 1;
+        }
     }
 
     fn resolve(&mut self, t: &Token<'a>) -> Result<Storage, Error> {

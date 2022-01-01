@@ -3,4 +3,13 @@ function main() {
   print a; // Output: 12
   a = 34;
   print a; // Output: 34
+
+  {
+    print a; // Output: 34
+    var a = 56;
+    print a; // Output: 56
+    a = 78;
+    print a; // Output: 78
+  }
+  print a; // Output: 34
 }
