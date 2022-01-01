@@ -12,6 +12,17 @@ pub enum Type {
     Comma,
     Semi,
     Assign,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Bang,
     Function,
     Print,
     Var,
@@ -31,6 +42,17 @@ impl fmt::Display for Type {
             Type::Comma => ",",
             Type::Semi => ";",
             Type::Assign => "=",
+            Type::Eq => "==",
+            Type::Ne => "!=",
+            Type::Lt => "<",
+            Type::Le => "<=",
+            Type::Gt => ">",
+            Type::Ge => ">=",
+            Type::Plus => "+",
+            Type::Minus => "-",
+            Type::Star => "*",
+            Type::Slash => "/",
+            Type::Bang => "!",
             Type::Function => "'function'",
             Type::Print => "'print'",
             Type::Var => "'var'",
@@ -82,8 +104,14 @@ impl<'a, 'b> Lexer<'a, 'b> {
 
     fn lex(&mut self) -> Result<(), Error> {
         while self.p < self.data.len() {
-            // Skip whitespace and comments.
             let b = self.data[self.p];
+            let bnext = if self.p + 1 < self.data.len() {
+                self.data[self.p + 1]
+            } else {
+                0
+            };
+
+            // Skip whitespace and comments.
             if b == b' ' || b == b'\t' {
                 self.p += 1;
                 continue;
@@ -91,9 +119,16 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 self.tset.add_line(self.p);
                 self.p += 1;
                 continue;
+            } else if b == b'/' && bnext == b'/' {
+                let mut end = self.p + 2;
+                while end < self.data.len() && self.data[end] != b'\n' {
+                    end += 1;
+                }
+                self.p = end;
+                continue;
             }
 
-            // Single-character tokens.
+            // One-character tokens.
             let type_ = match b {
                 b'(' => Type::LParen,
                 b')' => Type::RParen,
@@ -101,18 +136,37 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 b'}' => Type::RBrace,
                 b',' => Type::Comma,
                 b';' => Type::Semi,
-                b'=' => Type::Assign,
+                b'=' if bnext != b'=' => Type::Assign,
+                b'<' if bnext != b'=' => Type::Lt,
+                b'>' if bnext != b'=' => Type::Gt,
+                b'+' => Type::Plus,
+                b'-' => Type::Minus,
+                b'*' => Type::Star,
+                b'/' => Type::Slash,
+                b'!' if bnext != b'=' => Type::Bang,
                 _ => Type::EOF,
             };
-            if let Type::EOF = type_ {
-            } else {
+            if type_ != Type::EOF {
                 self.add_token(self.p + 1, type_);
+                continue;
+            }
+
+            // Two-character tokens.
+            let type_ = match (b, bnext) {
+                (b'=', b'=') => Type::Eq,
+                (b'<', b'=') => Type::Le,
+                (b'>', b'=') => Type::Ge,
+                (b'!', b'=') => Type::Ne,
+                _ => Type::EOF,
+            };
+            if type_ != Type::EOF {
+                self.add_token(self.p + 2, type_);
                 continue;
             }
 
             // Everything else.
             if self.is_ident_first(b) {
-                // Identifier.
+                // Identifier or keyword.
                 let mut end = self.p + 1;
                 while end < self.data.len() && self.is_ident(self.data[end]) {
                     end += 1;
@@ -141,16 +195,6 @@ impl<'a, 'b> Lexer<'a, 'b> {
                     return self.error_end(end, format!("could not parse number: {}", text));
                 }
                 self.add_token(end, Type::Number);
-                continue;
-            }
-
-            if b == b'/' && self.p + 1 < self.data.len() && self.data[self.p + 1] == b'/' {
-                // Comment.
-                let mut end = self.p + 2;
-                while end < self.data.len() && self.data[end] != b'\n' {
-                    end += 1;
-                }
-                self.p = end;
                 continue;
             }
 

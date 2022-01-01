@@ -12,7 +12,7 @@ pub fn from_bool(b: bool) -> u64 {
 
 pub fn to_bool(v: u64) -> Option<bool> {
   if v & (QNAN | TAG_MASK) == QNAN | TAG_BOOL {
-    Some(v & VALUE_MASK != 0)
+    Some(v & VALUE_MASK & !TAG_MASK != 0)
   } else {
     None
   }

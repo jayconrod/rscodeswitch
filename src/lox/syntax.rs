@@ -180,6 +180,13 @@ pub enum Expr<'a> {
     Bool(Token<'a>),
     Number(Token<'a>),
     Var(Token<'a>),
+    Group {
+        expr: Box<Expr<'a>>,
+        begin_pos: Pos,
+        end_pos: Pos,
+    },
+    Unary(Token<'a>, Box<Expr<'a>>),
+    Binary(Box<Expr<'a>>, Token<'a>, Box<Expr<'a>>),
     Assign(LValue<'a>, Box<Expr<'a>>),
 }
 
@@ -189,6 +196,11 @@ impl<'a> Expr<'a> {
             Expr::Bool(t) => (t.from, t.to),
             Expr::Number(t) => (t.from, t.to),
             Expr::Var(t) => (t.from, t.to),
+            Expr::Group {
+                begin_pos, end_pos, ..
+            } => (*begin_pos, *end_pos),
+            Expr::Unary(op, e) => (op.from, e.pos().1),
+            Expr::Binary(l, _, r) => (l.pos().0, r.pos().0),
             Expr::Assign(l, r) => (l.pos().0, r.pos().1),
         }
     }
@@ -200,6 +212,9 @@ impl<'a> Display for Expr<'a> {
             Expr::Bool(t) => f.write_str(t.text),
             Expr::Number(t) => f.write_str(t.text),
             Expr::Var(t) => f.write_str(t.text),
+            Expr::Group { expr, .. } => write!(f, "({})", expr),
+            Expr::Unary(op, e) => write!(f, "{}{}", op.text, e),
+            Expr::Binary(l, op, r) => write!(f, "{} {} {}", l, op.text, r),
             Expr::Assign(l, r) => write!(f, "{} = {}", l, r),
         }
     }
@@ -380,6 +395,41 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         Ok(e)
     }
 
+    fn parse_group_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
+        let begin_pos = self.expect(Type::LParen)?.from;
+        let expr = Box::new(self.parse_expr()?);
+        let end_pos = self.expect(Type::RParen)?.to;
+        Ok(Expr::Group {
+            expr,
+            begin_pos,
+            end_pos,
+        })
+    }
+
+    fn parse_unary_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
+        let op = self.tokens[self.next];
+        match op.type_ {
+            Type::Minus | Type::Bang => (),
+            _ => return Err(self.error(format!("expected expression, found {}", op.type_))),
+        };
+        self.take();
+        let e = Box::new(self.parse_precedence(Precedence::Unary)?);
+        Ok(Expr::Unary(op, e))
+    }
+
+    fn parse_binary_expr(&mut self, l: Expr<'a>, _: bool) -> Result<Expr<'a>, Error> {
+        let rule = self.get_rule(self.peek());
+        if rule.precedence == Precedence::None {
+            return Err(self.error(format!(
+                "expected binary operator, '.', or '(', but found {}",
+                self.peek()
+            )));
+        }
+        let op = self.take();
+        let r = self.parse_precedence(rule.precedence.next())?;
+        Ok(Expr::Binary(Box::new(l), op, Box::new(r)))
+    }
+
     fn parse_var_expr(&mut self, can_assign: bool) -> Result<Expr<'a>, Error> {
         let t = self.expect(Type::Ident)?;
         if can_assign && self.peek() == Type::Assign {
@@ -402,6 +452,41 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
 
     fn get_rule<'d>(&self, type_: Type) -> ParseRule<'a, 'b, 'c, 'd> {
         match type_ {
+            Type::LParen => ParseRule {
+                prefix: Some(&Parser::parse_group_expr),
+                infix: None,
+                precedence: Precedence::None,
+            },
+            Type::Eq | Type::Ne => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binary_expr),
+                precedence: Precedence::Equality,
+            },
+            Type::Lt | Type::Le | Type::Gt | Type::Ge => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binary_expr),
+                precedence: Precedence::Comparison,
+            },
+            Type::Plus => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binary_expr),
+                precedence: Precedence::Term,
+            },
+            Type::Minus => ParseRule {
+                prefix: Some(&Parser::parse_unary_expr),
+                infix: Some(&Parser::parse_binary_expr),
+                precedence: Precedence::Term,
+            },
+            Type::Star | Type::Slash => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binary_expr),
+                precedence: Precedence::Factor,
+            },
+            Type::Bang => ParseRule {
+                prefix: Some(&Parser::parse_unary_expr),
+                infix: None,
+                precedence: Precedence::None,
+            },
             Type::Bool => ParseRule {
                 prefix: Some(&Parser::parse_bool_expr),
                 infix: None,
@@ -463,4 +548,29 @@ struct ParseRule<'a, 'b, 'c, 'd> {
 enum Precedence {
     None,
     Assignment,
+    _Or,
+    _And,
+    Equality,
+    Comparison,
+    Term,
+    Factor,
+    Unary,
+    Call,
+    Primary,
+}
+
+impl Precedence {
+    fn next(self) -> Precedence {
+        match self {
+            Precedence::_Or => Precedence::_And,
+            Precedence::_And => Precedence::Equality,
+            Precedence::Equality => Precedence::Comparison,
+            Precedence::Comparison => Precedence::Term,
+            Precedence::Term => Precedence::Factor,
+            Precedence::Factor => Precedence::Unary,
+            Precedence::Unary => Precedence::Call,
+            Precedence::Call => Precedence::Primary,
+            _ => unreachable!(),
+        }
+    }
 }

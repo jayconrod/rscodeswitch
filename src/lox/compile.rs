@@ -1,7 +1,7 @@
 use crate::inst;
 use crate::inst::Assembler;
 use crate::lox::syntax::{Decl, Expr, File, LValue, Stmt};
-use crate::lox::token::Token;
+use crate::lox::token::{Token, Type};
 use crate::package::{Function, Global, Package};
 use crate::pos::{Error, LineMap, Pos};
 use std::collections::HashMap;
@@ -218,9 +218,11 @@ impl<'a> Compiler<'a> {
                 match t.text {
                     "true" => {
                         self.asm().true_();
+                        self.asm().nanbox();
                     }
                     "false" => {
                         self.asm().false_();
+                        self.asm().nanbox();
                     }
                     _ => {
                         return Err(Error {
@@ -246,6 +248,44 @@ impl<'a> Compiler<'a> {
                     self.asm().loadlocal(i);
                 }
             },
+            Expr::Group { expr, .. } => {
+                self.compile_expr(expr)?;
+            }
+            Expr::Unary(op, e) => {
+                self.compile_expr(e)?;
+                match op.type_ {
+                    Type::Minus => self.asm().neg(),
+                    Type::Bang => self.asm().not(),
+                    _ => {
+                        return Err(Error {
+                            position: self.lmap.position(op.from, op.to),
+                            message: format!("unknown unary operator {}", op.text),
+                        })
+                    }
+                }
+            }
+            Expr::Binary(l, op, r) => {
+                self.compile_expr(l)?;
+                self.compile_expr(r)?;
+                match op.type_ {
+                    Type::Eq => self.asm().eq(),
+                    Type::Ne => self.asm().ne(),
+                    Type::Lt => self.asm().lt(),
+                    Type::Le => self.asm().le(),
+                    Type::Gt => self.asm().gt(),
+                    Type::Ge => self.asm().ge(),
+                    Type::Plus => self.asm().add(),
+                    Type::Minus => self.asm().sub(),
+                    Type::Star => self.asm().mul(),
+                    Type::Slash => self.asm().div(),
+                    _ => {
+                        return Err(Error {
+                            position: self.lmap.position(op.from, op.to),
+                            message: format!("unknown binary operator {}", op.text),
+                        })
+                    }
+                }
+            }
             Expr::Assign(l, r) => {
                 self.compile_expr(r)?;
                 match l {

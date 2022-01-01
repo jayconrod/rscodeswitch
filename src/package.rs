@@ -73,9 +73,20 @@ impl fmt::Display for Function {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Type {
     Bool,
     Float64,
     Nanbox,
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = match self {
+            Type::Bool => "bool",
+            Type::Float64 => "f64",
+            Type::Nanbox => "dynval",
+        };
+        f.write_str(s)
+    }
 }
