@@ -1,3 +1,5 @@
+use crate::data::{self, Slice};
+use crate::heap::Handle;
 use crate::inst;
 
 use std::fmt;
@@ -5,6 +7,7 @@ use std::fmt;
 pub struct Package {
     pub globals: Vec<Global>,
     pub functions: Vec<Function>,
+    pub strings: Handle<Slice<data::String>>,
 }
 
 impl Package {
@@ -50,7 +53,7 @@ impl fmt::Display for Package {
 }
 
 pub struct Global {
-    pub name: String,
+    pub name: std::string::String,
 }
 
 impl fmt::Display for Global {
@@ -60,7 +63,7 @@ impl fmt::Display for Global {
 }
 
 pub struct Function {
-    pub name: String,
+    pub name: std::string::String,
     pub insts: Vec<u8>,
     pub package: *const Package,
 }
@@ -77,6 +80,7 @@ impl fmt::Display for Function {
 pub enum Type {
     Bool,
     Float64,
+    String,
     Nanbox,
 }
 
@@ -85,6 +89,7 @@ impl fmt::Display for Type {
         let s = match self {
             Type::Bool => "bool",
             Type::Float64 => "f64",
+            Type::String => "string",
             Type::Nanbox => "dynval",
         };
         f.write_str(s)

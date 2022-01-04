@@ -1,3 +1,5 @@
+use crate::data::{self, List, SetValue};
+use crate::heap::Handle;
 use crate::inst;
 use crate::inst::Assembler;
 use crate::lox::syntax::{Decl, Expr, File, LValue, Stmt};
@@ -5,7 +7,7 @@ use crate::lox::token::{Token, Type};
 use crate::package::{Function, Global, Package};
 use crate::pos::{Error, LineMap, Pos};
 use std::collections::HashMap;
-use std::mem::swap;
+use std::mem;
 
 pub fn compile(ast: &File, lmap: &LineMap) -> Result<Box<Package>, Error> {
     let mut cmp = Compiler::new(lmap);
@@ -22,6 +24,8 @@ struct Compiler<'a> {
     lmap: &'a LineMap,
     globals: Vec<Global>,
     functions: Vec<Function>,
+    strings: Handle<List<data::String>>,
+    string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
     env_stack: Vec<Env<'a>>,
 }
 
@@ -69,6 +73,8 @@ impl<'a> Compiler<'a> {
             lmap: lmap,
             globals: Vec::new(),
             functions: Vec::new(),
+            strings: Handle::new(List::alloc()),
+            string_index: Handle::new(data::HashMap::alloc()),
             env_stack: vec![Env::new(EnvKind::Global)],
         }
     }
@@ -85,12 +91,15 @@ impl<'a> Compiler<'a> {
         let mut package = Box::new(Package {
             globals: Vec::new(),
             functions: Vec::new(),
+            strings: Handle::empty(),
         });
+
         for f in &mut self.functions {
             f.package = &*package;
         }
-        swap(&mut package.globals, &mut self.globals);
-        swap(&mut package.functions, &mut self.functions);
+        mem::swap(&mut package.globals, &mut self.globals);
+        mem::swap(&mut package.functions, &mut self.functions);
+        package.strings = Handle::new(self.strings.slice_mut());
         package
     }
 
@@ -238,6 +247,30 @@ impl<'a> Compiler<'a> {
                     message: format!("could not express '{}' as 64-bit floating point", t.text),
                 })?;
                 self.asm().float64(n);
+                self.asm().nanbox();
+            }
+            Expr::String(t) => {
+                let raw = t.text.as_bytes();
+                if raw.len() < 2 || raw[0] != b'"' || raw[raw.len() - 1] != b'"' {
+                    return Err(Error {
+                        position: self.lmap.position(t.from, t.to),
+                        message: format!("not a real string: '{}'", t.text),
+                    });
+                }
+                let s = Handle::new(data::String::from_bytes(&raw[1..raw.len() - 1]));
+                let index = match self.string_index.get(&*s) {
+                    Some(v) => v.value,
+                    None => {
+                        let i = u32::try_from((*self.strings).len()).map_err(|_| Error {
+                            position: self.lmap.position(t.from, t.to),
+                            message: format!("too many strings"),
+                        })?;
+                        (*self.strings).push(&*s);
+                        (*self.string_index).insert(&*s, &SetValue { value: i });
+                        i
+                    }
+                };
+                self.asm().string(index);
                 self.asm().nanbox();
             }
             Expr::Var(t) => match self.resolve(t)? {

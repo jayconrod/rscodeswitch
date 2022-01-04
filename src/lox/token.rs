@@ -28,6 +28,7 @@ pub enum Type {
     Var,
     Bool,
     Number,
+    String,
     Ident,
 }
 
@@ -58,6 +59,7 @@ impl fmt::Display for Type {
             Type::Var => "'var'",
             Type::Bool => "bool",
             Type::Number => "number",
+            Type::String => "string",
             Type::Ident => "identifier",
         };
         f.write_str(s)
@@ -195,6 +197,20 @@ impl<'a, 'b> Lexer<'a, 'b> {
                     return self.error_end(end, format!("could not parse number: {}", text));
                 }
                 self.add_token(end, Type::Number);
+                continue;
+            }
+
+            if b == b'"' {
+                // String.
+                let mut end = self.p + 1;
+                while end < self.data.len() && self.data[end] != b'"' {
+                    end += 1;
+                }
+                if end == self.data.len() {
+                    return self.error_end(end, format!("unterminated string literal"));
+                }
+                end += 1;
+                self.add_token(end, Type::String);
                 continue;
             }
 

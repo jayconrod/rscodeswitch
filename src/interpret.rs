@@ -1,6 +1,7 @@
+use crate::data;
 use crate::inst;
 use crate::nanbox;
-use crate::package::{Package, Type};
+use crate::package::{Function, Package, Type};
 
 use std::error;
 use std::fmt;
@@ -30,12 +31,12 @@ impl<'a> Interpreter<'a> {
                 .function_by_name(func_name)
                 .ok_or_else(|| Error {
                     message: format!("no such function: '{}'", func_name),
-                })?;
+                })? as *const Function;
 
             let mut stack = Stack::new();
             let mut sp = stack.end();
             let fp = sp;
-            let mut ip = &func.insts[0] as *const u8;
+            let mut ip = &func.as_ref().unwrap().insts[0] as *const u8;
             let mut types = Vec::new();
 
             macro_rules! return_errorf {
@@ -48,7 +49,7 @@ impl<'a> Interpreter<'a> {
                 () => {{
                     let v = *(sp as *mut u64);
                     sp += 8;
-                    v
+                    (v, types.pop().unwrap())
                 }};
                 ($t:expr) => {{
                     let top = types.pop().unwrap();
@@ -71,39 +72,33 @@ impl<'a> Interpreter<'a> {
 
             macro_rules! binop_eq {
                 ($op:tt) => {{
-                    let rty = types.pop().unwrap();
-                    let lty = types.pop().unwrap();
-                    assert_eq!(lty, rty);
-                    match lty {
+                    let (r, ty) = pop!();
+                    let l = pop!(ty);
+                    match ty {
                         Type::Bool => {
-                            let r = pop!();
-                            let l = pop!();
                             push!((l $op r) as u64, Type::Bool);
                         }
                         Type::Float64 => {
                             // Float comparison can't use raw bit comparison
                             // because NaN != NaN.
-                            let r = f64::from_bits(pop!());
-                            let l = f64::from_bits(pop!());
+                            let l = f64::from_bits(l);
+                            let r = f64::from_bits(r);
+                            push!((l $op r) as u64, Type::Bool);
+                        }
+                        Type::String => {
+                            let l = (l as *const data::String).as_ref().unwrap();
+                            let r = (r as *const data::String).as_ref().unwrap();
                             push!((l $op r) as u64, Type::Bool);
                         }
                         Type::Nanbox => {
-                            let r = pop!();
-                            let l = pop!();
-                            let v = if let Some(lb) = nanbox::to_bool(l) {
-                                if let Some(rb) = nanbox::to_bool(r) {
-                                    lb $op rb
-                                } else {
-                                    true $op false
-                                }
-                            } else if let Some(ln) = nanbox::to_f64(l) {
-                                if let Some(rn) = nanbox::to_f64(r) {
-                                    (ln $op rn)
-                                } else {
-                                    true $op false
-                                }
+                            let v = if let (Some(lb), Some(rb)) = (nanbox::to_bool(l), nanbox::to_bool(r)) {
+                                lb $op rb
+                            } else if let (Some(ln), Some(rn)) = (nanbox::to_f64(l), nanbox::to_f64(r)) {
+                                ln $op rn
+                            } else if let (Some(ls), Some(rs)) = (nanbox::to_string(l), nanbox::to_string(r)) {
+                                ls $op rs
                             } else {
-                                unreachable!()
+                                true $op false
                             };
                             push!(v as u64, Type::Bool);
                         }
@@ -113,21 +108,28 @@ impl<'a> Interpreter<'a> {
 
             macro_rules! binop_cmp {
                 ($op:tt) => {{
-                    let rty = types.pop().unwrap();
-                    let lty = types.pop().unwrap();
-                    assert_eq!(lty, rty);
-                    match lty {
+                    let (r, ty) = pop!();
+                    let l = pop!(ty);
+                    match ty {
                         Type::Float64 => {
-                            let r = pop!() as f64;
-                            let l = pop!() as f64;
+                            let l = f64::from_bits(l);
+                            let r = f64::from_bits(r);
+                            push!((l $op r) as u64, Type::Bool);
+                        }
+                        Type::String => {
+                            let l = (l as *const data::String).as_ref().unwrap();
+                            let r = (r as *const data::String).as_ref().unwrap();
                             push!((l $op r) as u64, Type::Bool);
                         }
                         Type::Nanbox => {
-                            let r = pop!();
-                            let rn = nanbox::to_f64(r).ok_or_else(|| Error{message: format!("invalid value in comparison operation: {}", nanbox::debug_str(r))})?;
-                            let l = pop!();
-                            let ln = nanbox::to_f64(l).ok_or_else(|| Error{message: format!("invalid value in comparison operation: {}", nanbox::debug_str(l))})?;
-                            push!((ln $op rn) as u64, Type::Bool);
+                            let v = if let (Some(ln), Some(rn)) = (nanbox::to_f64(l), nanbox::to_f64(r)) {
+                                ln $op rn
+                            } else if let (Some(ls), Some(rs)) = (nanbox::to_string(l), nanbox::to_string(r)) {
+                                ls $op rs
+                            } else {
+                                return_errorf!("comparison operands must both be strings or numbers (got {}, {})", nanbox::debug_type(l), nanbox::debug_type(l))
+                            };
+                            push!(v as u64, Type::Bool);
                         }
                         _ => unreachable!(),
                     }
@@ -136,22 +138,21 @@ impl<'a> Interpreter<'a> {
 
             macro_rules! binop_num {
                 ($op:tt) => {{
-                    let rty = types.pop().unwrap();
-                    let lty = types.pop().unwrap();
-                    assert_eq!(lty, rty);
-                    match lty {
+                    let (r, ty) = pop!();
+                    let l = pop!(ty);
+                    match ty {
                         Type::Float64 => {
-                            let r = pop!();
-                            let l = pop!();
-                            push!(l $op r, Type::Float64);
+                            let l = f64::from_bits(l);
+                            let r = f64::from_bits(r);
+                            push!((l $op r) as u64, Type::Float64);
                         }
                         Type::Nanbox => {
-                            let r = pop!();
-                            let rn = nanbox::to_f64(r).ok_or_else(|| Error{message: format!("invalid value in numeric operation: {}", nanbox::debug_str(r))})?;
-                            let l = pop!();
-                            let ln = nanbox::to_f64(l).ok_or_else(|| Error{message: format!("invalid value in numeric operation: {}", nanbox::debug_str(l))})?;
-                            let x = ln $op rn;
-                            push!(nanbox::from_f64(x), Type::Nanbox)
+                            let v = if let (Some(ln), Some(rn)) = (nanbox::to_f64(l), nanbox::to_f64(r)) {
+                                nanbox::from_f64(ln $op rn)
+                            } else {
+                                return_errorf!("arithmetic operands must both be numbers (got {}, {})", nanbox::debug_type(l), nanbox::debug_type(r));
+                            };
+                            push!(v, Type::Nanbox)
                         }
                         _ => unreachable!(),
                     }
@@ -161,7 +162,41 @@ impl<'a> Interpreter<'a> {
             loop {
                 match *ip {
                     inst::ADD => {
-                        binop_num!(+);
+                        let (r, ty) = pop!();
+                        let l = pop!(ty);
+                        match ty {
+                            Type::Float64 => {
+                                let l = f64::from_bits(l);
+                                let r = f64::from_bits(r);
+                                push!((l + r) as u64, Type::Float64);
+                            }
+                            Type::String => {
+                                let l = (l as *const data::String).as_ref().unwrap();
+                                let r = (r as *const data::String).as_ref().unwrap();
+                                push!((l + r) as u64, Type::String);
+                            }
+                            Type::Nanbox => {
+                                let v = if let (Some(ln), Some(rn)) =
+                                    (nanbox::to_f64(l), nanbox::to_f64(r))
+                                {
+                                    nanbox::from_f64(ln + rn)
+                                } else if let (Some(ls), Some(rs)) =
+                                    (nanbox::to_string(l), nanbox::to_string(r))
+                                {
+                                    let ls = ls.as_ref().unwrap();
+                                    let rs = rs.as_ref().unwrap();
+                                    nanbox::from_string(ls + rs)
+                                } else {
+                                    return_errorf!(
+                                        "arithmetic operands must both be numbers (got {}, {})",
+                                        nanbox::debug_type(l),
+                                        nanbox::debug_type(r)
+                                    );
+                                };
+                                push!(v, Type::Nanbox)
+                            }
+                            _ => unreachable!(),
+                        }
                     }
                     inst::DIV => {
                         binop_num!(/);
@@ -185,22 +220,16 @@ impl<'a> Interpreter<'a> {
                         binop_cmp!(<=)
                     }
                     inst::FALSE => {
-                        sp -= 8;
-                        *(sp as *mut u64) = 0;
-                        types.push(Type::Bool);
+                        push!(0, Type::Bool);
                     }
                     inst::FLOAT64 => {
                         let n = f64::from_le_bytes(*((ip as usize + 1) as *const [u8; 8]));
-                        sp -= 8;
-                        *(sp as *mut f64) = n;
-                        types.push(Type::Float64);
+                        push!(n.to_bits(), Type::Float64);
                     }
                     inst::LOADGLOBAL => {
                         let i = *((ip as usize + 1) as *const u32) as usize;
                         let v = self.global_slots[i];
-                        sp -= 8;
-                        *(sp as *mut u64) = v;
-                        types.push(Type::Nanbox)
+                        push!(v, Type::Nanbox);
                     }
                     inst::LT => {
                         binop_cmp!(<)
@@ -208,30 +237,28 @@ impl<'a> Interpreter<'a> {
                     inst::LOADLOCAL => {
                         let i = *((ip as usize + 1) as *const u16) as usize;
                         let v = *((fp as usize - (i + 1) * 8) as *const u64);
-                        sp -= 8;
-                        *(sp as *mut u64) = v;
-                        types.push(types[i]);
+                        push!(v, types[i]);
                     }
                     inst::MUL => {
                         binop_num!(*)
                     }
                     inst::NANBOX => {
-                        match types.pop().unwrap() {
-                            Type::Bool => {
-                                let b = *(sp as *mut bool);
-                                let v = nanbox::from_bool(b);
-                                *(sp as *mut u64) = v;
+                        let (v, ty) = pop!();
+                        let b = match ty {
+                            Type::Bool => nanbox::from_bool(v != 0),
+                            Type::String => {
+                                let s = v as *const data::String;
+                                nanbox::from_string(s)
                             }
-                            Type::Float64 | Type::Nanbox => (),
+                            Type::Float64 | Type::Nanbox => v,
                         };
-                        types.push(Type::Nanbox);
+                        push!(b, Type::Nanbox);
                     }
                     inst::NE => {
                         binop_eq!(!=)
                     }
                     inst::NEG => {
-                        let ty = types.pop().unwrap();
-                        let v = pop!();
+                        let (v, ty) = pop!();
                         match ty {
                             Type::Float64 => {
                                 let vn = f64::from_bits(v);
@@ -243,7 +270,7 @@ impl<'a> Interpreter<'a> {
                                 } else {
                                     return_errorf!(
                                         "invalid value in numeric operation: {}",
-                                        nanbox::debug_str(v)
+                                        nanbox::debug_type(v)
                                     )
                                 }
                             }
@@ -252,8 +279,7 @@ impl<'a> Interpreter<'a> {
                     }
                     inst::NOP => (),
                     inst::NOT => {
-                        let ty = types.pop().unwrap();
-                        let v = pop!();
+                        let (v, ty) = pop!();
                         match ty {
                             Type::Bool => {
                                 let vb = v != 0;
@@ -279,17 +305,20 @@ impl<'a> Interpreter<'a> {
                     inst::RET => return Ok(()),
                     inst::STOREGLOBAL => {
                         let i = *((ip as usize + 1) as *const u32) as usize;
-                        let v = *(sp as *mut u64);
-                        sp += 8;
-                        types.pop();
+                        let v = pop!(Type::Nanbox);
                         self.global_slots[i] = v;
                     }
                     inst::STORELOCAL => {
                         let i = *((ip as usize + 1) as *const u16) as usize;
-                        let v = *(sp as *mut u64);
-                        sp += 8;
-                        types.pop();
+                        let (v, ty) = pop!();
                         *((fp as usize - (i + 1) * 8) as *mut u64) = v;
+                        types[i] = ty;
+                    }
+                    inst::STRING => {
+                        let i = *((ip as usize + 1) as *const u32) as usize;
+                        let s = &func.as_ref().unwrap().package.as_ref().unwrap().strings[i]
+                            as *const data::String as u64;
+                        push!(s, Type::String);
                     }
                     inst::SUB => {
                         binop_num!(-)
@@ -298,17 +327,14 @@ impl<'a> Interpreter<'a> {
                         let sys = *((ip as usize + 1) as *const u8);
                         match sys {
                             inst::SYS_PRINT => {
-                                let v = *(sp as *mut u64);
-                                sp = sp + 8;
-                                self.sys_print(v, types.pop().unwrap())?;
+                                let (v, ty) = pop!();
+                                self.sys_print(v, ty)?;
                             }
                             _ => panic!("unknown sys"),
                         }
                     }
                     inst::TRUE => {
-                        sp -= 8;
-                        *(sp as *mut u64) = 1;
-                        types.push(Type::Bool);
+                        push!(1, Type::Bool);
                     }
                     _ => panic!("unknown opcode"),
                 }
@@ -325,6 +351,9 @@ impl<'a> Interpreter<'a> {
             Type::Float64 => {
                 write!(self.w, "{}\n", f64::from_bits(v))
             }
+            Type::String => unsafe {
+                write!(self.w, "{}\n", (v as *const data::String).as_ref().unwrap())
+            },
             Type::Nanbox => {
                 write!(self.w, "{}\n", nanbox::debug_str(v))
             }

@@ -4,12 +4,18 @@ function main() {
   print 1 == 2; // Output: false
   print true == false; // Output: false
   print 1 == true; // Output: false
+  print "a" == "a"; // Output: true
+  print "a" == "b"; // Output: false
+  print "a" == 1; // Output: false
 
   print 1 != 1; // Output: false
   print true != true; // Output: false
   print 1 != 2; // Output: true
   print true != false; // Output: true
   print 1 != true; // Output: true
+  print "a" != "a"; // Output: false
+  print "a" != 2; // Output: true
+  print "a" != "b"; // Output: true
 
   print 1 < 2; // Output: true
   print 1 < 1; // Output: false
@@ -22,6 +28,14 @@ function main() {
   print 1 >= 2; // Output: false
   print 1 >= 1; // Output: true
   print 1 >= 0; // Output: true
+  print "a" < "a"; // Output: false
+  print "a" < "b"; // Output: true
+  print "b" < "a"; // Output: false
+  print "a" <= "a"; // Output: true
+  print "a" > "a"; // Output: false
+  print "a" >= "a"; // Output: true
+  print "a" > "b"; // Output: false
+  print "b" > "a"; // Output: true
 
   print 1 + 2; // Output: 3
 
@@ -37,4 +51,6 @@ function main() {
   print -(2); // Output: -2
 
   print 2 * 3 + 4; // Output: 10
+
+  print "hello " + "world"; // Output: hello world
 }

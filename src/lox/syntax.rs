@@ -179,6 +179,7 @@ impl<'a> Display for Stmt<'a> {
 pub enum Expr<'a> {
     Bool(Token<'a>),
     Number(Token<'a>),
+    String(Token<'a>),
     Var(Token<'a>),
     Group {
         expr: Box<Expr<'a>>,
@@ -195,6 +196,7 @@ impl<'a> Expr<'a> {
         match self {
             Expr::Bool(t) => (t.from, t.to),
             Expr::Number(t) => (t.from, t.to),
+            Expr::String(t) => (t.from, t.to),
             Expr::Var(t) => (t.from, t.to),
             Expr::Group {
                 begin_pos, end_pos, ..
@@ -211,6 +213,7 @@ impl<'a> Display for Expr<'a> {
         match self {
             Expr::Bool(t) => f.write_str(t.text),
             Expr::Number(t) => f.write_str(t.text),
+            Expr::String(t) => f.write_str(t.text),
             Expr::Var(t) => f.write_str(t.text),
             Expr::Group { expr, .. } => write!(f, "({})", expr),
             Expr::Unary(op, e) => write!(f, "{}{}", op.text, e),
@@ -450,6 +453,10 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         Ok(Expr::Number(self.expect(Type::Number)?))
     }
 
+    fn parse_string_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
+        Ok(Expr::String(self.expect(Type::String)?))
+    }
+
     fn get_rule<'d>(&self, type_: Type) -> ParseRule<'a, 'b, 'c, 'd> {
         match type_ {
             Type::LParen => ParseRule {
@@ -494,6 +501,11 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             },
             Type::Number => ParseRule {
                 prefix: Some(&Parser::parse_num_expr),
+                infix: None,
+                precedence: Precedence::None,
+            },
+            Type::String => ParseRule {
+                prefix: Some(&Parser::parse_string_expr),
                 infix: None,
                 precedence: Precedence::None,
             },

@@ -3,7 +3,7 @@ use std::mem::swap;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 26.
+// Next opcode: 27.
 pub const ADD: u8 = 20;
 pub const DIV: u8 = 23;
 pub const DUP: u8 = 13;
@@ -26,6 +26,7 @@ pub const POP: u8 = 3;
 pub const RET: u8 = 4;
 pub const STOREGLOBAL: u8 = 10;
 pub const STORELOCAL: u8 = 12;
+pub const STRING: u8 = 26;
 pub const SUB: u8 = 21;
 pub const SYS: u8 = 5;
 pub const TRUE: u8 = 7;
@@ -38,7 +39,7 @@ pub fn size(op: u8) -> usize {
         | POP | RET | SUB | TRUE => 1,
         SYS => 2,
         LOADLOCAL | STORELOCAL => 3,
-        LOADGLOBAL | STOREGLOBAL => 5,
+        LOADGLOBAL | STOREGLOBAL | STRING => 5,
         FLOAT64 => 9,
         _ => panic!("unknown opcode"),
     }
@@ -68,6 +69,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         RET => "ret",
         STOREGLOBAL => "storeglobal",
         STORELOCAL => "storelocal",
+        STRING => "string",
         SUB => "sub",
         SYS => "sys",
         TRUE => "true",
@@ -188,6 +190,11 @@ impl Assembler {
     pub fn storelocal(&mut self, index: u16) {
         self.write_u8(STORELOCAL);
         self.write_u16(index);
+    }
+
+    pub fn string(&mut self, i: u32) {
+        self.write_u8(STRING);
+        self.write_u32(i);
     }
 
     pub fn sub(&mut self) {
