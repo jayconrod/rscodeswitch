@@ -1,4 +1,4 @@
-function main() {
+fun main() {
   print g; // Output: 12
   g = 34;
   print g; // Output: 34

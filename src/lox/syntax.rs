@@ -274,7 +274,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         let type_ = self.peek();
         match type_ {
             Type::Var => self.parse_var_decl(),
-            Type::Function => self.parse_function_decl(),
+            Type::Fun => self.parse_function_decl(),
             _ => self.parse_stmt().map(|stmt| Decl::Stmt(stmt)),
         }
     }
@@ -302,7 +302,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_function_decl(&mut self) -> Result<Decl<'a>, Error> {
-        let begin_pos = self.expect(Type::Function)?.from;
+        let begin_pos = self.expect(Type::Fun)?.from;
         let name = self.expect(Type::Ident)?;
         let param_names = self.parse_params()?;
         let body = self.parse_block()?;

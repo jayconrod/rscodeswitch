@@ -23,7 +23,7 @@ pub enum Type {
     Star,
     Slash,
     Bang,
-    Function,
+    Fun,
     Print,
     Var,
     Bool,
@@ -54,7 +54,7 @@ impl fmt::Display for Type {
             Type::Star => "*",
             Type::Slash => "/",
             Type::Bang => "!",
-            Type::Function => "'function'",
+            Type::Fun => "'fun'",
             Type::Print => "'print'",
             Type::Var => "'var'",
             Type::Bool => "bool",
@@ -176,7 +176,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 let text = unsafe { from_utf8_unchecked(&self.data[self.p..end]) };
                 let type_ = match text {
                     "false" => Type::Bool,
-                    "function" => Type::Function,
+                    "fun" => Type::Fun,
                     "print" => Type::Print,
                     "true" => Type::Bool,
                     "var" => Type::Var,

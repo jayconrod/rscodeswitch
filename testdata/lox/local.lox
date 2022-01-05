@@ -1,4 +1,4 @@
-function main() {
+fun main() {
   var a = 12;
   print a; // Output: 12
   a = 34;
