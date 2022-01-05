@@ -13,7 +13,7 @@ struct File {
 
 impl LineMap {
     pub fn new() -> LineMap {
-        LineMap{
+        LineMap {
             files: Vec::<File>::new(),
             base: 0,
         }
@@ -21,7 +21,7 @@ impl LineMap {
 
     pub fn add_file(&mut self, filename: &str, size: usize) -> usize {
         let base = self.base;
-        self.files.push(File{
+        self.files.push(File {
             offset: base,
             filename: String::from(filename),
             lines: Vec::new(),
@@ -47,12 +47,12 @@ impl LineMap {
 
         let find_line_and_col = |pos: Pos| {
             let line = from_file.lines.partition_point(|&l| l <= pos.offset);
-            let col = pos.offset - from_file.lines[line-1];
+            let col = pos.offset - from_file.lines[line - 1];
             (line, col)
         };
         let (from_line, from_col) = find_line_and_col(from);
         let (to_line, to_col) = find_line_and_col(to);
-        Position{
+        Position {
             filename: from_file.filename.clone(),
             from_line: from_line,
             from_col: from_col,
@@ -60,11 +60,25 @@ impl LineMap {
             to_col: to_col,
         }
     }
+
+    pub fn first_file(&self) -> Position {
+        let filename = match self.files.first() {
+            Some(f) => f.filename.clone(),
+            None => String::from(""),
+        };
+        Position {
+            filename,
+            from_line: 0,
+            from_col: 0,
+            to_line: 0,
+            to_col: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Pos {
-    pub offset: usize
+    pub offset: usize,
 }
 
 #[derive(Debug)]
@@ -90,7 +104,11 @@ impl fmt::Display for Position {
             if self.from_line == self.to_line && self.from_col == self.to_col {
                 write!(f, "{}:{}.{}", self.filename, self.from_line, self.from_col)
             } else {
-                write!(f, "{}:{}.{}-{}.{}", self.filename, self.from_line, self.from_col, self.to_line, self.to_col)
+                write!(
+                    f,
+                    "{}:{}.{}-{}.{}",
+                    self.filename, self.from_line, self.from_col, self.to_line, self.to_col
+                )
             }
         }
     }
@@ -102,11 +120,17 @@ pub struct Error {
     pub message: String,
 }
 
+impl Error {
+    pub fn wrap(position: Position, err: &dyn std::error::Error) -> Error {
+        let message = format!("{}", err);
+        Error { position, message }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.position, self.message)
     }
 }
 
-impl std::error::Error for Error {
-}
+impl std::error::Error for Error {}

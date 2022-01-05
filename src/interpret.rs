@@ -62,6 +62,26 @@ impl<'a> Interpreter<'a> {
                 }};
             }
 
+            macro_rules! pop_cond {
+                () => {{
+                    let (v, ty) = pop!();
+                    match ty {
+                        Type::Bool => v != 0,
+                        Type::Nanbox => {
+                            if let Some(b) = nanbox::to_bool(v) {
+                                b
+                            } else {
+                                return_errorf!(
+                                    "condition must be bool value (got {})",
+                                    nanbox::debug_type(v)
+                                );
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }};
+            }
+
             macro_rules! push {
                 ($x:expr, $t:expr) => {{
                     sp -= 8;
@@ -196,6 +216,22 @@ impl<'a> Interpreter<'a> {
                                 push!(v, Type::Nanbox)
                             }
                             _ => unreachable!(),
+                        }
+                    }
+                    inst::B => {
+                        let delta = i32::from_le_bytes(*((ip as usize + 1) as *const [u8; 4]));
+                        ip = (ip as usize + 1)
+                            .checked_add(delta as isize as usize)
+                            .unwrap() as *const u8;
+                        continue;
+                    }
+                    inst::BIF => {
+                        if pop_cond!() {
+                            let delta = i32::from_le_bytes(*((ip as usize + 1) as *const [u8; 4]));
+                            ip = (ip as usize + 1)
+                                .checked_add(delta as isize as usize)
+                                .unwrap() as *const u8;
+                            continue;
                         }
                     }
                     inst::DIV => {

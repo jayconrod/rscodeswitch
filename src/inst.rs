@@ -3,8 +3,10 @@ use std::mem::swap;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 27.
+// Next opcode: 29.
 pub const ADD: u8 = 20;
+pub const B: u8 = 27;
+pub const BIF: u8 = 28;
 pub const DIV: u8 = 23;
 pub const DUP: u8 = 13;
 pub const EQ: u8 = 14;
@@ -39,7 +41,7 @@ pub fn size(op: u8) -> usize {
         | POP | RET | SUB | TRUE => 1,
         SYS => 2,
         LOADLOCAL | STORELOCAL => 3,
-        LOADGLOBAL | STOREGLOBAL | STRING => 5,
+        B | BIF | LOADGLOBAL | STOREGLOBAL | STRING => 5,
         FLOAT64 => 9,
         _ => panic!("unknown opcode"),
     }
@@ -48,6 +50,8 @@ pub fn size(op: u8) -> usize {
 pub fn mnemonic(op: u8) -> &'static str {
     match op {
         ADD => "add",
+        B => "b",
+        BIF => "bif",
         DIV => "div",
         DUP => "dup",
         EQ => "eq",
@@ -93,14 +97,58 @@ impl Assembler {
         Assembler { insts: Vec::new() }
     }
 
-    pub fn finish(&mut self) -> Vec<u8> {
+    pub fn finish(&mut self) -> Result<Vec<u8>, impl std::error::Error> {
+        if i32::try_from(self.insts.len()).is_err() {
+            return Err(Error {
+                message: String::from("function is too large (maximum size is 2 GiB)"),
+            });
+        }
         let mut insts = Vec::new();
         swap(&mut self.insts, &mut insts);
-        insts
+        Ok(insts)
+    }
+
+    pub fn bind(&mut self, label: &mut Label) {
+        match label {
+            Label::Bound { .. } => panic!("label already bound"),
+            Label::Unbound {
+                last_branch_offset: mut offset,
+            } => {
+                if i32::try_from(self.insts.len()).is_err() {
+                    // Instruction list is too long to represent labels,
+                    // but we can't return errors here. The client will
+                    // see an error from finish though.
+                    *label = Label::Bound { offset: !0 }
+                }
+                let bound_offset: i32 = self.insts.len().try_into().unwrap();
+                while offset != -1 {
+                    let patch_site = &mut self.insts[offset as usize..offset as usize + 4];
+                    let prev_offset = i32::from_le_bytes((*patch_site).try_into().unwrap());
+                    let delta = bound_offset - offset;
+                    for (i, b) in delta.to_le_bytes().iter().enumerate() {
+                        patch_site[i] = *b;
+                    }
+                    offset = prev_offset;
+                }
+                *label = Label::Bound {
+                    offset: bound_offset,
+                };
+            }
+        }
     }
 
     pub fn add(&mut self) {
         self.write_u8(ADD);
+    }
+
+    pub fn b(&mut self, label: &mut Label) {
+        self.write_u8(B);
+        self.write_label(label);
+    }
+
+    pub fn bif(&mut self, label: &mut Label) {
+        self.write_u8(BIF);
+        self.write_label(label);
     }
 
     pub fn div(&mut self) {
@@ -231,17 +279,105 @@ impl Assembler {
             self.insts.push(b)
         }
     }
+
+    fn write_label(&mut self, label: &mut Label) {
+        if i32::try_from(self.insts.len()).is_err() {
+            self.write_u32(0);
+            return;
+        }
+        match label {
+            Label::Unbound {
+                ref mut last_branch_offset,
+            } => {
+                let label_offset = self.insts.len() as i32;
+                self.write_u32(*last_branch_offset as u32);
+                *last_branch_offset = label_offset;
+            }
+            Label::Bound { offset } => {
+                let delta = *offset - self.insts.len() as i32;
+                self.write_u32(delta as u32);
+            }
+        }
+    }
 }
 
-pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
+pub enum Label {
+    Unbound { last_branch_offset: i32 },
+    Bound { offset: i32 },
+}
+
+impl Label {
+    pub fn new() -> Label {
+        Label::Unbound {
+            last_branch_offset: -1,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Error {
+    message: String,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
+    // Scan the instructions for branches, so we know where to write labels.
+    // We don't know the original names of the labels, so we'll number them.
+    let mut label_offsets = Vec::new();
     let mut p = 0;
     while p < insts.len() {
+        match insts[p] {
+            B | BIF => {
+                if p + 5 > insts.len() {
+                    return Err(fmt::Error);
+                }
+                let delta = i32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
+                let offset = (p as i32 + 1 + delta) as usize;
+                label_offsets.push(offset);
+            }
+            _ => (),
+        }
+        p += size(insts[p]);
+    }
+    label_offsets.sort();
+    label_offsets.dedup();
+
+    // Print the instructions, with labels first where needed.
+    let mut p = 0;
+    let mut li = 0;
+    while p < insts.len() {
+        if li < label_offsets.len() && label_offsets[li] == p {
+            write!(f, "L{}:\n", li)?;
+            li += 1;
+        }
         f.write_str("  ")?;
         f.write_str(mnemonic(insts[p]))?;
         match insts[p] {
             ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | MUL | NANBOX | NE | NEG | NOP
             | NOT | POP | RET | SUB | TRUE => {
                 f.write_str("\n")?;
+            }
+            B | BIF => {
+                if p + 5 > insts.len() {
+                    return Err(fmt::Error);
+                }
+                let delta = i32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
+                let offset = (p as i32 + 1 + delta) as usize;
+                match label_offsets.binary_search(&offset) {
+                    Ok(li) => {
+                        write!(f, " L{}\n", li)?;
+                    }
+                    Err(_) => {
+                        write!(f, " {}??\n", delta)?;
+                    }
+                }
             }
             FLOAT64 => {
                 if p + 9 > insts.len() {

@@ -1,8 +1,7 @@
 use crate::data::{self, List, SetValue};
 use crate::heap::Handle;
-use crate::inst;
-use crate::inst::Assembler;
-use crate::lox::syntax::{Decl, Expr, File, LValue, Stmt};
+use crate::inst::{self, Assembler, Label};
+use crate::lox::syntax::{Block, Decl, Expr, File, LValue, Stmt};
 use crate::lox::token::{Token, Type};
 use crate::package::{Function, Global, Package};
 use crate::pos::{Error, LineMap, Pos};
@@ -17,7 +16,7 @@ pub fn compile(ast: &File, lmap: &LineMap) -> Result<Box<Package>, Error> {
     for decl in &ast.decls {
         cmp.compile_decl(decl)?;
     }
-    Ok(cmp.finish())
+    cmp.finish()
 }
 
 struct Compiler<'a> {
@@ -79,11 +78,15 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn finish(&mut self) -> Box<Package> {
+    fn finish(&mut self) -> Result<Box<Package>, Error> {
         self.asm().ret();
+        let init_insts = self.asm().finish().map_err(|err| {
+            let position = self.lmap.first_file();
+            Error::wrap(position, &err)
+        })?;
         let init = Function {
             name: String::from("init"),
-            insts: self.asm().finish(),
+            insts: init_insts,
             package: 0 as *mut Package,
         };
         self.functions.push(init);
@@ -100,7 +103,7 @@ impl<'a> Compiler<'a> {
         mem::swap(&mut package.globals, &mut self.globals);
         mem::swap(&mut package.functions, &mut self.functions);
         package.strings = Handle::new(self.strings.slice_mut());
-        package
+        Ok(package)
     }
 
     fn declare(&mut self, decl: &Decl<'a>) -> Result<(), Error> {
@@ -182,14 +185,33 @@ impl<'a> Compiler<'a> {
                 self.asm().ret();
 
                 let mut env = self.env_stack.pop().unwrap();
+                let insts = env.asm.finish().map_err(|err| {
+                    let (from, to) = decl.pos();
+                    Error::wrap(self.lmap.position(from, to), &err)
+                })?;
                 let f = Function {
                     name: String::from(name.text),
-                    insts: env.asm.finish(),
+                    insts,
                     package: 0 as *mut Package,
                 };
                 self.functions.push(f);
             }
             Decl::Stmt(stmt) => self.compile_stmt(stmt)?,
+        }
+        Ok(())
+    }
+
+    fn compile_block(&mut self, block: &Block<'a>) -> Result<(), Error> {
+        let next = self.env().next;
+        self.env_stack.push(Env::new(EnvKind::Block));
+        self.env().next = next;
+        for decl in &block.decls {
+            self.compile_decl(decl)?;
+        }
+        let delta = self.env().next - next;
+        self.env_stack.pop();
+        for _ in 0..delta {
+            self.asm().pop();
         }
         Ok(())
     }
@@ -201,21 +223,38 @@ impl<'a> Compiler<'a> {
                 self.asm().pop();
             }
             Stmt::Block(b) => {
-                let next = self.env().next;
-                self.env_stack.push(Env::new(EnvKind::Block));
-                self.env().next = next;
-                for decl in &b.decls {
-                    self.compile_decl(decl)?;
-                }
-                let delta = self.env().next - next;
-                self.env_stack.pop();
-                for _ in 0..delta {
-                    self.asm().pop();
-                }
+                self.compile_block(b)?;
             }
             Stmt::Print { expr, .. } => {
                 self.compile_expr(expr)?;
                 self.asm().sys(inst::SYS_PRINT);
+            }
+            Stmt::If {
+                cond,
+                true_block,
+                false_block,
+                ..
+            } => {
+                self.compile_expr(cond)?;
+                match false_block {
+                    None => {
+                        self.asm().not();
+                        let mut after_label = Label::new();
+                        self.asm().bif(&mut after_label);
+                        self.compile_block(true_block)?;
+                        self.asm().bind(&mut after_label);
+                    }
+                    Some(b) => {
+                        let mut true_label = Label::new();
+                        let mut after_label = Label::new();
+                        self.asm().bif(&mut true_label);
+                        self.compile_block(b)?;
+                        self.asm().b(&mut after_label);
+                        self.asm().bind(&mut true_label);
+                        self.compile_block(true_block)?;
+                        self.asm().bind(&mut after_label);
+                    }
+                }
             }
         }
         Ok(())

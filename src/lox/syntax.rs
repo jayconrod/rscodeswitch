@@ -140,6 +140,12 @@ pub enum Stmt<'a> {
         begin_pos: Pos,
         end_pos: Pos,
     },
+    If {
+        cond: Box<Expr<'a>>,
+        true_block: Box<Block<'a>>,
+        false_block: Option<Box<Block<'a>>>,
+        begin_pos: Pos,
+    },
 }
 
 impl<'a> Stmt<'a> {
@@ -150,6 +156,15 @@ impl<'a> Stmt<'a> {
             Stmt::Print {
                 begin_pos, end_pos, ..
             } => (*begin_pos, *end_pos),
+            Stmt::If {
+                begin_pos,
+                true_block,
+                false_block,
+                ..
+            } => match false_block {
+                Some(b) => (*begin_pos, b.pos().1),
+                None => (*begin_pos, true_block.pos().1),
+            },
         }
     }
 }
@@ -165,6 +180,22 @@ impl<'a> Stmt<'a> {
             Stmt::Print { expr, .. } => {
                 f.write_str("print ")?;
                 expr.fmt(f)
+            }
+            Stmt::If {
+                cond,
+                true_block,
+                false_block,
+                ..
+            } => {
+                f.write_str("if (")?;
+                cond.fmt(f)?;
+                f.write_str(") ")?;
+                true_block.fmt_indent(f, level)?;
+                if let Some(b) = false_block {
+                    f.write_str(" else ")?;
+                    b.fmt_indent(f, level)?;
+                }
+                Ok(())
             }
         }
     }
@@ -245,8 +276,8 @@ impl<'a> Display for LValue<'a> {
 
 pub fn parse<'a>(tokens: &[Token<'a>], lmap: &LineMap) -> Result<File<'a>, Error> {
     let mut p = Parser {
-        tokens: tokens,
-        lmap: lmap,
+        tokens,
+        lmap,
         next: 0,
     };
     p.parse_file()
@@ -350,6 +381,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         match self.peek() {
             Type::Print => self.parse_print_stmt(),
             Type::LBrace => Ok(Stmt::Block(Box::new(self.parse_block()?))),
+            Type::If => self.parse_if_stmt(),
             _ => self.parse_expr_stmt(),
         }
     }
@@ -368,6 +400,26 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             expr,
             begin_pos,
             end_pos,
+        })
+    }
+
+    fn parse_if_stmt(&mut self) -> Result<Stmt<'a>, Error> {
+        let begin_pos = self.expect(Type::If)?.from;
+        self.expect(Type::LParen)?;
+        let cond = Box::new(self.parse_expr()?);
+        self.expect(Type::RParen)?;
+        let true_block = Box::new(self.parse_block()?);
+        let false_block = if self.peek() == Type::Else {
+            self.take();
+            Some(Box::new(self.parse_block()?))
+        } else {
+            None
+        };
+        Ok(Stmt::If {
+            cond,
+            true_block,
+            false_block,
+            begin_pos,
         })
     }
 
