@@ -225,27 +225,27 @@ impl<'a> Compiler<'a> {
             }
             Stmt::If {
                 cond,
-                true_block,
-                false_block,
+                true_stmt,
+                false_stmt,
                 ..
             } => {
                 self.compile_expr(cond)?;
-                match false_block {
+                match false_stmt {
                     None => {
                         self.asm().not();
                         let mut after_label = Label::new();
                         self.asm().bif(&mut after_label);
-                        self.compile_block(true_block)?;
+                        self.compile_stmt(true_stmt)?;
                         self.asm().bind(&mut after_label);
                     }
-                    Some(b) => {
+                    Some(false_stmt) => {
                         let mut true_label = Label::new();
                         let mut after_label = Label::new();
                         self.asm().bif(&mut true_label);
-                        self.compile_block(b)?;
+                        self.compile_stmt(false_stmt)?;
                         self.asm().b(&mut after_label);
                         self.asm().bind(&mut true_label);
-                        self.compile_block(true_block)?;
+                        self.compile_stmt(true_stmt)?;
                         self.asm().bind(&mut after_label);
                     }
                 }
@@ -255,7 +255,7 @@ impl<'a> Compiler<'a> {
                 let mut cond_label = Label::new();
                 self.asm().b(&mut cond_label);
                 self.asm().bind(&mut body_label);
-                self.compile_block(body)?;
+                self.compile_stmt(body)?;
                 self.asm().bind(&mut cond_label);
                 self.compile_expr(cond)?;
                 self.asm().bif(&mut body_label);
@@ -283,7 +283,7 @@ impl<'a> Compiler<'a> {
                     self.asm().b(&mut cond_label);
                 }
                 self.asm().bind(&mut body_label);
-                self.compile_block(&body)?;
+                self.compile_stmt(body)?;
                 if let Some(incr) = incr {
                     self.compile_expr(incr)?;
                     self.asm().pop();

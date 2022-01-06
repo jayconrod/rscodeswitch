@@ -142,20 +142,20 @@ pub enum Stmt<'a> {
     },
     If {
         cond: Expr<'a>,
-        true_block: Block<'a>,
-        false_block: Option<Block<'a>>,
+        true_stmt: Box<Stmt<'a>>,
+        false_stmt: Option<Box<Stmt<'a>>>,
         begin_pos: Pos,
     },
     While {
         cond: Expr<'a>,
-        body: Box<Block<'a>>,
+        body: Box<Stmt<'a>>,
         begin_pos: Pos,
     },
     For {
         init: ForInit<'a>,
         cond: Option<Expr<'a>>,
         incr: Option<Expr<'a>>,
-        body: Box<Block<'a>>,
+        body: Box<Stmt<'a>>,
         begin_pos: Pos,
     },
 }
@@ -170,12 +170,12 @@ impl<'a> Stmt<'a> {
             } => (*begin_pos, *end_pos),
             Stmt::If {
                 begin_pos,
-                true_block,
-                false_block,
+                true_stmt,
+                false_stmt,
                 ..
-            } => match false_block {
+            } => match false_stmt {
                 Some(b) => (*begin_pos, b.pos().1),
-                None => (*begin_pos, true_block.pos().1),
+                None => (*begin_pos, true_stmt.pos().1),
             },
             Stmt::While {
                 begin_pos, body, ..
@@ -201,17 +201,17 @@ impl<'a> Stmt<'a> {
             }
             Stmt::If {
                 cond,
-                true_block,
-                false_block,
+                true_stmt,
+                false_stmt,
                 ..
             } => {
                 f.write_str("if (")?;
                 cond.fmt(f)?;
                 f.write_str(") ")?;
-                true_block.fmt_indent(f, level)?;
-                if let Some(b) = false_block {
+                true_stmt.fmt_indent(f, level)?;
+                if let Some(false_stmt) = false_stmt {
                     f.write_str(" else ")?;
-                    b.fmt_indent(f, level)?;
+                    false_stmt.fmt_indent(f, level)?;
                 }
                 Ok(())
             }
@@ -470,17 +470,17 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         self.expect(Type::LParen)?;
         let cond = self.parse_expr()?;
         self.expect(Type::RParen)?;
-        let true_block = self.parse_block()?;
-        let false_block = if self.peek() == Type::Else {
+        let true_stmt = Box::new(self.parse_stmt()?);
+        let false_stmt = if self.peek() == Type::Else {
             self.take();
-            Some(self.parse_block()?)
+            Some(Box::new(self.parse_stmt()?))
         } else {
             None
         };
         Ok(Stmt::If {
             cond,
-            true_block,
-            false_block,
+            true_stmt,
+            false_stmt,
             begin_pos,
         })
     }
@@ -490,7 +490,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         self.expect(Type::LParen)?;
         let cond = self.parse_expr()?;
         self.expect(Type::RParen)?;
-        let body = Box::new(self.parse_block()?);
+        let body = Box::new(self.parse_stmt()?);
         Ok(Stmt::While {
             cond,
             body,
@@ -523,7 +523,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             _ => Some(self.parse_expr()?),
         };
         self.expect(Type::RParen)?;
-        let body = Box::new(self.parse_block()?);
+        let body = Box::new(self.parse_stmt()?);
         Ok(Stmt::For {
             init,
             cond,

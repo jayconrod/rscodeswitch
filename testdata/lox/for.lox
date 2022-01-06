@@ -18,9 +18,8 @@ fun main() {
   print i;
   // Output: 3
 
-  for (; i < 4; i = i + 1) {
+  for (; i < 4; i = i + 1)
     print i;
-  }
   // Output: 3
 
   for (; i < 5;) {
