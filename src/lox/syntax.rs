@@ -146,6 +146,11 @@ pub enum Stmt<'a> {
         false_block: Option<Box<Block<'a>>>,
         begin_pos: Pos,
     },
+    While {
+        cond: Box<Expr<'a>>,
+        body: Box<Block<'a>>,
+        begin_pos: Pos,
+    },
 }
 
 impl<'a> Stmt<'a> {
@@ -165,6 +170,9 @@ impl<'a> Stmt<'a> {
                 Some(b) => (*begin_pos, b.pos().1),
                 None => (*begin_pos, true_block.pos().1),
             },
+            Stmt::While {
+                begin_pos, body, ..
+            } => (*begin_pos, body.pos().1),
         }
     }
 }
@@ -196,6 +204,12 @@ impl<'a> Stmt<'a> {
                     b.fmt_indent(f, level)?;
                 }
                 Ok(())
+            }
+            Stmt::While { cond, body, .. } => {
+                f.write_str("while (")?;
+                cond.fmt(f)?;
+                f.write_str("? ")?;
+                body.fmt_indent(f, level)
             }
         }
     }
@@ -382,6 +396,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             Type::Print => self.parse_print_stmt(),
             Type::LBrace => Ok(Stmt::Block(Box::new(self.parse_block()?))),
             Type::If => self.parse_if_stmt(),
+            Type::While => self.parse_while_stmt(),
             _ => self.parse_expr_stmt(),
         }
     }
@@ -419,6 +434,19 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             cond,
             true_block,
             false_block,
+            begin_pos,
+        })
+    }
+
+    fn parse_while_stmt(&mut self) -> Result<Stmt<'a>, Error> {
+        let begin_pos = self.expect(Type::While)?.from;
+        self.expect(Type::LParen)?;
+        let cond = Box::new(self.parse_expr()?);
+        self.expect(Type::RParen)?;
+        let body = Box::new(self.parse_block()?);
+        Ok(Stmt::While {
+            cond,
+            body,
             begin_pos,
         })
     }

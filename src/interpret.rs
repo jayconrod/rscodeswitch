@@ -220,17 +220,13 @@ impl<'a> Interpreter<'a> {
                     }
                     inst::B => {
                         let delta = i32::from_le_bytes(*((ip as usize + 1) as *const [u8; 4]));
-                        ip = (ip as usize + 1)
-                            .checked_add(delta as isize as usize)
-                            .unwrap() as *const u8;
+                        ip = ((ip as isize) + 1 + delta as isize) as *const u8;
                         continue;
                     }
                     inst::BIF => {
                         if pop_cond!() {
                             let delta = i32::from_le_bytes(*((ip as usize + 1) as *const [u8; 4]));
-                            ip = (ip as usize + 1)
-                                .checked_add(delta as isize as usize)
-                                .unwrap() as *const u8;
+                            ip = ((ip as isize) + 1 + delta as isize) as *const u8;
                             continue;
                         }
                     }

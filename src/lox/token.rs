@@ -28,6 +28,7 @@ pub enum Type {
     If,
     Print,
     Var,
+    While,
     Bool,
     Number,
     String,
@@ -61,6 +62,7 @@ impl fmt::Display for Type {
             Type::If => "'if'",
             Type::Print => "'print'",
             Type::Var => "'var'",
+            Type::While => "'while'",
             Type::Bool => "bool",
             Type::Number => "number",
             Type::String => "string",
@@ -186,6 +188,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
                     "print" => Type::Print,
                     "true" => Type::Bool,
                     "var" => Type::Var,
+                    "while" => Type::While,
                     _ => Type::Ident,
                 };
                 self.add_token(end, type_);

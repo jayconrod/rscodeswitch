@@ -48,16 +48,16 @@ impl LineMap {
         let find_line_and_col = |pos: Pos| {
             let line = from_file.lines.partition_point(|&l| l <= pos.offset);
             let col = pos.offset - from_file.lines[line - 1];
-            (line, col)
+            (line + 1, col + 1) // Count from 1, not 0.
         };
         let (from_line, from_col) = find_line_and_col(from);
         let (to_line, to_col) = find_line_and_col(to);
         Position {
             filename: from_file.filename.clone(),
-            from_line: from_line,
-            from_col: from_col,
-            to_line: to_line,
-            to_col: to_col,
+            from_line,
+            from_col,
+            to_line,
+            to_col,
         }
     }
 

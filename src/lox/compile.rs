@@ -256,6 +256,16 @@ impl<'a> Compiler<'a> {
                     }
                 }
             }
+            Stmt::While { cond, body, .. } => {
+                let mut body_label = Label::new();
+                let mut cond_label = Label::new();
+                self.asm().b(&mut cond_label);
+                self.asm().bind(&mut body_label);
+                self.compile_block(body)?;
+                self.asm().bind(&mut cond_label);
+                self.compile_expr(cond)?;
+                self.asm().bif(&mut body_label);
+            }
         }
         Ok(())
     }

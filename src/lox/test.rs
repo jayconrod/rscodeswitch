@@ -4,12 +4,22 @@ use crate::lox::syntax;
 use crate::lox::token;
 use crate::pos::LineMap;
 
-use std::error::Error;
+use std::env;
+use std::error;
+use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::str;
 
+use regex::Regex;
+
 #[test]
-fn interpret_test() -> Result<(), Box<dyn Error>> {
+fn interpret_test() -> Result<(), Box<dyn std::error::Error>> {
+    let filter_re_opt = match env::var("CODESWITCH_TEST_FILTER") {
+        Ok(s) => Some(Regex::new(&s)?),
+        _ => None,
+    };
+
+    let mut did_match = false;
     for fi in fs::read_dir("testdata/lox").map_err(|err| Box::new(err))? {
         let fi = fi.map_err(|err| Box::new(err))?;
         let path_buf = fi.path();
@@ -17,50 +27,47 @@ fn interpret_test() -> Result<(), Box<dyn Error>> {
             Some(path) if path.ends_with(".lox") => path,
             _ => continue,
         };
-
-        let wrap_err =
-            |err: Box<dyn Error>| -> Box<dyn Error> { format!("in file {}: {}", path, err).into() };
+        if let Some(ref filter_re) = filter_re_opt {
+            if !filter_re.is_match(path) {
+                continue;
+            }
+        }
+        did_match = true;
 
         let mut lmap = LineMap::new();
-        let data = fs::read(&path)
-            .map_err(|err| err.into())
-            .map_err(wrap_err)?;
-        let tokens = token::lex(&path, &data, &mut lmap)
-            .map_err(|err| err.into())
-            .map_err(wrap_err)?;
-        let ast = syntax::parse(&tokens, &lmap)
-            .map_err(|err| err.into())
-            .map_err(wrap_err)?;
-        let pkg = compile::compile(&ast, &lmap)
-            .map_err(|err| err.into())
-            .map_err(wrap_err)?;
+        let data = fs::read(&path).map_err(|err| Error::wrap(path, &err))?;
+        let tokens = token::lex(&path, &data, &mut lmap).map_err(|err| Error::wrap(path, &err))?;
+        let ast = syntax::parse(&tokens, &lmap).map_err(|err| Error::wrap(path, &err))?;
+        let pkg = compile::compile(&ast, &lmap).map_err(|err| Error::wrap(path, &err))?;
 
         let mut got = Vec::new();
         let mut interp = Interpreter::new(&mut got, pkg);
         interp
             .interpret("init")
-            .map_err(|err| err.into())
-            .map_err(wrap_err)?;
+            .map_err(|err| Error::wrap(path, &err))?;
         interp
             .interpret("main")
-            .map_err(|err| err.into())
-            .map_err(wrap_err)?;
+            .map_err(|err| Error::wrap(path, &err))?;
         let got_str = str::from_utf8(&got)
-            .map_err(|err| err.into())
-            .map_err(wrap_err)?
+            .map_err(|err| Error::wrap(path, &err))?
             .trim();
-        let want_str = expected_output(
-            str::from_utf8(&data)
-                .map_err(|err| err.into())
-                .map_err(wrap_err)?,
-        );
+        let want_str =
+            expected_output(str::from_utf8(&data).map_err(|err| Error::wrap(path, &err))?);
         if got_str != want_str {
-            return Err(wrap_err(
-                format!("got:\n{}\n\nwant:\n{}", got_str, want_str).into(),
-            ));
+            return Err(Box::new(Error::with_message(
+                path,
+                format!("got:\n{}\n\nwant:\n{}", got_str, want_str),
+            )));
         }
     }
-    Ok(())
+    if !did_match {
+        Err(Box::new(Error::with_message(
+            "",
+            String::from("no tests matched pattern"),
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 fn expected_output(mut data: &str) -> String {
@@ -84,3 +91,37 @@ fn expected_output(mut data: &str) -> String {
         }
     }
 }
+
+#[derive(Debug)]
+struct Error {
+    path: String,
+    message: String,
+}
+
+impl Error {
+    fn with_message(path: &str, message: String) -> Error {
+        Error {
+            path: String::from(path),
+            message: message,
+        }
+    }
+    fn wrap(path: &str, err: &dyn fmt::Display) -> Error {
+        Error {
+            path: String::from(path),
+            message: format!("{}", err),
+        }
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let mut sep = "";
+        if !self.path.is_empty() {
+            f.write_str(&self.path)?;
+            sep = ": ";
+        }
+        write!(f, "{}{}", sep, self.message)
+    }
+}
+
+impl error::Error for Error {}
