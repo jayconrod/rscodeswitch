@@ -1,7 +1,7 @@
 use crate::data::{self, List, SetValue};
 use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
-use crate::lox::syntax::{Block, Decl, Expr, File, LValue, Stmt};
+use crate::lox::syntax::{Block, Decl, Expr, File, ForInit, LValue, Stmt};
 use crate::lox::token::{Token, Type};
 use crate::package::{Function, Global, Package};
 use crate::pos::{Error, LineMap, Pos};
@@ -202,17 +202,11 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_block(&mut self, block: &Block<'a>) -> Result<(), Error> {
-        let next = self.env().next;
-        self.env_stack.push(Env::new(EnvKind::Block));
-        self.env().next = next;
+        self.enter_block();
         for decl in &block.decls {
             self.compile_decl(decl)?;
         }
-        let delta = self.env().next - next;
-        self.env_stack.pop();
-        for _ in 0..delta {
-            self.asm().pop();
-        }
+        self.leave_block();
         Ok(())
     }
 
@@ -265,6 +259,48 @@ impl<'a> Compiler<'a> {
                 self.asm().bind(&mut cond_label);
                 self.compile_expr(cond)?;
                 self.asm().bif(&mut body_label);
+            }
+            Stmt::For {
+                init,
+                cond,
+                incr,
+                body,
+                ..
+            } => {
+                match init {
+                    ForInit::Var(init) => {
+                        self.enter_block();
+                        self.compile_decl(init)?;
+                    }
+                    ForInit::Expr(init) => {
+                        self.compile_expr(init)?;
+                    }
+                    _ => (),
+                };
+                let mut body_label = Label::new();
+                let mut cond_label = Label::new();
+                if cond.is_some() {
+                    self.asm().b(&mut cond_label);
+                }
+                self.asm().bind(&mut body_label);
+                self.compile_block(&body)?;
+                if let Some(incr) = incr {
+                    self.compile_expr(incr)?;
+                    self.asm().pop();
+                }
+                match cond {
+                    Some(cond) => {
+                        self.asm().bind(&mut cond_label);
+                        self.compile_expr(cond)?;
+                        self.asm().bif(&mut body_label);
+                    }
+                    None => {
+                        self.asm().b(&mut body_label);
+                    }
+                }
+                if let ForInit::Var(_) = init {
+                    self.leave_block();
+                }
             }
         }
         Ok(())
@@ -399,6 +435,21 @@ impl<'a> Compiler<'a> {
             }
             assert!(i > 0);
             i -= 1;
+        }
+    }
+
+    fn enter_block(&mut self) {
+        let mut env = Env::new(EnvKind::Block);
+        env.next = self.env().next;
+        self.env_stack.push(env);
+    }
+
+    fn leave_block(&mut self) {
+        let env = self.env_stack.pop().unwrap();
+        assert!(env.kind == EnvKind::Block);
+        let delta = env.next - self.env().next;
+        for _ in 0..delta {
+            self.asm().pop();
         }
     }
 

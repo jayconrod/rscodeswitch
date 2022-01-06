@@ -24,6 +24,7 @@ pub enum Type {
     Slash,
     Bang,
     Else,
+    For,
     Fun,
     If,
     Print,
@@ -58,6 +59,7 @@ impl fmt::Display for Type {
             Type::Slash => "/",
             Type::Bang => "!",
             Type::Else => "'else'",
+            Type::For => "'for'",
             Type::Fun => "'fun'",
             Type::If => "'if'",
             Type::Print => "'print'",
@@ -183,6 +185,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 let type_ = match text {
                     "else" => Type::Else,
                     "false" => Type::Bool,
+                    "for" => Type::For,
                     "fun" => Type::Fun,
                     "if" => Type::If,
                     "print" => Type::Print,

@@ -133,21 +133,28 @@ impl<'a> Display for Block<'a> {
 }
 
 pub enum Stmt<'a> {
-    Expr(Box<Expr<'a>>),
+    Expr(Expr<'a>),
     Block(Box<Block<'a>>),
     Print {
-        expr: Box<Expr<'a>>,
+        expr: Expr<'a>,
         begin_pos: Pos,
         end_pos: Pos,
     },
     If {
-        cond: Box<Expr<'a>>,
-        true_block: Box<Block<'a>>,
-        false_block: Option<Box<Block<'a>>>,
+        cond: Expr<'a>,
+        true_block: Block<'a>,
+        false_block: Option<Block<'a>>,
         begin_pos: Pos,
     },
     While {
-        cond: Box<Expr<'a>>,
+        cond: Expr<'a>,
+        body: Box<Block<'a>>,
+        begin_pos: Pos,
+    },
+    For {
+        init: ForInit<'a>,
+        cond: Option<Expr<'a>>,
+        incr: Option<Expr<'a>>,
         body: Box<Block<'a>>,
         begin_pos: Pos,
     },
@@ -171,6 +178,9 @@ impl<'a> Stmt<'a> {
                 None => (*begin_pos, true_block.pos().1),
             },
             Stmt::While {
+                begin_pos, body, ..
+            } => (*begin_pos, body.pos().1),
+            Stmt::For {
                 begin_pos, body, ..
             } => (*begin_pos, body.pos().1),
         }
@@ -211,6 +221,26 @@ impl<'a> Stmt<'a> {
                 f.write_str("? ")?;
                 body.fmt_indent(f, level)
             }
+            Stmt::For {
+                init,
+                cond,
+                incr,
+                body,
+                ..
+            } => {
+                f.write_str("for (")?;
+                init.fmt(f)?;
+                f.write_str("; ")?;
+                if let Some(cond) = cond {
+                    cond.fmt(f)?;
+                }
+                f.write_str("; ")?;
+                if let Some(incr) = incr {
+                    incr.fmt(f)?;
+                }
+                f.write_str(") ")?;
+                body.fmt_indent(f, level)
+            }
         }
     }
 }
@@ -218,6 +248,22 @@ impl<'a> Stmt<'a> {
 impl<'a> Display for Stmt<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.fmt_indent(f, 0)
+    }
+}
+
+pub enum ForInit<'a> {
+    Var(Box<Decl<'a>>),
+    Expr(Expr<'a>),
+    None,
+}
+
+impl<'a> Display for ForInit<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ForInit::Var(decl) => decl.fmt(f),
+            ForInit::Expr(expr) => expr.fmt(f),
+            ForInit::None => Ok(()),
+        }
     }
 }
 
@@ -397,6 +443,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             Type::LBrace => Ok(Stmt::Block(Box::new(self.parse_block()?))),
             Type::If => self.parse_if_stmt(),
             Type::While => self.parse_while_stmt(),
+            Type::For => self.parse_for_stmt(),
             _ => self.parse_expr_stmt(),
         }
     }
@@ -404,12 +451,12 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     fn parse_expr_stmt(&mut self) -> Result<Stmt<'a>, Error> {
         let e = self.parse_expr()?;
         self.expect(Type::Semi)?;
-        Ok(Stmt::Expr(Box::new(e)))
+        Ok(Stmt::Expr(e))
     }
 
     fn parse_print_stmt(&mut self) -> Result<Stmt<'a>, Error> {
         let begin_pos = self.expect(Type::Print)?.from;
-        let expr = Box::new(self.parse_expr()?);
+        let expr = self.parse_expr()?;
         let end_pos = self.expect(Type::Semi)?.to;
         Ok(Stmt::Print {
             expr,
@@ -421,12 +468,12 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     fn parse_if_stmt(&mut self) -> Result<Stmt<'a>, Error> {
         let begin_pos = self.expect(Type::If)?.from;
         self.expect(Type::LParen)?;
-        let cond = Box::new(self.parse_expr()?);
+        let cond = self.parse_expr()?;
         self.expect(Type::RParen)?;
-        let true_block = Box::new(self.parse_block()?);
+        let true_block = self.parse_block()?;
         let false_block = if self.peek() == Type::Else {
             self.take();
-            Some(Box::new(self.parse_block()?))
+            Some(self.parse_block()?)
         } else {
             None
         };
@@ -441,11 +488,46 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     fn parse_while_stmt(&mut self) -> Result<Stmt<'a>, Error> {
         let begin_pos = self.expect(Type::While)?.from;
         self.expect(Type::LParen)?;
-        let cond = Box::new(self.parse_expr()?);
+        let cond = self.parse_expr()?;
         self.expect(Type::RParen)?;
         let body = Box::new(self.parse_block()?);
         Ok(Stmt::While {
             cond,
+            body,
+            begin_pos,
+        })
+    }
+
+    fn parse_for_stmt(&mut self) -> Result<Stmt<'a>, Error> {
+        let begin_pos = self.expect(Type::For)?.from;
+        self.expect(Type::LParen)?;
+        let init = match self.peek() {
+            Type::Var => ForInit::Var(Box::new(self.parse_var_decl()?)),
+            Type::Semi => {
+                self.take();
+                ForInit::None
+            }
+            _ => {
+                let init = ForInit::Expr(self.parse_expr()?);
+                self.expect(Type::Semi)?;
+                init
+            }
+        };
+        let cond = match self.peek() {
+            Type::Semi => None,
+            _ => Some(self.parse_expr()?),
+        };
+        self.expect(Type::Semi)?;
+        let incr = match self.peek() {
+            Type::RParen => None,
+            _ => Some(self.parse_expr()?),
+        };
+        self.expect(Type::RParen)?;
+        let body = Box::new(self.parse_block()?);
+        Ok(Stmt::For {
+            init,
+            cond,
+            incr,
             body,
             begin_pos,
         })
