@@ -41,13 +41,12 @@ fn interpret_test() -> Result<(), Box<dyn std::error::Error>> {
         let pkg = compile::compile(&ast, &lmap).map_err(|err| Error::wrap(path, &err))?;
 
         let mut got = Vec::new();
-        let mut interp = Interpreter::new(&mut got, pkg);
-        interp
-            .interpret("init")
-            .map_err(|err| Error::wrap(path, &err))?;
-        interp
-            .interpret("main")
-            .map_err(|err| Error::wrap(path, &err))?;
+        let mut interp = Interpreter::new(&mut got);
+        for name in ["init", "main"] {
+            if let Some(f) = pkg.function_by_name(name) {
+                interp.interpret(f).map_err(|err| Error::wrap(path, &err))?;
+            }
+        }
         let got_str = str::from_utf8(&got)
             .map_err(|err| Error::wrap(path, &err))?
             .trim();

@@ -439,16 +439,25 @@ impl<'a> Compiler<'a> {
     }
 
     fn enter_block(&mut self) {
+        let last_env = self.env();
+        let next = match last_env.kind {
+            EnvKind::Function | EnvKind::Block => last_env.next,
+            EnvKind::Global => 0,
+        };
         let mut env = Env::new(EnvKind::Block);
-        env.next = self.env().next;
+        env.next = next;
         self.env_stack.push(env);
     }
 
     fn leave_block(&mut self) {
         let env = self.env_stack.pop().unwrap();
         assert!(env.kind == EnvKind::Block);
-        let delta = env.next - self.env().next;
-        for _ in 0..delta {
+        let last_env = self.env();
+        let slot_count = match last_env.kind {
+            EnvKind::Function | EnvKind::Block => env.next - last_env.next,
+            EnvKind::Global => env.next,
+        };
+        for _ in 0..slot_count {
             self.asm().pop();
         }
     }

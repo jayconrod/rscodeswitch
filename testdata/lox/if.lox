@@ -1,24 +1,22 @@
-fun main() {
-  if (true)
-    print 1; // Output: 1
+if (true)
+  print 1; // Output: 1
 
-  if (false)
-    print 2;
+if (false)
+  print 2;
 
-  if (true)
-    print 3; // Output: 3
-  else
-    print 4;
+if (true)
+  print 3; // Output: 3
+else
+  print 4;
 
-  if (false) {
-    print 5;
-  } else {
-    print 6; // Output: 6
-  }
-
-  if (true)
-    if (false)
-      print 7;
-    else
-      print 8; // Output: 8
+if (false) {
+  print 5;
+} else {
+  print 6; // Output: 6
 }
+
+if (true)
+  if (false)
+    print 7;
+  else
+    print 8; // Output: 8

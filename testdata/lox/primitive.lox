@@ -1,7 +1,5 @@
-fun main() {
-  print true; // Output: true
-  print false; // Output: false
-  print 12; // Output: 12
+print true; // Output: true
+print false; // Output: false
+print 12; // Output: 12
 
-  print "hello"; // Output: hello
-}
+print "hello"; // Output: hello

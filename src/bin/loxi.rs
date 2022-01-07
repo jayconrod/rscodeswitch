@@ -35,9 +35,12 @@ fn run(args: &[String]) -> Result<(), String> {
         eprintln!("{}", pkg);
 
         let mut w = stdout();
-        let mut interp = Interpreter::new(&mut w, pkg);
-        interp.interpret("init").map_err(err_to_string)?;
-        interp.interpret("main").map_err(err_to_string)?;
+        let mut interp = Interpreter::new(&mut w);
+        for name in ["init", "main"] {
+            if let Some(f) = pkg.function_by_name(name) {
+                interp.interpret(f).map_err(err_to_string)?;
+            }
+        }
     }
     Ok(())
 }

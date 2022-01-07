@@ -1,7 +1,7 @@
 use crate::data;
 use crate::inst;
 use crate::nanbox;
-use crate::package::{Function, Package, Type};
+use crate::package::{Function, Type};
 
 use std::error;
 use std::fmt;
@@ -9,29 +9,25 @@ use std::io::Write;
 
 pub struct Interpreter<'a> {
     w: &'a mut dyn Write,
-    pub package: Box<Package>,
     global_slots: Vec<u64>,
 }
 
 impl<'a> Interpreter<'a> {
-    pub fn new(w: &'a mut dyn Write, package: Box<Package>) -> Interpreter<'a> {
-        let mut global_slots = Vec::new();
-        global_slots.resize(package.globals.len() + package.functions.len(), 0);
+    pub fn new(w: &'a mut dyn Write) -> Interpreter<'a> {
         Interpreter {
             w,
-            package,
-            global_slots,
+            global_slots: Vec::new(),
         }
     }
 
-    pub fn interpret(&mut self, func_name: &str) -> Result<(), Error> {
+    pub fn interpret(&mut self, func: &Function) -> Result<(), Error> {
         unsafe {
-            let func = self
-                .package
-                .function_by_name(func_name)
-                .ok_or_else(|| Error {
-                    message: format!("no such function: '{}'", func_name),
-                })? as *const Function;
+            let func = func as *const Function;
+            let pp = func.as_ref().unwrap().package.as_ref().unwrap();
+            if self.global_slots.is_empty() {
+                self.global_slots
+                    .resize(pp.globals.len() + pp.functions.len(), 0);
+            }
 
             let mut stack = Stack::new();
             let mut sp = stack.end();
