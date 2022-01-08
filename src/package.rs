@@ -66,6 +66,7 @@ pub struct Function {
     pub name: std::string::String,
     pub insts: Vec<u8>,
     pub package: *const Package,
+    pub param_types: Vec<Type>,
 }
 
 impl fmt::Display for Function {
@@ -78,18 +79,22 @@ impl fmt::Display for Function {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Type {
+    Nil,
     Bool,
     Float64,
     String,
+    Function,
     Nanbox,
 }
 
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let s = match self {
+            Type::Nil => "nil",
             Type::Bool => "bool",
             Type::Float64 => "f64",
             Type::String => "string",
+            Type::Function => "function",
             Type::Nanbox => "dynval",
         };
         f.write_str(s)

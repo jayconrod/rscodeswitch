@@ -6,7 +6,7 @@ use crate::pos::LineMap;
 
 use std::env;
 use std::error;
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::fs;
 use std::str;
 
@@ -91,7 +91,6 @@ fn expected_output(mut data: &str) -> String {
     }
 }
 
-#[derive(Debug)]
 struct Error {
     path: String,
     message: String,
@@ -109,6 +108,12 @@ impl Error {
             path: String::from(path),
             message: format!("{}", err),
         }
+    }
+}
+
+impl Debug for Error {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "Error{{ {} }}", self)
     }
 }
 

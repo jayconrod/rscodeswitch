@@ -1,0 +1,29 @@
+fun add(x, y) {
+  return x + y;
+}
+print add(1, 2); // Output: 3
+
+fun add_noreturn(x, y) {
+  x + y;
+}
+print add_noreturn(1, 2); // Output: nil
+
+fun local_shadows_arg(x) {
+  var x = x + 1;
+  return x;
+}
+print local_shadows_arg(1); // Output: 2
+
+fun return_without_value() {
+  return;
+}
+print return_without_value(); // Output: nil
+
+var fun_var;
+fun fun_to_assign(x) {
+  return x + 1;
+}
+print fun_var; // Output: nil
+fun_var = fun_to_assign;
+print fun_var; // Output: <function>
+print fun_var(2); // Output: 3

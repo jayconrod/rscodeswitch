@@ -1,13 +1,24 @@
 use crate::data;
+use crate::package::Function;
 
 const QNAN: u64 = 0x7ffc_0000_0000_0000;
 
 const TAG_MASK: u64 = 7;
 const TAG_SIZE: u64 = 3;
-const TAG_BOOL: u64 = 1;
-const TAG_STRING: u64 = 2;
+const TAG_NIL: u64 = 1;
+const TAG_BOOL: u64 = 2;
+const TAG_STRING: u64 = 3;
+const TAG_FUNCTION: u64 = 4;
 
 const VALUE_MASK: u64 = 0x0003_ffff_ffff_ffff;
+
+pub fn from_nil() -> u64 {
+  QNAN | TAG_NIL
+}
+
+pub fn is_nil(v: u64) -> bool {
+  v & (QNAN | TAG_MASK) == QNAN | TAG_NIL
+}
 
 pub fn from_bool(b: bool) -> u64 {
   QNAN | TAG_BOOL | (b as u64) << TAG_SIZE
@@ -45,7 +56,22 @@ pub fn to_string(v: u64) -> Option<*const data::String> {
   }
 }
 
+pub fn from_function(f: *const Function) -> u64 {
+  QNAN | TAG_FUNCTION | f as u64
+}
+
+pub fn to_function(v: u64) -> Option<*const Function> {
+  if v & (QNAN | TAG_FUNCTION) == QNAN | TAG_FUNCTION {
+    Some((v & !QNAN & !TAG_MASK) as usize as *const Function)
+  } else {
+    None
+  }
+}
+
 pub fn debug_str(v: u64) -> String {
+  if is_nil(v) {
+    return String::from("nil");
+  }
   if let Some(b) = to_bool(v) {
     return format!("{}", b);
   }
@@ -57,16 +83,23 @@ pub fn debug_str(v: u64) -> String {
       return format!("{}", s.as_ref().unwrap());
     }
   }
+  if let Some(_) = to_function(v) {
+    return String::from("<function>");
+  }
   return format!("Nanbox {:?}", v);
 }
 
 pub fn debug_type(v: u64) -> &'static str {
-  if to_bool(v).is_some() {
+  if is_nil(v) {
+    "nil"
+  } else if to_bool(v).is_some() {
     "bool"
   } else if to_f64(v).is_some() {
     "f64"
   } else if to_string(v).is_some() {
     "string"
+  } else if to_function(v).is_some() {
+    "function"
   } else {
     "invalid value"
   }

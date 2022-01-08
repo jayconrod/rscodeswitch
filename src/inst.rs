@@ -3,18 +3,21 @@ use std::mem::swap;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 29.
+// Next opcode: 35.
 pub const ADD: u8 = 20;
 pub const B: u8 = 27;
 pub const BIF: u8 = 28;
+pub const CALLVALUE: u8 = 32;
 pub const DIV: u8 = 23;
 pub const DUP: u8 = 13;
 pub const EQ: u8 = 14;
 pub const FALSE: u8 = 8;
 pub const FLOAT64: u8 = 2;
+pub const FUNCTION: u8 = 31;
 pub const GE: u8 = 18;
 pub const GT: u8 = 19;
 pub const LE: u8 = 16;
+pub const LOADARG: u8 = 29;
 pub const LOADGLOBAL: u8 = 9;
 pub const LOADLOCAL: u8 = 11;
 pub const LT: u8 = 17;
@@ -22,14 +25,17 @@ pub const MUL: u8 = 22;
 pub const NANBOX: u8 = 6;
 pub const NE: u8 = 15;
 pub const NEG: u8 = 25;
+pub const NIL: u8 = 33;
 pub const NOP: u8 = 1;
 pub const NOT: u8 = 24;
 pub const POP: u8 = 3;
 pub const RET: u8 = 4;
+pub const STOREARG: u8 = 30;
 pub const STOREGLOBAL: u8 = 10;
 pub const STORELOCAL: u8 = 12;
 pub const STRING: u8 = 26;
 pub const SUB: u8 = 21;
+pub const SWAP: u8 = 34;
 pub const SYS: u8 = 5;
 pub const TRUE: u8 = 7;
 
@@ -37,11 +43,11 @@ pub const SYS_PRINT: u8 = 1;
 
 pub fn size(op: u8) -> usize {
     match op {
-        ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | MUL | NANBOX | NE | NEG | NOP | NOT
-        | POP | RET | SUB | TRUE => 1,
+        ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | MUL | NANBOX | NE | NEG | NIL | NOP
+        | NOT | POP | RET | SUB | SWAP | TRUE => 1,
         SYS => 2,
-        LOADLOCAL | STORELOCAL => 3,
-        B | BIF | LOADGLOBAL | STOREGLOBAL | STRING => 5,
+        CALLVALUE | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
+        B | BIF | FUNCTION | LOADGLOBAL | STOREGLOBAL | STRING => 5,
         FLOAT64 => 9,
         _ => panic!("unknown opcode"),
     }
@@ -52,14 +58,17 @@ pub fn mnemonic(op: u8) -> &'static str {
         ADD => "add",
         B => "b",
         BIF => "bif",
+        CALLVALUE => "callvalue",
         DIV => "div",
         DUP => "dup",
         EQ => "eq",
         FALSE => "false",
         FLOAT64 => "float64",
+        FUNCTION => "function",
         GE => "ge",
         GT => "gt",
         LE => "le",
+        LOADARG => "loadarg",
         LOADGLOBAL => "loadglobal",
         LOADLOCAL => "loadlocal",
         LT => "lt",
@@ -67,14 +76,17 @@ pub fn mnemonic(op: u8) -> &'static str {
         NANBOX => "nanbox",
         NE => "ne",
         NEG => "neg",
+        NIL => "nil",
         NOP => "nop",
         NOT => "not",
         POP => "pop",
         RET => "ret",
+        STOREARG => "storearg",
         STOREGLOBAL => "storeglobal",
         STORELOCAL => "storelocal",
         STRING => "string",
         SUB => "sub",
+        SWAP => "swap",
         SYS => "sys",
         TRUE => "true",
         _ => panic!("unknown opcode"),
@@ -151,6 +163,11 @@ impl Assembler {
         self.write_label(label);
     }
 
+    pub fn callvalue(&mut self, arg_count: u16) {
+        self.write_u8(CALLVALUE);
+        self.write_u16(arg_count);
+    }
+
     pub fn div(&mut self) {
         self.write_u8(DIV);
     }
@@ -172,6 +189,11 @@ impl Assembler {
         self.write_f64(n);
     }
 
+    pub fn function(&mut self, index: u32) {
+        self.write_u8(FUNCTION);
+        self.write_u32(index);
+    }
+
     pub fn ge(&mut self) {
         self.write_u8(GE);
     }
@@ -182,6 +204,11 @@ impl Assembler {
 
     pub fn le(&mut self) {
         self.write_u8(LE);
+    }
+
+    pub fn loadarg(&mut self, index: u16) {
+        self.write_u8(LOADARG);
+        self.write_u16(index);
     }
 
     pub fn loadglobal(&mut self, index: u32) {
@@ -214,6 +241,10 @@ impl Assembler {
         self.write_u8(NEG);
     }
 
+    pub fn nil(&mut self) {
+        self.write_u8(NIL);
+    }
+
     pub fn nop(&mut self) {
         self.write_u8(NOP);
     }
@@ -228,6 +259,11 @@ impl Assembler {
 
     pub fn ret(&mut self) {
         self.write_u8(RET);
+    }
+
+    pub fn storearg(&mut self, index: u16) {
+        self.write_u8(STOREARG);
+        self.write_u16(index);
     }
 
     pub fn storeglobal(&mut self, index: u32) {
@@ -247,6 +283,10 @@ impl Assembler {
 
     pub fn sub(&mut self) {
         self.write_u8(SUB);
+    }
+
+    pub fn swap(&mut self) {
+        self.write_u8(SWAP);
     }
 
     pub fn sys(&mut self, sys: u8) {
@@ -360,8 +400,8 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("  ")?;
         f.write_str(mnemonic(insts[p]))?;
         match insts[p] {
-            ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | MUL | NANBOX | NE | NEG | NOP
-            | NOT | POP | RET | SUB | TRUE => {
+            ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | MUL | NANBOX | NE | NEG | NIL
+            | NOP | NOT | POP | RET | SUB | SWAP | TRUE => {
                 f.write_str("\n")?;
             }
             B | BIF => {
@@ -379,6 +419,13 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                     }
                 }
             }
+            CALLVALUE => {
+                if p + 3 > insts.len() {
+                    return Err(fmt::Error);
+                }
+                let arg_count = u16::from_le_bytes(insts[p + 1..p + 3].try_into().unwrap());
+                write!(f, " {}\n", arg_count)?;
+            }
             FLOAT64 => {
                 if p + 9 > insts.len() {
                     return Err(fmt::Error);
@@ -386,14 +433,14 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let n = f64::from_le_bytes(insts[p + 1..p + 9].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
-            LOADGLOBAL | STOREGLOBAL => {
+            FUNCTION | LOADGLOBAL | STOREGLOBAL => {
                 if p + 5 > insts.len() {
                     return Err(fmt::Error);
                 }
                 let n = u32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
-            LOADLOCAL | STORELOCAL => {
+            LOADARG | LOADLOCAL | STOREARG | STORELOCAL => {
                 if p + 3 > insts.len() {
                     return Err(fmt::Error);
                 }

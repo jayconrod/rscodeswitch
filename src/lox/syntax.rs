@@ -1,4 +1,4 @@
-use crate::lox::token::{Token, Type};
+use crate::lox::token::{Kind, Token};
 use crate::pos::{Error, LineMap, Pos};
 use std::boxed::Box;
 use std::fmt;
@@ -158,6 +158,11 @@ pub enum Stmt<'a> {
         body: Box<Stmt<'a>>,
         begin_pos: Pos,
     },
+    Return {
+        expr: Option<Expr<'a>>,
+        begin_pos: Pos,
+        end_pos: Pos,
+    },
 }
 
 impl<'a> Stmt<'a> {
@@ -183,6 +188,9 @@ impl<'a> Stmt<'a> {
             Stmt::For {
                 begin_pos, body, ..
             } => (*begin_pos, body.pos().1),
+            Stmt::Return {
+                begin_pos, end_pos, ..
+            } => (*begin_pos, *end_pos),
         }
     }
 }
@@ -241,6 +249,12 @@ impl<'a> Stmt<'a> {
                 f.write_str(") ")?;
                 body.fmt_indent(f, level)
             }
+            Stmt::Return { expr, .. } => match expr {
+                Some(expr) => {
+                    write!(f, "return {};", expr)
+                }
+                None => f.write_str("return;"),
+            },
         }
     }
 }
@@ -268,6 +282,7 @@ impl<'a> Display for ForInit<'a> {
 }
 
 pub enum Expr<'a> {
+    Nil(Token<'a>),
     Bool(Token<'a>),
     Number(Token<'a>),
     String(Token<'a>),
@@ -277,14 +292,20 @@ pub enum Expr<'a> {
         begin_pos: Pos,
         end_pos: Pos,
     },
+    Call {
+        callee: Box<Expr<'a>>,
+        arguments: Vec<Expr<'a>>,
+        end_pos: Pos,
+    },
     Unary(Token<'a>, Box<Expr<'a>>),
     Binary(Box<Expr<'a>>, Token<'a>, Box<Expr<'a>>),
     Assign(LValue<'a>, Box<Expr<'a>>),
 }
 
 impl<'a> Expr<'a> {
-    fn pos(&self) -> (Pos, Pos) {
+    pub fn pos(&self) -> (Pos, Pos) {
         match self {
+            Expr::Nil(t) => (t.from, t.to),
             Expr::Bool(t) => (t.from, t.to),
             Expr::Number(t) => (t.from, t.to),
             Expr::String(t) => (t.from, t.to),
@@ -292,6 +313,9 @@ impl<'a> Expr<'a> {
             Expr::Group {
                 begin_pos, end_pos, ..
             } => (*begin_pos, *end_pos),
+            Expr::Call {
+                callee, end_pos, ..
+            } => (callee.pos().0, *end_pos),
             Expr::Unary(op, e) => (op.from, e.pos().1),
             Expr::Binary(l, _, r) => (l.pos().0, r.pos().0),
             Expr::Assign(l, r) => (l.pos().0, r.pos().1),
@@ -302,11 +326,25 @@ impl<'a> Expr<'a> {
 impl<'a> Display for Expr<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Expr::Nil(_) => f.write_str("nil"),
             Expr::Bool(t) => f.write_str(t.text),
             Expr::Number(t) => f.write_str(t.text),
             Expr::String(t) => f.write_str(t.text),
             Expr::Var(t) => f.write_str(t.text),
             Expr::Group { expr, .. } => write!(f, "({})", expr),
+            Expr::Call {
+                callee, arguments, ..
+            } => {
+                callee.fmt(f)?;
+                f.write_str("(")?;
+                let mut sep = "";
+                for arg in arguments {
+                    f.write_str(sep)?;
+                    sep = ", ";
+                    arg.fmt(f)?;
+                }
+                f.write_str(")")
+            }
             Expr::Unary(op, e) => write!(f, "{}{}", op.text, e),
             Expr::Binary(l, op, r) => write!(f, "{} {} {}", l, op.text, r),
             Expr::Assign(l, r) => write!(f, "{} = {}", l, r),
@@ -354,7 +392,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         let mut decls = Vec::new();
         loop {
             match self.peek() {
-                Type::EOF => break,
+                Kind::EOF => break,
                 _ => decls.push(self.parse_decl()?),
             }
         }
@@ -364,26 +402,26 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     fn parse_decl(&mut self) -> Result<Decl<'a>, Error> {
         let type_ = self.peek();
         match type_ {
-            Type::Var => self.parse_var_decl(),
-            Type::Fun => self.parse_function_decl(),
+            Kind::Var => self.parse_var_decl(),
+            Kind::Fun => self.parse_function_decl(),
             _ => self.parse_stmt().map(|stmt| Decl::Stmt(stmt)),
         }
     }
 
     fn parse_var_decl(&mut self) -> Result<Decl<'a>, Error> {
-        let begin_pos = self.expect(Type::Var)?.from;
-        let name = self.expect(Type::Ident)?;
+        let begin_pos = self.expect(Kind::Var)?.from;
+        let name = self.expect(Kind::Ident)?;
         let type_ = self.peek();
         let init = match type_ {
-            Type::Assign => {
+            Kind::Assign => {
                 self.take();
                 let init = self.parse_expr()?;
                 Some(init)
             }
-            Type::Semi => None,
+            Kind::Semi => None,
             _ => return Err(self.error(format!("expected '=' or ';', found {}", type_))),
         };
-        let end_pos = self.expect(Type::Semi)?.to;
+        let end_pos = self.expect(Kind::Semi)?.to;
         Ok(Decl::Var {
             name,
             init,
@@ -393,8 +431,8 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_function_decl(&mut self) -> Result<Decl<'a>, Error> {
-        let begin_pos = self.expect(Type::Fun)?.from;
-        let name = self.expect(Type::Ident)?;
+        let begin_pos = self.expect(Kind::Fun)?.from;
+        let name = self.expect(Kind::Ident)?;
         let param_names = self.parse_params()?;
         let body = self.parse_block()?;
         let end_pos = body.pos().1;
@@ -408,28 +446,28 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_params(&mut self) -> Result<Vec<Token<'a>>, Error> {
-        self.expect(Type::LParen)?;
+        self.expect(Kind::LParen)?;
         let mut param_names = Vec::new();
         let mut first = true;
-        while self.peek() != Type::RParen {
+        while self.peek() != Kind::RParen {
             if first {
                 first = false;
             } else {
-                self.expect(Type::Comma)?;
+                self.expect(Kind::Comma)?;
             }
-            param_names.push(self.expect(Type::Ident)?);
+            param_names.push(self.expect(Kind::Ident)?);
         }
-        self.expect(Type::RParen)?;
+        self.expect(Kind::RParen)?;
         Ok(param_names)
     }
 
     fn parse_block(&mut self) -> Result<Block<'a>, Error> {
-        let begin_pos = self.expect(Type::LBrace)?.from;
+        let begin_pos = self.expect(Kind::LBrace)?.from;
         let mut decls = Vec::new();
-        while self.peek() != Type::RBrace {
+        while self.peek() != Kind::RBrace {
             decls.push(self.parse_decl()?);
         }
-        let end_pos = self.expect(Type::RBrace)?.to;
+        let end_pos = self.expect(Kind::RBrace)?.to;
         Ok(Block {
             decls,
             begin_pos,
@@ -439,25 +477,26 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
 
     fn parse_stmt(&mut self) -> Result<Stmt<'a>, Error> {
         match self.peek() {
-            Type::Print => self.parse_print_stmt(),
-            Type::LBrace => Ok(Stmt::Block(Box::new(self.parse_block()?))),
-            Type::If => self.parse_if_stmt(),
-            Type::While => self.parse_while_stmt(),
-            Type::For => self.parse_for_stmt(),
+            Kind::Print => self.parse_print_stmt(),
+            Kind::LBrace => Ok(Stmt::Block(Box::new(self.parse_block()?))),
+            Kind::If => self.parse_if_stmt(),
+            Kind::While => self.parse_while_stmt(),
+            Kind::For => self.parse_for_stmt(),
+            Kind::Return => self.parse_return_stmt(),
             _ => self.parse_expr_stmt(),
         }
     }
 
     fn parse_expr_stmt(&mut self) -> Result<Stmt<'a>, Error> {
         let e = self.parse_expr()?;
-        self.expect(Type::Semi)?;
+        self.expect(Kind::Semi)?;
         Ok(Stmt::Expr(e))
     }
 
     fn parse_print_stmt(&mut self) -> Result<Stmt<'a>, Error> {
-        let begin_pos = self.expect(Type::Print)?.from;
+        let begin_pos = self.expect(Kind::Print)?.from;
         let expr = self.parse_expr()?;
-        let end_pos = self.expect(Type::Semi)?.to;
+        let end_pos = self.expect(Kind::Semi)?.to;
         Ok(Stmt::Print {
             expr,
             begin_pos,
@@ -466,12 +505,12 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_if_stmt(&mut self) -> Result<Stmt<'a>, Error> {
-        let begin_pos = self.expect(Type::If)?.from;
-        self.expect(Type::LParen)?;
+        let begin_pos = self.expect(Kind::If)?.from;
+        self.expect(Kind::LParen)?;
         let cond = self.parse_expr()?;
-        self.expect(Type::RParen)?;
+        self.expect(Kind::RParen)?;
         let true_stmt = Box::new(self.parse_stmt()?);
-        let false_stmt = if self.peek() == Type::Else {
+        let false_stmt = if self.peek() == Kind::Else {
             self.take();
             Some(Box::new(self.parse_stmt()?))
         } else {
@@ -486,10 +525,10 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_while_stmt(&mut self) -> Result<Stmt<'a>, Error> {
-        let begin_pos = self.expect(Type::While)?.from;
-        self.expect(Type::LParen)?;
+        let begin_pos = self.expect(Kind::While)?.from;
+        self.expect(Kind::LParen)?;
         let cond = self.parse_expr()?;
-        self.expect(Type::RParen)?;
+        self.expect(Kind::RParen)?;
         let body = Box::new(self.parse_stmt()?);
         Ok(Stmt::While {
             cond,
@@ -499,30 +538,30 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_for_stmt(&mut self) -> Result<Stmt<'a>, Error> {
-        let begin_pos = self.expect(Type::For)?.from;
-        self.expect(Type::LParen)?;
+        let begin_pos = self.expect(Kind::For)?.from;
+        self.expect(Kind::LParen)?;
         let init = match self.peek() {
-            Type::Var => ForInit::Var(Box::new(self.parse_var_decl()?)),
-            Type::Semi => {
+            Kind::Var => ForInit::Var(Box::new(self.parse_var_decl()?)),
+            Kind::Semi => {
                 self.take();
                 ForInit::None
             }
             _ => {
                 let init = ForInit::Expr(self.parse_expr()?);
-                self.expect(Type::Semi)?;
+                self.expect(Kind::Semi)?;
                 init
             }
         };
         let cond = match self.peek() {
-            Type::Semi => None,
+            Kind::Semi => None,
             _ => Some(self.parse_expr()?),
         };
-        self.expect(Type::Semi)?;
+        self.expect(Kind::Semi)?;
         let incr = match self.peek() {
-            Type::RParen => None,
+            Kind::RParen => None,
             _ => Some(self.parse_expr()?),
         };
-        self.expect(Type::RParen)?;
+        self.expect(Kind::RParen)?;
         let body = Box::new(self.parse_stmt()?);
         Ok(Stmt::For {
             init,
@@ -530,6 +569,21 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             incr,
             body,
             begin_pos,
+        })
+    }
+
+    fn parse_return_stmt(&mut self) -> Result<Stmt<'a>, Error> {
+        let begin_pos = self.expect(Kind::Return)?.from;
+        let expr = if self.peek() == Kind::Semi {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        let end_pos = self.expect(Kind::Semi)?.to;
+        Ok(Stmt::Return {
+            expr,
+            begin_pos,
+            end_pos,
         })
     }
 
@@ -553,7 +607,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             }
             e = rule.infix.unwrap()(self, e, can_assign)?;
         }
-        if can_assign && self.peek() == Type::Assign {
+        if can_assign && self.peek() == Kind::Assign {
             return Err(self.error(format!("invalid assignment")));
         }
 
@@ -561,9 +615,9 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_group_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
-        let begin_pos = self.expect(Type::LParen)?.from;
+        let begin_pos = self.expect(Kind::LParen)?.from;
         let expr = Box::new(self.parse_expr()?);
-        let end_pos = self.expect(Type::RParen)?.to;
+        let end_pos = self.expect(Kind::RParen)?.to;
         Ok(Expr::Group {
             expr,
             begin_pos,
@@ -571,10 +625,30 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         })
     }
 
+    fn parse_call_expr(&mut self, callee: Expr<'a>, _: bool) -> Result<Expr<'a>, Error> {
+        self.expect(Kind::LParen)?;
+        let mut arguments = Vec::new();
+        if self.peek() != Kind::RParen {
+            loop {
+                arguments.push(self.parse_expr()?);
+                if self.peek() != Kind::Comma {
+                    break;
+                }
+                self.take();
+            }
+        }
+        let end_pos = self.expect(Kind::RParen)?.to;
+        Ok(Expr::Call {
+            callee: Box::new(callee),
+            arguments,
+            end_pos,
+        })
+    }
+
     fn parse_unary_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
         let op = self.tokens[self.next];
         match op.type_ {
-            Type::Minus | Type::Bang => (),
+            Kind::Minus | Kind::Bang => (),
             _ => return Err(self.error(format!("expected expression, found {}", op.type_))),
         };
         self.take();
@@ -596,8 +670,8 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_var_expr(&mut self, can_assign: bool) -> Result<Expr<'a>, Error> {
-        let t = self.expect(Type::Ident)?;
-        if can_assign && self.peek() == Type::Assign {
+        let t = self.expect(Kind::Ident)?;
+        if can_assign && self.peek() == Kind::Assign {
             let l = LValue::Var(t);
             self.take();
             let r = self.parse_expr()?;
@@ -607,71 +681,80 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         }
     }
 
+    fn parse_nil_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
+        Ok(Expr::Nil(self.expect(Kind::Nil)?))
+    }
+
     fn parse_bool_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
-        Ok(Expr::Bool(self.expect(Type::Bool)?))
+        Ok(Expr::Bool(self.expect(Kind::Bool)?))
     }
 
     fn parse_num_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
-        Ok(Expr::Number(self.expect(Type::Number)?))
+        Ok(Expr::Number(self.expect(Kind::Number)?))
     }
 
     fn parse_string_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
-        Ok(Expr::String(self.expect(Type::String)?))
+        Ok(Expr::String(self.expect(Kind::String)?))
     }
 
-    fn get_rule<'d>(&self, type_: Type) -> ParseRule<'a, 'b, 'c, 'd> {
+    fn get_rule<'d>(&self, type_: Kind) -> ParseRule<'a, 'b, 'c, 'd> {
         match type_ {
-            Type::LParen => ParseRule {
+            Kind::LParen => ParseRule {
                 prefix: Some(&Parser::parse_group_expr),
-                infix: None,
-                precedence: Precedence::None,
+                infix: Some(&Parser::parse_call_expr),
+                precedence: Precedence::Call,
             },
-            Type::Eq | Type::Ne => ParseRule {
+            Kind::Eq | Kind::Ne => ParseRule {
                 prefix: None,
                 infix: Some(&Parser::parse_binary_expr),
                 precedence: Precedence::Equality,
             },
-            Type::Lt | Type::Le | Type::Gt | Type::Ge => ParseRule {
+            Kind::Lt | Kind::Le | Kind::Gt | Kind::Ge => ParseRule {
                 prefix: None,
                 infix: Some(&Parser::parse_binary_expr),
                 precedence: Precedence::Comparison,
             },
-            Type::Plus => ParseRule {
+            Kind::Plus => ParseRule {
                 prefix: None,
                 infix: Some(&Parser::parse_binary_expr),
                 precedence: Precedence::Term,
             },
-            Type::Minus => ParseRule {
+            Kind::Minus => ParseRule {
                 prefix: Some(&Parser::parse_unary_expr),
                 infix: Some(&Parser::parse_binary_expr),
                 precedence: Precedence::Term,
             },
-            Type::Star | Type::Slash => ParseRule {
+            Kind::Star | Kind::Slash => ParseRule {
                 prefix: None,
                 infix: Some(&Parser::parse_binary_expr),
                 precedence: Precedence::Factor,
             },
-            Type::Bang => ParseRule {
+            Kind::Bang => ParseRule {
                 prefix: Some(&Parser::parse_unary_expr),
                 infix: None,
                 precedence: Precedence::None,
             },
-            Type::Bool => ParseRule {
+            Kind::Nil => ParseRule {
+                prefix: Some(&Parser::parse_nil_expr),
+                infix: None,
+                precedence: Precedence::None,
+            },
+            Kind::Bool => ParseRule {
                 prefix: Some(&Parser::parse_bool_expr),
                 infix: None,
                 precedence: Precedence::None,
             },
-            Type::Number => ParseRule {
+            Kind::Number => ParseRule {
                 prefix: Some(&Parser::parse_num_expr),
                 infix: None,
                 precedence: Precedence::None,
             },
-            Type::String => ParseRule {
+            Kind::String => ParseRule {
                 prefix: Some(&Parser::parse_string_expr),
                 infix: None,
                 precedence: Precedence::None,
             },
-            Type::Ident => ParseRule {
+            Kind::Ident => ParseRule {
                 prefix: Some(&Parser::parse_var_expr),
                 infix: None,
                 precedence: Precedence::None,
@@ -684,7 +767,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         }
     }
 
-    fn expect(&mut self, want: Type) -> Result<Token<'a>, Error> {
+    fn expect(&mut self, want: Kind) -> Result<Token<'a>, Error> {
         let got = self.tokens[self.next];
         if got.type_ != want {
             return Err(self.error(format!("expected {}, found {}", want, got.type_)));
@@ -699,7 +782,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         t
     }
 
-    fn peek(&self) -> Type {
+    fn peek(&self) -> Kind {
         self.tokens[self.next].type_
     }
 
