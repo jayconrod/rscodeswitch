@@ -2,14 +2,15 @@ use crate::lox::token::{Kind, Token};
 use crate::pos::{Error, LineMap, Pos};
 use std::boxed::Box;
 use std::fmt;
-use std::fmt::Display;
+use std::fmt::{Display, Formatter};
 
-pub struct File<'a> {
+pub struct Program<'a> {
     pub decls: Vec<Decl<'a>>,
+    pub scope: usize,
 }
 
-impl<'a> Display for File<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<'a> Display for Program<'a> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let mut sep = "";
         for decl in &self.decls {
             decl.fmt(f)?;
@@ -26,13 +27,17 @@ pub enum Decl<'a> {
         init: Option<Expr<'a>>,
         begin_pos: Pos,
         end_pos: Pos,
+        var: usize,
     },
     Function {
         name: Token<'a>,
-        param_names: Vec<Token<'a>>,
+        params: Vec<Param<'a>>,
         body: Block<'a>,
         begin_pos: Pos,
         end_pos: Pos,
+        arg_scope: usize,
+        body_scope: usize,
+        var: usize,
     },
     Stmt(Stmt<'a>),
 }
@@ -60,7 +65,7 @@ impl<'a> Decl<'a> {
 }
 
 impl<'a> Decl<'a> {
-    fn fmt_indent(&self, f: &mut fmt::Formatter<'_>, level: usize) -> fmt::Result {
+    fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
         for _ in 0..level {
             f.write_str("  ")?;
         }
@@ -75,19 +80,15 @@ impl<'a> Decl<'a> {
                 f.write_str(";")
             }
             Decl::Function {
-                name,
-                param_names,
-                body,
-                ..
+                name, params, body, ..
             } => {
                 f.write_str("function ")?;
                 f.write_str(name.text)?;
                 f.write_str("(")?;
                 let mut sep = "";
-                for param_name in param_names {
-                    f.write_str(sep)?;
+                for param in params {
+                    write!(f, "{}{}", sep, param)?;
                     sep = ", ";
-                    f.write_str(param_name.text)?;
                 }
                 f.write_str(") ")?;
                 body.fmt(f)
@@ -98,13 +99,25 @@ impl<'a> Decl<'a> {
 }
 
 impl<'a> Display for Decl<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         self.fmt_indent(f, 0)
+    }
+}
+
+pub struct Param<'a> {
+    pub name: Token<'a>,
+    pub var: usize,
+}
+
+impl<'a> Display for Param<'a> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str(self.name.text)
     }
 }
 
 pub struct Block<'a> {
     pub decls: Vec<Decl<'a>>,
+    pub scope: usize,
     pub begin_pos: Pos,
     pub end_pos: Pos,
 }
@@ -114,7 +127,7 @@ impl<'a> Block<'a> {
         (self.begin_pos, self.end_pos)
     }
 
-    fn fmt_indent(&self, f: &mut fmt::Formatter<'_>, level: usize) -> fmt::Result {
+    fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
         f.write_str("{\n")?;
         for decl in &self.decls {
             decl.fmt_indent(f, level + 1)?;
@@ -127,7 +140,7 @@ impl<'a> Block<'a> {
 }
 
 impl<'a> Display for Block<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         self.fmt_indent(f, 0)
     }
 }
@@ -156,6 +169,7 @@ pub enum Stmt<'a> {
         cond: Option<Expr<'a>>,
         incr: Option<Expr<'a>>,
         body: Box<Stmt<'a>>,
+        scope: usize,
         begin_pos: Pos,
     },
     Return {
@@ -196,7 +210,7 @@ impl<'a> Stmt<'a> {
 }
 
 impl<'a> Stmt<'a> {
-    fn fmt_indent(&self, f: &mut fmt::Formatter<'_>, level: usize) -> fmt::Result {
+    fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
         for _ in 0..level {
             f.write_str("  ")?;
         }
@@ -260,7 +274,7 @@ impl<'a> Stmt<'a> {
 }
 
 impl<'a> Display for Stmt<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         self.fmt_indent(f, 0)
     }
 }
@@ -272,7 +286,7 @@ pub enum ForInit<'a> {
 }
 
 impl<'a> Display for ForInit<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             ForInit::Var(decl) => decl.fmt(f),
             ForInit::Expr(expr) => expr.fmt(f),
@@ -286,7 +300,10 @@ pub enum Expr<'a> {
     Bool(Token<'a>),
     Number(Token<'a>),
     String(Token<'a>),
-    Var(Token<'a>),
+    Var {
+        name: Token<'a>,
+        var_use: usize,
+    },
     Group {
         expr: Box<Expr<'a>>,
         begin_pos: Pos,
@@ -309,7 +326,7 @@ impl<'a> Expr<'a> {
             Expr::Bool(t) => (t.from, t.to),
             Expr::Number(t) => (t.from, t.to),
             Expr::String(t) => (t.from, t.to),
-            Expr::Var(t) => (t.from, t.to),
+            Expr::Var { name, .. } => (name.from, name.to),
             Expr::Group {
                 begin_pos, end_pos, ..
             } => (*begin_pos, *end_pos),
@@ -324,13 +341,13 @@ impl<'a> Expr<'a> {
 }
 
 impl<'a> Display for Expr<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             Expr::Nil(_) => f.write_str("nil"),
             Expr::Bool(t) => f.write_str(t.text),
             Expr::Number(t) => f.write_str(t.text),
             Expr::String(t) => f.write_str(t.text),
-            Expr::Var(t) => f.write_str(t.text),
+            Expr::Var { name, .. } => f.write_str(name.text),
             Expr::Group { expr, .. } => write!(f, "({})", expr),
             Expr::Call {
                 callee, arguments, ..
@@ -353,30 +370,33 @@ impl<'a> Display for Expr<'a> {
 }
 
 pub enum LValue<'a> {
-    Var(Token<'a>),
+    Var { name: Token<'a>, var_use: usize },
 }
 
 impl<'a> LValue<'a> {
     fn pos(&self) -> (Pos, Pos) {
         match self {
-            LValue::Var(t) => (t.from, t.to),
+            LValue::Var { name, .. } => (name.from, name.to),
         }
     }
 }
 
 impl<'a> Display for LValue<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            LValue::Var(t) => f.write_str(t.text),
+            LValue::Var { name, .. } => f.write_str(name.text),
         }
     }
 }
 
-pub fn parse<'a>(tokens: &[Token<'a>], lmap: &LineMap) -> Result<File<'a>, Error> {
+pub fn parse<'a>(tokens: &[Token<'a>], lmap: &LineMap) -> Result<Program<'a>, Error> {
     let mut p = Parser {
         tokens,
         lmap,
         next: 0,
+        next_scope: 0,
+        next_var: 0,
+        next_var_use: 0,
     };
     p.parse_file()
 }
@@ -385,10 +405,14 @@ struct Parser<'a, 'b, 'c> {
     tokens: &'b [Token<'a>],
     lmap: &'c LineMap,
     next: usize,
+    next_scope: usize,
+    next_var: usize,
+    next_var_use: usize,
 }
 
 impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
-    fn parse_file(&mut self) -> Result<File<'a>, Error> {
+    fn parse_file(&mut self) -> Result<Program<'a>, Error> {
+        let scope = self.next_scope();
         let mut decls = Vec::new();
         loop {
             match self.peek() {
@@ -396,7 +420,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
                 _ => decls.push(self.parse_decl()?),
             }
         }
-        Ok(File { decls: decls })
+        Ok(Program { decls, scope })
     }
 
     fn parse_decl(&mut self) -> Result<Decl<'a>, Error> {
@@ -409,6 +433,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_var_decl(&mut self) -> Result<Decl<'a>, Error> {
+        let var = self.next_var();
         let begin_pos = self.expect(Kind::Var)?.from;
         let name = self.expect(Kind::Ident)?;
         let type_ = self.peek();
@@ -427,27 +452,34 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             init,
             begin_pos,
             end_pos,
+            var,
         })
     }
 
     fn parse_function_decl(&mut self) -> Result<Decl<'a>, Error> {
+        let arg_scope = self.next_scope();
+        let body_scope = self.next_scope();
+        let var = self.next_var();
         let begin_pos = self.expect(Kind::Fun)?.from;
         let name = self.expect(Kind::Ident)?;
-        let param_names = self.parse_params()?;
+        let params = self.parse_params()?;
         let body = self.parse_block()?;
         let end_pos = body.pos().1;
         Ok(Decl::Function {
             name,
-            param_names,
+            params,
             body,
             begin_pos,
             end_pos,
+            arg_scope,
+            body_scope,
+            var,
         })
     }
 
-    fn parse_params(&mut self) -> Result<Vec<Token<'a>>, Error> {
+    fn parse_params(&mut self) -> Result<Vec<Param<'a>>, Error> {
         self.expect(Kind::LParen)?;
-        let mut param_names = Vec::new();
+        let mut params = Vec::new();
         let mut first = true;
         while self.peek() != Kind::RParen {
             if first {
@@ -455,13 +487,16 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             } else {
                 self.expect(Kind::Comma)?;
             }
-            param_names.push(self.expect(Kind::Ident)?);
+            let name = self.expect(Kind::Ident)?;
+            let var = self.next_var();
+            params.push(Param { name, var });
         }
         self.expect(Kind::RParen)?;
-        Ok(param_names)
+        Ok(params)
     }
 
     fn parse_block(&mut self) -> Result<Block<'a>, Error> {
+        let scope = self.next_scope();
         let begin_pos = self.expect(Kind::LBrace)?.from;
         let mut decls = Vec::new();
         while self.peek() != Kind::RBrace {
@@ -470,6 +505,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         let end_pos = self.expect(Kind::RBrace)?.to;
         Ok(Block {
             decls,
+            scope,
             begin_pos,
             end_pos,
         })
@@ -538,6 +574,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_for_stmt(&mut self) -> Result<Stmt<'a>, Error> {
+        let scope = self.next_scope();
         let begin_pos = self.expect(Kind::For)?.from;
         self.expect(Kind::LParen)?;
         let init = match self.peek() {
@@ -568,6 +605,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             cond,
             incr,
             body,
+            scope,
             begin_pos,
         })
     }
@@ -672,12 +710,18 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     fn parse_var_expr(&mut self, can_assign: bool) -> Result<Expr<'a>, Error> {
         let t = self.expect(Kind::Ident)?;
         if can_assign && self.peek() == Kind::Assign {
-            let l = LValue::Var(t);
+            let l = LValue::Var {
+                name: t,
+                var_use: self.next_var_use(),
+            };
             self.take();
             let r = self.parse_expr()?;
             Ok(Expr::Assign(l, Box::new(r)))
         } else {
-            Ok(Expr::Var(t))
+            Ok(Expr::Var {
+                name: t,
+                var_use: self.next_var_use(),
+            })
         }
     }
 
@@ -784,6 +828,24 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
 
     fn peek(&self) -> Kind {
         self.tokens[self.next].type_
+    }
+
+    fn next_var(&mut self) -> usize {
+        let var = self.next_var;
+        self.next_var += 1;
+        var
+    }
+
+    fn next_scope(&mut self) -> usize {
+        let scope = self.next_scope;
+        self.next_scope += 1;
+        scope
+    }
+
+    fn next_var_use(&mut self) -> usize {
+        let var_use = self.next_var_use;
+        self.next_var_use += 1;
+        var_use
     }
 
     fn error(&self, message: String) -> Error {

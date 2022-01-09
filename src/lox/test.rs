@@ -1,5 +1,6 @@
 use crate::interpret::Interpreter;
 use crate::lox::compile;
+use crate::lox::scope;
 use crate::lox::syntax;
 use crate::lox::token;
 use crate::pos::LineMap;
@@ -38,7 +39,8 @@ fn interpret_test() -> Result<(), Box<dyn std::error::Error>> {
         let data = fs::read(&path).map_err(|err| Error::wrap(path, &err))?;
         let tokens = token::lex(&path, &data, &mut lmap).map_err(|err| Error::wrap(path, &err))?;
         let ast = syntax::parse(&tokens, &lmap).map_err(|err| Error::wrap(path, &err))?;
-        let pkg = compile::compile(&ast, &lmap).map_err(|err| Error::wrap(path, &err))?;
+        let scopes = scope::resolve(&ast, &lmap).map_err(|err| Error::wrap(path, &err))?;
+        let pkg = compile::compile(&ast, &scopes, &lmap).map_err(|err| Error::wrap(path, &err))?;
 
         let mut got = Vec::new();
         let mut interp = Interpreter::new(&mut got);

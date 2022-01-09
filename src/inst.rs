@@ -433,7 +433,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let n = f64::from_le_bytes(insts[p + 1..p + 9].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
-            FUNCTION | LOADGLOBAL | STOREGLOBAL => {
+            FUNCTION | LOADGLOBAL | STOREGLOBAL | STRING => {
                 if p + 5 > insts.len() {
                     return Err(fmt::Error);
                 }

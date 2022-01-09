@@ -1,5 +1,6 @@
 use codeswitch::interpret::Interpreter;
 use codeswitch::lox::compile;
+use codeswitch::lox::scope;
 use codeswitch::lox::syntax;
 use codeswitch::lox::token;
 use codeswitch::pos::LineMap;
@@ -31,7 +32,8 @@ fn run(args: &[String]) -> Result<(), String> {
         let data = fs::read(&filename).map_err(err_to_string)?;
         let tokens = token::lex(&filename, &data, &mut lmap).map_err(err_to_string)?;
         let ast = syntax::parse(&tokens, &lmap).map_err(err_to_string)?;
-        let pkg = compile::compile(&ast, &lmap).map_err(err_to_string)?;
+        let scopes = scope::resolve(&ast, &lmap).map_err(err_to_string)?;
+        let pkg = compile::compile(&ast, &scopes, &lmap).map_err(err_to_string)?;
         eprintln!("{}", pkg);
 
         let mut w = stdout();

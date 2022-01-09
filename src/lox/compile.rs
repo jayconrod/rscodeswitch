@@ -1,84 +1,41 @@
 use crate::data::{self, List, SetValue};
 use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
-use crate::lox::syntax::{Block, Decl, Expr, File, ForInit, LValue, Stmt};
-use crate::lox::token::{Kind, Token};
+use crate::lox::scope::{self, ScopeSet};
+use crate::lox::syntax::{Decl, Expr, ForInit, LValue, Program, Stmt};
+use crate::lox::token::Kind;
 use crate::package::{Function, Global, Package, Type};
-use crate::pos::{Error, LineMap, Pos};
-use std::collections::HashMap;
+use crate::pos::{Error, LineMap};
 use std::mem;
 
-pub fn compile(ast: &File, lmap: &LineMap) -> Result<Box<Package>, Error> {
-    let mut cmp = Compiler::new(lmap);
-    for decl in &ast.decls {
-        if let Some(name) = decl.name() {
-            let (begin_pos, end_pos) = decl.pos();
-            cmp.declare_var(name, begin_pos, end_pos)?;
-        }
-    }
+pub fn compile(ast: &Program, scopes: &ScopeSet, lmap: &LineMap) -> Result<Box<Package>, Error> {
+    let mut cmp = Compiler::new(scopes, lmap);
     for decl in &ast.decls {
         cmp.compile_decl(decl)?;
     }
     cmp.finish()
 }
 
-struct Compiler<'a> {
+struct Compiler<'a, 'b> {
+    scopes: &'b ScopeSet<'a>,
     lmap: &'a LineMap,
     globals: Vec<Global>,
     functions: Vec<Function>,
     strings: Handle<List<data::String>>,
     string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
-    env_stack: Vec<Env<'a>>,
+    asm_stack: Vec<Assembler>,
 }
 
-struct Env<'a> {
-    asm: Assembler,
-    scope: HashMap<&'a str, ScopeEntry>,
-    next: u32,
-    kind: EnvKind,
-}
-
-impl<'a> Env<'a> {
-    fn new(kind: EnvKind) -> Env<'a> {
-        Env {
-            asm: Assembler::new(),
-            scope: HashMap::new(),
-            next: 0,
-            kind,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EnvKind {
-    Global,
-    Function,
-    Block,
-}
-
-struct ScopeEntry {
-    def_begin_pos: Pos,
-    def_end_pos: Pos,
-    storage: Storage,
-    defined: bool,
-}
-
-#[derive(Clone, Copy)]
-enum Storage {
-    Global(u32),
-    Arg(u16),
-    Local(u16),
-}
-
-impl<'a> Compiler<'a> {
-    fn new(lmap: &'a LineMap) -> Compiler {
+impl<'a, 'b> Compiler<'a, 'b> {
+    fn new(scopes: &'b ScopeSet<'a>, lmap: &'a LineMap) -> Compiler<'a, 'b> {
         Compiler {
-            lmap: lmap,
+            scopes,
+            lmap,
             globals: Vec::new(),
             functions: Vec::new(),
             strings: Handle::new(List::alloc()),
             string_index: Handle::new(data::HashMap::alloc()),
-            env_stack: vec![Env::new(EnvKind::Global)],
+            asm_stack: vec![Assembler::new()],
         }
     }
 
@@ -113,98 +70,37 @@ impl<'a> Compiler<'a> {
         Ok(package)
     }
 
-    /// declare creates storage for a new variable and binds it within the
-    /// current scope. If the new variable is global, declare creates a Global
-    /// and adds it to the package; the global's index will match the storage
-    /// index. If the variable's name is already bound, declare returns an
-    /// error.
-    fn declare_var(
-        &mut self,
-        name: Token<'a>,
-        begin_pos: Pos,
-        end_pos: Pos,
-    ) -> Result<Storage, Error> {
-        if let Some(prev) = self.env().scope.get(name.text) {
-            let begin = prev.def_begin_pos;
-            let end = prev.def_end_pos;
-            return Err(Error {
-                position: self.lmap.position(name.from, name.to),
-                message: format!(
-                    "duplication definition of {}; previous definition at {}",
-                    name.text,
-                    self.lmap.position(begin, end)
-                ),
-            });
-        }
-        let storage = match self.env().kind {
-            EnvKind::Global => {
-                assert_eq!(self.env().next as usize, self.globals.len());
-                let i = self.env().next;
-                self.globals.push(Global {
-                    name: String::from(name.text),
-                });
-                Storage::Global(i)
-            }
-            EnvKind::Function => {
-                let i = u16::try_from(self.env().next).map_err(|_| Error {
-                    position: self.lmap.position(name.from, name.to),
-                    message: format!("too many parameters"),
-                })?;
-                Storage::Arg(i)
-            }
-            EnvKind::Block => {
-                let i = u16::try_from(self.env().next).map_err(|_| Error {
-                    position: self.lmap.position(name.from, name.to),
-                    message: format!("too many local variables"),
-                })?;
-                Storage::Local(i)
-            }
-        };
-        self.env().scope.insert(
-            name.text,
-            ScopeEntry {
-                def_begin_pos: begin_pos,
-                def_end_pos: end_pos,
-                storage,
-                defined: true,
-            },
-        );
-        self.env().next += 1;
-        Ok(storage)
-    }
-
     fn compile_decl(&mut self, decl: &Decl<'a>) -> Result<(), Error> {
-        let (begin_pos, end_pos) = decl.pos();
         match decl {
-            Decl::Var { name, init, .. } => {
+            Decl::Var {
+                name, init, var, ..
+            } => {
+                let v = &self.scopes.vars[*var];
+                if v.kind == scope::Kind::Global {
+                    *self.ensure_global(v.slot) = Global {
+                        name: String::from(name.text),
+                    };
+                }
+
                 if let Some(e) = init {
                     self.compile_expr(e)?;
                 } else {
                     self.asm().nil();
                     self.asm().nanbox();
                 }
-                if self.env().kind != EnvKind::Global {
-                    // Globals are already declared, so we won't repeat the
-                    // declaration here.
-                    self.declare_var(*name, begin_pos, end_pos)?;
-                }
-                self.compile_assign(*name, true)?;
+                self.compile_assign(*var, true)?;
             }
             Decl::Function {
                 name,
-                param_names,
+                params,
                 body,
+                var,
                 ..
             } => {
-                self.env_stack.push(Env::new(EnvKind::Function));
-                for name in param_names {
-                    self.declare_var(*name, name.from, name.to)?;
-                }
-                self.enter_block();
+                self.asm_stack.push(Assembler::new());
                 for decl in &body.decls {
                     self.compile_decl(decl)?;
                 }
-                self.leave_block();
                 match body.decls.last() {
                     Some(Decl::Stmt(Stmt::Return { .. })) => {}
                     _ => {
@@ -213,14 +109,13 @@ impl<'a> Compiler<'a> {
                         self.asm().ret();
                     }
                 }
-
-                let mut env = self.env_stack.pop().unwrap();
-                let insts = env.asm.finish().map_err(|err| {
+                let mut asm = self.asm_stack.pop().unwrap();
+                let insts = asm.finish().map_err(|err| {
                     let (from, to) = decl.pos();
                     Error::wrap(self.lmap.position(from, to), &err)
                 })?;
                 let mut param_types = Vec::new();
-                param_types.resize(param_names.len(), Type::Nanbox);
+                param_types.resize(params.len(), Type::Nanbox);
                 let f = Function {
                     name: String::from(name.text),
                     insts,
@@ -235,22 +130,19 @@ impl<'a> Compiler<'a> {
                     }
                 })?;
                 self.functions.push(f);
+                let v = &self.scopes.vars[*var];
+                if v.kind == scope::Kind::Global {
+                    *self.ensure_global(v.slot) = Global {
+                        name: String::from(name.text),
+                    };
+                }
 
                 self.asm().function(index);
                 self.asm().nanbox();
-                self.compile_assign(*name, true)?;
+                self.compile_assign(*var, true)?;
             }
             Decl::Stmt(stmt) => self.compile_stmt(stmt)?,
         }
-        Ok(())
-    }
-
-    fn compile_block(&mut self, block: &Block<'a>) -> Result<(), Error> {
-        self.enter_block();
-        for decl in &block.decls {
-            self.compile_decl(decl)?;
-        }
-        self.leave_block();
         Ok(())
     }
 
@@ -261,7 +153,10 @@ impl<'a> Compiler<'a> {
                 self.asm().pop();
             }
             Stmt::Block(b) => {
-                self.compile_block(b)?;
+                for decl in &b.decls {
+                    self.compile_decl(decl)?;
+                }
+                self.pop_block(b.scope);
             }
             Stmt::Print { expr, .. } => {
                 self.compile_expr(expr)?;
@@ -309,11 +204,11 @@ impl<'a> Compiler<'a> {
                 cond,
                 incr,
                 body,
+                scope,
                 ..
             } => {
                 match init {
                     ForInit::Var(init) => {
-                        self.enter_block();
                         self.compile_decl(init)?;
                     }
                     ForInit::Expr(init) => {
@@ -342,9 +237,7 @@ impl<'a> Compiler<'a> {
                         self.asm().b(&mut body_label);
                     }
                 }
-                if let ForInit::Var(_) = init {
-                    self.leave_block();
-                }
+                self.pop_block(*scope);
             }
             Stmt::Return { expr, .. } => {
                 match expr {
@@ -418,17 +311,14 @@ impl<'a> Compiler<'a> {
                 self.asm().string(index);
                 self.asm().nanbox();
             }
-            Expr::Var(t) => match self.resolve(*t)? {
-                Storage::Global(i) => {
-                    self.asm().loadglobal(i);
+            Expr::Var { var_use, .. } => {
+                let v = &self.scopes.vars[self.scopes.var_uses[*var_use]];
+                match v.kind {
+                    scope::Kind::Global => self.asm().loadglobal(v.slot.try_into().unwrap()),
+                    scope::Kind::Argument => self.asm().loadarg(v.slot.try_into().unwrap()),
+                    scope::Kind::Local => self.asm().loadlocal(v.slot.try_into().unwrap()),
                 }
-                Storage::Arg(i) => {
-                    self.asm().loadarg(i);
-                }
-                Storage::Local(i) => {
-                    self.asm().loadlocal(i);
-                }
-            },
+            }
             Expr::Group { expr, .. } => {
                 self.compile_expr(expr)?;
             }
@@ -489,8 +379,9 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(r)?;
                 self.asm().dup(); // TODO: only dup if the value is being used
                 match l {
-                    LValue::Var(t) => {
-                        self.compile_assign(*t, false)?;
+                    LValue::Var { var_use, .. } => {
+                        let var = self.scopes.var_uses[*var_use];
+                        self.compile_assign(var, false)?;
                     }
                 }
             }
@@ -498,85 +389,43 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn compile_assign(&mut self, name: Token<'a>, in_def: bool) -> Result<(), Error> {
-        match self.resolve(name)? {
-            Storage::Global(i) => {
-                self.asm().storeglobal(i);
-            }
-            Storage::Arg(i) => {
+    fn compile_assign(&mut self, var: usize, in_def: bool) -> Result<(), Error> {
+        let v = &self.scopes.vars[var];
+        match v.kind {
+            scope::Kind::Global => self.asm().storeglobal(v.slot.try_into().unwrap()),
+            scope::Kind::Argument => {
                 assert!(!in_def);
-                self.asm().storearg(i);
+                self.asm().storearg(v.slot.try_into().unwrap());
             }
-            Storage::Local(i) => {
+            scope::Kind::Local => {
+                // When a local variable is defined, it's always assigned
+                // to the top of the stack. Since the value being assigned
+                // is already there, we don't need to emit an instruction.
                 if !in_def {
-                    self.asm().storelocal(i);
+                    self.asm().storelocal(v.slot.try_into().unwrap());
                 }
             }
         }
         Ok(())
     }
 
-    fn env(&mut self) -> &mut Env<'a> {
-        self.env_stack.last_mut().unwrap()
-    }
-
-    fn asm(&mut self) -> &mut Assembler {
-        let mut i = self.env_stack.len() - 1;
-        loop {
-            if self.env_stack[i].kind != EnvKind::Block {
-                return &mut self.env_stack[i].asm;
-            }
-            assert!(i > 0);
-            i -= 1;
+    fn ensure_global(&mut self, index: usize) -> &mut Global {
+        if self.globals.len() <= index {
+            self.globals.resize_with(index + 1, || Global {
+                name: String::from(""),
+            });
         }
+        &mut self.globals[index]
     }
 
-    fn enter_block(&mut self) {
-        let last_env = self.env();
-        let next = match last_env.kind {
-            EnvKind::Block => last_env.next,
-            EnvKind::Function | EnvKind::Global => 0,
-        };
-        let mut env = Env::new(EnvKind::Block);
-        env.next = next;
-        self.env_stack.push(env);
-    }
-
-    fn leave_block(&mut self) {
-        let env = self.env_stack.pop().unwrap();
-        assert!(env.kind == EnvKind::Block);
-        let last_env = self.env();
-        let slot_count = match last_env.kind {
-            EnvKind::Block => env.next - last_env.next,
-            EnvKind::Function | EnvKind::Global => env.next,
-        };
+    fn pop_block(&mut self, scope: usize) {
+        let slot_count = self.scopes.scopes[scope].vars.len();
         for _ in 0..slot_count {
             self.asm().pop();
         }
     }
 
-    fn resolve(&mut self, t: Token<'a>) -> Result<Storage, Error> {
-        let ent = self
-            .env_stack
-            .iter_mut()
-            .rev()
-            .find_map(|env| env.scope.get_mut(t.text))
-            .ok_or_else(|| Error {
-                position: self.lmap.position(t.from, t.to),
-                message: format!("undefined symbol '{}'", t.text),
-            })?;
-        if !ent.defined {
-            let begin = ent.def_begin_pos;
-            let end = ent.def_end_pos;
-            let def_position = self.lmap.position(begin, end);
-            return Err(Error {
-                position: self.lmap.position(t.from, t.to),
-                message: format!(
-                    "variable '{}' declared at {} is not yet defined",
-                    t.text, def_position
-                ),
-            });
-        }
-        Ok(ent.storage)
+    fn asm(&mut self) -> &mut Assembler {
+        self.asm_stack.last_mut().unwrap()
     }
 }
