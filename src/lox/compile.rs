@@ -1,11 +1,11 @@
 use crate::data::{self, List, SetValue};
 use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
-use crate::lox::scope::{self, ScopeSet};
+use crate::lox::scope::{CaptureFrom, ScopeSet, Var, VarKind, VarUse};
 use crate::lox::syntax::{Decl, Expr, ForInit, LValue, Program, Stmt};
 use crate::lox::token::Kind;
 use crate::package::{Function, Global, Package, Type};
-use crate::pos::{Error, LineMap};
+use crate::pos::{Error, LineMap, Pos};
 use std::mem;
 
 pub fn compile(ast: &Program, scopes: &ScopeSet, lmap: &LineMap) -> Result<Box<Package>, Error> {
@@ -23,6 +23,7 @@ struct Compiler<'a, 'b> {
     functions: Vec<Function>,
     strings: Handle<List<data::String>>,
     string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
+    types: Vec<Type>,
     asm_stack: Vec<Assembler>,
 }
 
@@ -35,6 +36,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             functions: Vec::new(),
             strings: Handle::new(List::alloc()),
             string_index: Handle::new(data::HashMap::alloc()),
+            types: Vec::new(),
             asm_stack: vec![Assembler::new()],
         }
     }
@@ -52,6 +54,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             insts: init_insts,
             package: 0 as *mut Package,
             param_types: Vec::new(),
+            cell_types: Vec::new(),
         };
         self.functions.push(init);
 
@@ -59,6 +62,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             globals: Vec::new(),
             functions: Vec::new(),
             strings: Handle::empty(),
+            types: Vec::new(),
         });
 
         for f in &mut self.functions {
@@ -67,6 +71,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         mem::swap(&mut package.globals, &mut self.globals);
         mem::swap(&mut package.functions, &mut self.functions);
         package.strings = Handle::new(self.strings.slice_mut());
+        mem::swap(&mut package.types, &mut self.types);
         Ok(package)
     }
 
@@ -75,32 +80,58 @@ impl<'a, 'b> Compiler<'a, 'b> {
             Decl::Var {
                 name, init, var, ..
             } => {
+                // Ensure storage for the varaible.
                 let v = &self.scopes.vars[*var];
-                if v.kind == scope::Kind::Global {
-                    *self.ensure_global(v.slot) = Global {
-                        name: String::from(name.text),
-                    };
-                }
+                let (begin_pos, end_pos) = decl.pos();
+                self.compile_define_prepare(v, name.text, begin_pos, end_pos)?;
 
+                // Compile the initializer, if any.
                 if let Some(e) = init {
                     self.compile_expr(e)?;
                 } else {
                     self.asm().nil();
                     self.asm().nanbox();
                 }
-                self.compile_assign(*var, true)?;
+
+                // Write the initializer value to the variable.
+                self.compile_define(v);
             }
             Decl::Function {
                 name,
                 params,
                 body,
                 var,
+                arg_scope,
                 ..
             } => {
+                // Start compiling the function.
+                // Before anything else, move captured parameters into cells.
                 self.asm_stack.push(Assembler::new());
+                let mut cell_slot = 0;
+                for param in params {
+                    if self.scopes.vars[param.var].kind == VarKind::Capture {
+                        let ty_index = self.ensure_type(
+                            Type::Pointer(Box::new(Type::Nanbox)),
+                            param.name.from,
+                            param.name.to,
+                        )?;
+                        self.asm().alloc(ty_index);
+                        self.asm().dup();
+                        let arg_slot = self.scopes.vars[param.var].slot as u16;
+                        self.asm().loadarg(arg_slot);
+                        self.asm().store();
+                        assert_eq!(self.scopes.vars[param.var].cell_slot, cell_slot);
+                        cell_slot += 1;
+                    }
+                }
+
+                // Compile the function body.
                 for decl in &body.decls {
                     self.compile_decl(decl)?;
                 }
+
+                // If the function didn't end with a return statement,
+                // return nil.
                 match body.decls.last() {
                     Some(Decl::Stmt(Stmt::Return { .. })) => {}
                     _ => {
@@ -109,20 +140,27 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.asm().ret();
                     }
                 }
+
+                // Finish building the function and add it to the package.
                 let mut asm = self.asm_stack.pop().unwrap();
                 let insts = asm.finish().map_err(|err| {
                     let (from, to) = decl.pos();
                     Error::wrap(self.lmap.position(from, to), &err)
                 })?;
                 let mut param_types = Vec::new();
-                param_types.resize(params.len(), Type::Nanbox);
+                param_types.resize_with(params.len(), || Type::Nanbox);
+                let mut cell_types = Vec::new();
+                cell_types.resize_with(self.scopes.scopes[*arg_scope].captures.len(), || {
+                    Type::Pointer(Box::new(Type::Nanbox))
+                });
                 let f = Function {
                     name: String::from(name.text),
                     insts,
                     package: 0 as *mut Package,
                     param_types,
+                    cell_types,
                 };
-                let index = u32::try_from(self.functions.len()).map_err(|_| {
+                let fn_index = u32::try_from(self.functions.len()).map_err(|_| {
                     let (begin_pos, end_pos) = decl.pos();
                     Error {
                         position: self.lmap.position(begin_pos, end_pos),
@@ -130,16 +168,41 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     }
                 })?;
                 self.functions.push(f);
-                let v = &self.scopes.vars[*var];
-                if v.kind == scope::Kind::Global {
-                    *self.ensure_global(v.slot) = Global {
-                        name: String::from(name.text),
-                    };
-                }
 
-                self.asm().function(index);
+                // Create a closure in the enclosing function.
+                // The closure has pointers to cells of variables captured from
+                // this function and enclosing functions.
+                let (begin_pos, end_pos) = decl.pos();
+                self.compile_define_prepare(
+                    &self.scopes.vars[*var],
+                    name.text,
+                    begin_pos,
+                    end_pos,
+                )?;
+                for capture in &self.scopes.scopes[*arg_scope].captures {
+                    match capture.from {
+                        CaptureFrom::Local => {
+                            let slot = self.scopes.vars[capture.var].cell_slot as u16;
+                            self.asm().loadlocal(slot);
+                        }
+                        CaptureFrom::Closure(slot) => {
+                            self.asm().cell(slot as u16);
+                        }
+                    }
+                }
+                let capture_count = self.scopes.scopes[*arg_scope].captures.len();
+                let capture_count = u16::try_from(capture_count).map_err(|_| {
+                    let (begin_pos, end_pos) = decl.pos();
+                    Error {
+                        position: self.lmap.position(begin_pos, end_pos),
+                        message: String::from("too many captures"),
+                    }
+                })?;
+                self.asm().newclosure(fn_index, capture_count);
                 self.asm().nanbox();
-                self.compile_assign(*var, true)?;
+
+                // Store the closure in a variable.
+                self.compile_define(&self.scopes.vars[*var]);
             }
             Decl::Stmt(stmt) => self.compile_stmt(stmt)?,
         }
@@ -295,28 +358,33 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         message: format!("not a real string: '{}'", t.text),
                     });
                 }
-                let s = Handle::new(data::String::from_bytes(&raw[1..raw.len() - 1]));
-                let index = match self.string_index.get(&*s) {
-                    Some(v) => v.value,
-                    None => {
-                        let i = u32::try_from((*self.strings).len()).map_err(|_| Error {
-                            position: self.lmap.position(t.from, t.to),
-                            message: format!("too many strings"),
-                        })?;
-                        (*self.strings).push(&*s);
-                        (*self.string_index).insert(&*s, &SetValue { value: i });
-                        i
-                    }
-                };
+                let index = self.ensure_string(&raw[1..raw.len() - 1], t.from, t.to)?;
                 self.asm().string(index);
                 self.asm().nanbox();
             }
             Expr::Var { var_use, .. } => {
-                let v = &self.scopes.vars[self.scopes.var_uses[*var_use]];
+                let vu = self.scopes.var_uses[*var_use];
+                let v = &self.scopes.vars[vu.var];
                 match v.kind {
-                    scope::Kind::Global => self.asm().loadglobal(v.slot.try_into().unwrap()),
-                    scope::Kind::Argument => self.asm().loadarg(v.slot.try_into().unwrap()),
-                    scope::Kind::Local => self.asm().loadlocal(v.slot.try_into().unwrap()),
+                    VarKind::Global => self.asm().loadglobal(v.slot.try_into().unwrap()),
+                    VarKind::Argument => self.asm().loadarg(v.slot.try_into().unwrap()),
+                    VarKind::Local => self.asm().loadlocal(v.slot.try_into().unwrap()),
+                    VarKind::Capture => {
+                        match vu.cell {
+                            Some(i) => {
+                                // Captured from enclosing function.
+                                // The cell pointing to the variable is embedded in
+                                // this function's closure.
+                                self.asm().cell(i.try_into().unwrap());
+                            }
+                            None => {
+                                // Captured variable defined in this function.
+                                // Load the cell from the stack.
+                                self.asm().loadlocal(v.cell_slot.try_into().unwrap());
+                            }
+                        };
+                        self.asm().load();
+                    }
                 }
             }
             Expr::Group { expr, .. } => {
@@ -380,8 +448,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.asm().dup(); // TODO: only dup if the value is being used
                 match l {
                     LValue::Var { var_use, .. } => {
-                        let var = self.scopes.var_uses[*var_use];
-                        self.compile_assign(var, false)?;
+                        let var_use = self.scopes.var_uses[*var_use];
+                        self.compile_assign(var_use);
                     }
                 }
             }
@@ -389,24 +457,75 @@ impl<'a, 'b> Compiler<'a, 'b> {
         Ok(())
     }
 
-    fn compile_assign(&mut self, var: usize, in_def: bool) -> Result<(), Error> {
-        let v = &self.scopes.vars[var];
-        match v.kind {
-            scope::Kind::Global => self.asm().storeglobal(v.slot.try_into().unwrap()),
-            scope::Kind::Argument => {
-                assert!(!in_def);
-                self.asm().storearg(v.slot.try_into().unwrap());
+    fn compile_define_prepare(
+        &mut self,
+        var: &Var,
+        name: &str,
+        begin_pos: Pos,
+        end_pos: Pos,
+    ) -> Result<(), Error> {
+        match var.kind {
+            VarKind::Global => {
+                *self.ensure_global(var.slot) = Global {
+                    name: String::from(name),
+                };
+                Ok(())
             }
-            scope::Kind::Local => {
+            VarKind::Local => Ok(()),
+            VarKind::Capture => {
+                let tyi =
+                    self.ensure_type(Type::Pointer(Box::new(Type::Nanbox)), begin_pos, end_pos)?;
+                self.asm().alloc(tyi);
+                self.asm().dup();
+                Ok(())
+            }
+            VarKind::Argument => unreachable!(),
+        }
+    }
+
+    fn compile_define(&mut self, var: &Var) {
+        match var.kind {
+            VarKind::Global => self.asm().storeglobal(var.slot.try_into().unwrap()),
+            VarKind::Local => {
                 // When a local variable is defined, it's always assigned
                 // to the top of the stack. Since the value being assigned
                 // is already there, we don't need to emit an instruction.
-                if !in_def {
-                    self.asm().storelocal(v.slot.try_into().unwrap());
+            }
+            VarKind::Capture => {
+                self.asm().store();
+            }
+            VarKind::Argument => unreachable!(),
+        }
+    }
+
+    fn compile_assign(&mut self, var_use: VarUse) {
+        let v = &self.scopes.vars[var_use.var];
+        match v.kind {
+            VarKind::Global => self.asm().storeglobal(v.slot.try_into().unwrap()),
+            VarKind::Argument => {
+                self.asm().storearg(v.slot.try_into().unwrap());
+            }
+            VarKind::Local => {
+                self.asm().storelocal(v.slot.try_into().unwrap());
+            }
+            VarKind::Capture => {
+                match var_use.cell {
+                    Some(i) => {
+                        // Captured from enclosing function.
+                        // The cell pointing to the variable is embedded in
+                        // this function's closure.
+                        self.asm().cell(i.try_into().unwrap());
+                    }
+                    None => {
+                        // Captured variable defined in this function.
+                        // Load the cell from the stack.
+                        self.asm().loadlocal(v.cell_slot.try_into().unwrap());
+                    }
                 }
+                self.asm().swap();
+                self.asm().store();
             }
         }
-        Ok(())
     }
 
     fn ensure_global(&mut self, index: usize) -> &mut Global {
@@ -423,6 +542,32 @@ impl<'a, 'b> Compiler<'a, 'b> {
         for _ in 0..slot_count {
             self.asm().pop();
         }
+    }
+
+    fn ensure_string(&mut self, s: &[u8], from: Pos, to: Pos) -> Result<u32, Error> {
+        let hs = Handle::new(data::String::from_bytes(s));
+        match self.string_index.get(&*hs) {
+            Some(v) => Ok(v.value),
+            None => {
+                let i = u32::try_from((*self.strings).len()).map_err(|_| Error {
+                    position: self.lmap.position(from, to),
+                    message: format!("too many strings"),
+                })?;
+                (*self.strings).push(&*hs);
+                (*self.string_index).insert(&*hs, &SetValue { value: i });
+                Ok(i)
+            }
+        }
+    }
+
+    fn ensure_type(&mut self, type_: Type, from: Pos, to: Pos) -> Result<u32, Error> {
+        // TODO: deduplicate types.
+        let i = u32::try_from(self.types.len()).map_err(|_| Error {
+            position: self.lmap.position(from, to),
+            message: format!("too many types"),
+        })?;
+        self.types.push(type_);
+        Ok(i)
     }
 
     fn asm(&mut self) -> &mut Assembler {

@@ -1,0 +1,89 @@
+fun curried_add(a) {
+  fun f(b) {
+    return a + b;
+  }
+  return f;
+}
+print curried_add(2)(3); // Output: 5
+
+fun capture_top_local() {
+  var x = 1;
+  fun f() {
+    return x;
+  }
+  return f;
+}
+print capture_top_local()(); // Output: 1
+
+fun capture_nested_local() {
+  {
+    var x = 1;
+    fun f() {
+      return x;
+    }
+    return f;
+  }
+}
+print capture_nested_local()(); // Output: 1
+
+fun return_captured_top_local() {
+  var x = 1;
+  fun f() {
+    return x;
+  }
+  return x;
+}
+print return_captured_top_local(); // Output: 1
+
+fun return_captured_nested_local() {
+  {
+    var x = 1;
+    fun f() {
+      return x;
+    }
+    return x;
+  }
+}
+print return_captured_nested_local(); // Output: 1
+
+fun deep_capture() {
+  var x = 1;
+  fun f() {
+    fun g() {
+      return x;
+    }
+    return g;
+  }
+  return f;
+}
+print deep_capture()()(); // Output: 1
+
+fun assign_capture_same() {
+  var x = 1;
+  fun f() {
+    return x;
+  }
+  return x = 2;
+}
+print assign_capture_same(); // Output: 2
+
+fun assign_capture_enclosing() {
+  var x = 1;
+  fun f() {
+    return x = 2;
+  }
+  return f;
+}
+print assign_capture_enclosing()(); // Output: 2
+
+fun new_counter() {
+  var n = 0;
+  fun next() {
+    return n = n + 1;
+  }
+  return next;
+}
+var c = new_counter();
+print c(); // Output: 1
+print c(); // Output: 2
+print c(); // Output: 3

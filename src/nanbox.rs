@@ -1,5 +1,5 @@
 use crate::data;
-use crate::package::Function;
+use crate::package::Closure;
 
 const QNAN: u64 = 0x7ffc_0000_0000_0000;
 
@@ -8,7 +8,7 @@ const TAG_SIZE: u64 = 3;
 const TAG_NIL: u64 = 1;
 const TAG_BOOL: u64 = 2;
 const TAG_STRING: u64 = 3;
-const TAG_FUNCTION: u64 = 4;
+const TAG_CLOSURE: u64 = 4;
 
 const VALUE_MASK: u64 = 0x0003_ffff_ffff_ffff;
 
@@ -56,13 +56,13 @@ pub fn to_string(v: u64) -> Option<*const data::String> {
   }
 }
 
-pub fn from_function(f: *const Function) -> u64 {
-  QNAN | TAG_FUNCTION | f as u64
+pub fn from_closure(f: *const Closure) -> u64 {
+  QNAN | TAG_CLOSURE | f as u64
 }
 
-pub fn to_function(v: u64) -> Option<*const Function> {
-  if v & (QNAN | TAG_FUNCTION) == QNAN | TAG_FUNCTION {
-    Some((v & !QNAN & !TAG_MASK) as usize as *const Function)
+pub fn to_closure(v: u64) -> Option<*const Closure> {
+  if v & (QNAN | TAG_CLOSURE) == QNAN | TAG_CLOSURE {
+    Some((v & !QNAN & !TAG_MASK) as usize as *const Closure)
   } else {
     None
   }
@@ -83,7 +83,7 @@ pub fn debug_str(v: u64) -> String {
       return format!("{}", s.as_ref().unwrap());
     }
   }
-  if let Some(_) = to_function(v) {
+  if let Some(_) = to_closure(v) {
     return String::from("<function>");
   }
   return format!("Nanbox {:?}", v);
@@ -98,7 +98,7 @@ pub fn debug_type(v: u64) -> &'static str {
     "f64"
   } else if to_string(v).is_some() {
     "string"
-  } else if to_function(v).is_some() {
+  } else if to_closure(v).is_some() {
     "function"
   } else {
     "invalid value"

@@ -1,16 +1,18 @@
 use crate::data;
+use crate::heap::HEAP;
 use crate::inst;
 use crate::nanbox;
-use crate::package::{Function, Package, Type};
+use crate::package::{Closure, Function, Type};
 
 use std::error;
 use std::fmt;
 use std::io::Write;
+use std::mem;
 
 // Each stack frame consists of (with descending stack address):
 //
 //   - Caller: *const Function
-//   - Caller's package: *const Package
+//   - Caller's cells: *[*mut u64; ?]
 //   - Return address: *const u8
 //   - Caller's fp
 const FRAME_SIZE: usize = 32;
@@ -35,6 +37,7 @@ impl<'a> Interpreter<'a> {
             if self.global_slots.is_empty() {
                 self.global_slots.resize(pp.globals.len(), 0);
             }
+            let mut cp = 0 as *mut *mut u64;
 
             let mut stack = Stack::new();
             let mut sp = stack.end() - FRAME_SIZE;
@@ -43,7 +46,7 @@ impl<'a> Interpreter<'a> {
             let mut types = Vec::new();
 
             *((fp + 24) as *mut u64) = 0; // caller
-            *((fp + 16) as *mut u64) = 0; // caller's package
+            *((fp + 16) as *mut u64) = 0; // caller's cells
             *((fp + 8) as *mut u64) = 0; // return address
             *(fp as *mut u64) = 0; // caller's fp
 
@@ -106,7 +109,7 @@ impl<'a> Interpreter<'a> {
                         Type::Nil => {
                             return_errorf!("binary operator used with nil operand");
                         }
-                        Type::Bool => {
+                        Type::Bool | Type::Function | Type::Closure | Type::Pointer(_) => {
                             push!((l $op r) as u64, Type::Bool);
                         }
                         Type::Float64 => {
@@ -121,9 +124,6 @@ impl<'a> Interpreter<'a> {
                             let r = (r as *const data::String).as_ref().unwrap();
                             push!((l $op r) as u64, Type::Bool);
                         }
-                        Type::Function => {
-                            push!((l $op r) as u64, Type::Bool);
-                        }
                         Type::Nanbox => {
                             let v = if nanbox::is_nil(l) && nanbox::is_nil(r) {
                                 true $op true
@@ -133,7 +133,7 @@ impl<'a> Interpreter<'a> {
                                 ln $op rn
                             } else if let (Some(ls), Some(rs)) = (nanbox::to_string(l), nanbox::to_string(r)) {
                                 ls $op rs
-                            } else if let (Some(lf), Some(rf)) = (nanbox::to_function(l), nanbox::to_function(r)) {
+                            } else if let (Some(lf), Some(rf)) = (nanbox::to_closure(l), nanbox::to_closure(r)) {
                                 lf $op rf
                             } else {
                                 true $op false
@@ -236,6 +236,12 @@ impl<'a> Interpreter<'a> {
                             _ => unreachable!(),
                         }
                     }
+                    inst::ALLOC => {
+                        let i = u32::from_le_bytes(*((ip as usize + 1) as *const [u8; 4]));
+                        let ty = pp.types[i as usize].clone();
+                        let p = HEAP.allocate(ty.size()) as u64;
+                        push!(p, ty);
+                    }
                     inst::B => {
                         let delta = i32::from_le_bytes(*((ip as usize + 1) as *const [u8; 4]));
                         ip = ((ip as isize) + 1 + delta as isize) as *const u8;
@@ -251,11 +257,19 @@ impl<'a> Interpreter<'a> {
                     inst::CALLVALUE => {
                         let arg_count = i16::from_le_bytes(*((ip as usize + 1) as *const [u8; 2]));
                         let raw_callee = *((sp as usize + arg_count as usize * 8) as *const u64);
-                        let callee = match types[types.len() - arg_count as usize - 1] {
-                            Type::Function => raw_callee as *const Function,
+                        let (callee, cells) = match types[types.len() - arg_count as usize - 1] {
+                            Type::Function => {
+                                let f = (raw_callee as *const Function).as_ref().unwrap();
+                                (f, 0 as *mut *mut u64)
+                            }
+                            Type::Closure => {
+                                let c = (raw_callee as *const Closure).as_ref().unwrap();
+                                (c.function.as_ref().unwrap(), c.cell_addr(0))
+                            }
                             Type::Nanbox => {
-                                if let Some(f) = nanbox::to_function(raw_callee) {
-                                    f
+                                if let Some(c) = nanbox::to_closure(raw_callee) {
+                                    let c = c.as_ref().unwrap();
+                                    (c.function.as_ref().unwrap(), c.cell_addr(0))
                                 } else {
                                     return_errorf!(
                                         "call of non-function ({})",
@@ -265,17 +279,23 @@ impl<'a> Interpreter<'a> {
                             }
                             _ => unreachable!(),
                         };
-                        let callee = callee.as_ref().unwrap();
                         sp -= FRAME_SIZE;
                         *((sp as usize + 24) as *mut u64) = func as *const Function as u64;
                         func = callee;
-                        *((sp as usize + 16) as *mut u64) = pp as *const Package as u64;
-                        pp = func.package.as_ref().unwrap();
+                        *((sp as usize + 16) as *mut u64) = cp as u64;
+                        cp = cells;
                         *((sp as usize + 8) as *mut u64) = (ip as u64) + 3;
                         ip = &func.insts[0] as *const u8;
                         *(sp as *mut u64) = fp as u64;
                         fp = sp;
+                        pp = callee.package.as_ref().unwrap();
                         continue;
+                    }
+                    inst::CELL => {
+                        let i = i16::from_le_bytes(*((ip as usize + 1) as *const [u8; 2])) as usize;
+                        let cell = *((cp as usize + i * mem::size_of::<usize>()) as *const u64);
+                        let ty = func.cell_types[i].clone();
+                        push!(cell, ty);
                     }
                     inst::DIV => {
                         binop_num!(/);
@@ -284,7 +304,7 @@ impl<'a> Interpreter<'a> {
                         let v = *(sp as *mut u64);
                         sp -= 8;
                         *(sp as *mut u64) = v;
-                        types.push(types[types.len() - 1]);
+                        types.push(types[types.len() - 1].clone());
                     }
                     inst::EQ => {
                         binop_eq!(==)
@@ -310,12 +330,21 @@ impl<'a> Interpreter<'a> {
                         let n = f64::from_le_bytes(*((ip as usize + 1) as *const [u8; 8]));
                         push!(n.to_bits(), Type::Float64);
                     }
+                    inst::LOAD => {
+                        let (p, pty) = pop!();
+                        let ty = match pty {
+                            Type::Pointer(ty) => ty,
+                            _ => unreachable!(),
+                        };
+                        let v = *(p as *const u64);
+                        push!(v, *ty);
+                    }
                     inst::LOADARG => {
                         let ai =
                             u16::from_le_bytes(*((ip as usize + 1) as *const [u8; 2])) as usize;
                         let si = func.param_types.len() - ai - 1;
                         let v = *((fp + FRAME_SIZE + si * 8) as *const u64);
-                        push!(v, func.param_types[ai]);
+                        push!(v, func.param_types[ai].clone());
                     }
                     inst::LOADGLOBAL => {
                         let i = *((ip as usize + 1) as *const u32) as usize;
@@ -328,7 +357,9 @@ impl<'a> Interpreter<'a> {
                     inst::LOADLOCAL => {
                         let i = *((ip as usize + 1) as *const u16) as usize;
                         let v = *((fp as usize - (i + 1) * 8) as *const u64);
-                        push!(v, types[i]);
+                        let stack_depth = (fp - sp) / 8;
+                        let ty = types[types.len() - stack_depth + i].clone();
+                        push!(v, ty);
                     }
                     inst::MUL => {
                         binop_num!(*)
@@ -342,11 +373,12 @@ impl<'a> Interpreter<'a> {
                                 let s = v as *const data::String;
                                 nanbox::from_string(s)
                             }
-                            Type::Function => {
-                                let f = v as *const Function;
-                                nanbox::from_function(f)
+                            Type::Closure => {
+                                let f = v as *const Closure;
+                                nanbox::from_closure(f)
                             }
                             Type::Float64 | Type::Nanbox => v,
+                            _ => unreachable!(),
                         };
                         push!(b, Type::Nanbox);
                     }
@@ -372,6 +404,21 @@ impl<'a> Interpreter<'a> {
                             }
                             _ => unreachable!(),
                         }
+                    }
+                    inst::NEWCLOSURE => {
+                        let fn_index =
+                            u32::from_le_bytes(*((ip as usize + 1) as *const [u8; 4])) as usize;
+                        let cell_count = u16::from_le_bytes(*((ip as usize + 5) as *const [u8; 2]));
+                        let f = &pp.functions[fn_index] as *const Function;
+                        let c = Closure::alloc(cell_count).as_mut().unwrap();
+                        c.function = f;
+                        for i in 0..cell_count {
+                            let cell = *((sp + (cell_count - i - 1) as usize * 8) as *mut *mut u64);
+                            c.set_cell(i, cell);
+                        }
+                        sp += cell_count as usize * 8;
+                        types.truncate(types.len() - cell_count as usize);
+                        push!(c as *const Closure as u64, Type::Closure);
                     }
                     inst::NIL => {
                         push!(0, Type::Nil);
@@ -404,8 +451,8 @@ impl<'a> Interpreter<'a> {
                     inst::RET => {
                         let ret_sp = sp;
                         let stack_depth = (fp - sp) / 8;
-                        let ret_ty = *types.last().unwrap();
-                        types.truncate(types.len() - stack_depth);
+                        let ret_ty = types.last().unwrap().clone();
+                        types.truncate(types.len() - stack_depth - func.param_types.len());
                         types.push(ret_ty);
                         sp = fp + FRAME_SIZE + func.param_types.len() * 8 - 8;
                         func = match (*((fp + 24) as *const *const Function)).as_ref() {
@@ -414,12 +461,22 @@ impl<'a> Interpreter<'a> {
                                 return Ok(());
                             }
                         };
-                        pp = (*((fp + 16) as *const *const Package)).as_ref().unwrap();
+                        pp = func.package.as_ref().unwrap();
+                        cp = *((fp + 16) as *const *mut *mut u64);
                         ip = *((fp + 8) as *const *const u8);
                         fp = *(fp as *const usize);
                         let v = *(ret_sp as *const u64);
                         *(sp as *mut u64) = v;
                         continue;
+                    }
+                    inst::STORE => {
+                        let (v, vty) = pop!();
+                        let (p, pty) = pop!();
+                        match pty {
+                            Type::Pointer(ty) => assert_eq!(*ty, vty),
+                            _ => unreachable!(),
+                        };
+                        *(p as *mut u64) = v;
                     }
                     inst::STOREARG => {
                         let ai =
@@ -436,9 +493,11 @@ impl<'a> Interpreter<'a> {
                     }
                     inst::STORELOCAL => {
                         let i = *((ip as usize + 1) as *const u16) as usize;
+                        let stack_depth = (fp - sp) / 8;
+                        let tyi = types.len() - stack_depth + i;
                         let (v, ty) = pop!();
                         *((fp as usize - (i + 1) * 8) as *mut u64) = v;
-                        types[i] = ty;
+                        types[tyi] = ty;
                     }
                     inst::STRING => {
                         let i = *((ip as usize + 1) as *const u32) as usize;
@@ -459,7 +518,7 @@ impl<'a> Interpreter<'a> {
                         match sys {
                             inst::SYS_PRINT => {
                                 let (v, ty) = pop!();
-                                self.sys_print(v, ty)?;
+                                self.sys_print(v, &ty)?;
                             }
                             _ => panic!("unknown sys"),
                         }
@@ -474,7 +533,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn sys_print(&mut self, v: u64, type_: Type) -> Result<(), Error> {
+    fn sys_print(&mut self, v: u64, type_: &Type) -> Result<(), Error> {
         let r = match type_ {
             Type::Nil => {
                 write!(self.w, "nil\n")
@@ -488,11 +547,14 @@ impl<'a> Interpreter<'a> {
             Type::String => unsafe {
                 write!(self.w, "{}\n", (v as *const data::String).as_ref().unwrap())
             },
-            Type::Function => {
+            Type::Function | Type::Closure => {
                 write!(self.w, "<function>\n")
             }
             Type::Nanbox => {
                 write!(self.w, "{}\n", nanbox::debug_str(v))
+            }
+            Type::Pointer(_) => {
+                write!(self.w, "<pointer>\n")
             }
         };
         r.map_err(|_| Error {

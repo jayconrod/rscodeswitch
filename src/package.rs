@@ -1,13 +1,16 @@
 use crate::data::{self, Slice};
-use crate::heap::Handle;
+use crate::heap::{Handle, HEAP};
 use crate::inst;
 
-use std::fmt;
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
+use std::mem;
 
 pub struct Package {
     pub globals: Vec<Global>,
     pub functions: Vec<Function>,
     pub strings: Handle<Slice<data::String>>,
+    pub types: Vec<Type>,
 }
 
 impl Package {
@@ -67,6 +70,7 @@ pub struct Function {
     pub insts: Vec<u8>,
     pub package: *const Package,
     pub param_types: Vec<Type>,
+    pub cell_types: Vec<Type>,
 }
 
 impl fmt::Display for Function {
@@ -77,26 +81,92 @@ impl fmt::Display for Function {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// TODO: move Type onto the CodeSwitch heap. The interpreter needs to maintain
+// a stack of these, and because types may point to other types, they may have
+// parts allocated on the heap, which means a lot of instructions may allocate.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     Nil,
     Bool,
     Float64,
     String,
     Function,
+    Closure,
     Nanbox,
+    Pointer(Box<Type>),
+}
+
+impl Type {
+    pub fn size(&self) -> usize {
+        match self {
+            Type::Nil => 0,
+            Type::Bool => 1,
+            Type::Float64 => 8,
+            Type::Nanbox => 8,
+            Type::String | Type::Function | Type::Closure | Type::Pointer(_) => {
+                mem::size_of::<usize>()
+            } // TODO: String should be data::String, not *const data::String.
+        }
+    }
 }
 
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let s = match self {
-            Type::Nil => "nil",
-            Type::Bool => "bool",
-            Type::Float64 => "f64",
-            Type::String => "string",
-            Type::Function => "function",
-            Type::Nanbox => "dynval",
-        };
-        f.write_str(s)
+        match self {
+            Type::Pointer(t) => {
+                write!(f, "*{}", t)
+            }
+            _ => {
+                let s = match self {
+                    Type::Nil => "nil",
+                    Type::Bool => "bool",
+                    Type::Float64 => "f64",
+                    Type::String => "string",
+                    Type::Function => "function",
+                    Type::Closure => "closure",
+                    Type::Nanbox => "nanbox",
+                    _ => unreachable!(),
+                };
+                f.write_str(s)
+            }
+        }
     }
 }
+
+pub struct Closure {
+    pub function: *const Function,
+}
+
+impl Closure {
+    pub fn alloc(n: u16) -> *mut Closure {
+        let size = mem::size_of::<Closure>() + n as usize * 8;
+        HEAP.allocate(size) as *mut Closure
+    }
+
+    pub fn cell_addr(&self, i: u16) -> *mut *mut u64 {
+        let base = self as *const Closure as usize;
+        let offset = mem::size_of::<Closure>() + i as usize * 8;
+        (base + offset) as *mut *mut u64
+    }
+
+    pub unsafe fn cell(&self, i: u16) -> *mut u64 {
+        *(self.cell_addr(i))
+    }
+
+    pub unsafe fn set_cell(&mut self, i: u16, cell: *mut u64) {
+        *(self.cell_addr(i)) = cell;
+    }
+}
+
+#[derive(Debug)]
+struct SerializationError {
+    message: String,
+}
+
+impl Display for SerializationError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Error for SerializationError {}

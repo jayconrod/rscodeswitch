@@ -3,11 +3,13 @@ use std::mem::swap;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 35.
+// Next opcode: 40.
 pub const ADD: u8 = 20;
+pub const ALLOC: u8 = 35;
 pub const B: u8 = 27;
 pub const BIF: u8 = 28;
 pub const CALLVALUE: u8 = 32;
+pub const CELL: u8 = 38;
 pub const DIV: u8 = 23;
 pub const DUP: u8 = 13;
 pub const EQ: u8 = 14;
@@ -17,6 +19,7 @@ pub const FUNCTION: u8 = 31;
 pub const GE: u8 = 18;
 pub const GT: u8 = 19;
 pub const LE: u8 = 16;
+pub const LOAD: u8 = 36;
 pub const LOADARG: u8 = 29;
 pub const LOADGLOBAL: u8 = 9;
 pub const LOADLOCAL: u8 = 11;
@@ -25,11 +28,13 @@ pub const MUL: u8 = 22;
 pub const NANBOX: u8 = 6;
 pub const NE: u8 = 15;
 pub const NEG: u8 = 25;
+pub const NEWCLOSURE: u8 = 39;
 pub const NIL: u8 = 33;
 pub const NOP: u8 = 1;
 pub const NOT: u8 = 24;
 pub const POP: u8 = 3;
 pub const RET: u8 = 4;
+pub const STORE: u8 = 37;
 pub const STOREARG: u8 = 30;
 pub const STOREGLOBAL: u8 = 10;
 pub const STORELOCAL: u8 = 12;
@@ -43,11 +48,12 @@ pub const SYS_PRINT: u8 = 1;
 
 pub fn size(op: u8) -> usize {
     match op {
-        ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | MUL | NANBOX | NE | NEG | NIL | NOP
-        | NOT | POP | RET | SUB | SWAP | TRUE => 1,
+        ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | MUL | NANBOX | NE | NEG | NIL
+        | NOP | NOT | POP | RET | STORE | SUB | SWAP | TRUE => 1,
         SYS => 2,
-        CALLVALUE | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
-        B | BIF | FUNCTION | LOADGLOBAL | STOREGLOBAL | STRING => 5,
+        CALLVALUE | CELL | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
+        ALLOC | B | BIF | FUNCTION | LOADGLOBAL | STOREGLOBAL | STRING => 5,
+        NEWCLOSURE => 7,
         FLOAT64 => 9,
         _ => panic!("unknown opcode"),
     }
@@ -56,9 +62,11 @@ pub fn size(op: u8) -> usize {
 pub fn mnemonic(op: u8) -> &'static str {
     match op {
         ADD => "add",
+        ALLOC => "alloc",
         B => "b",
         BIF => "bif",
         CALLVALUE => "callvalue",
+        CELL => "cell",
         DIV => "div",
         DUP => "dup",
         EQ => "eq",
@@ -68,6 +76,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         GE => "ge",
         GT => "gt",
         LE => "le",
+        LOAD => "load",
         LOADARG => "loadarg",
         LOADGLOBAL => "loadglobal",
         LOADLOCAL => "loadlocal",
@@ -76,11 +85,13 @@ pub fn mnemonic(op: u8) -> &'static str {
         NANBOX => "nanbox",
         NE => "ne",
         NEG => "neg",
+        NEWCLOSURE => "newclosure",
         NIL => "nil",
         NOP => "nop",
         NOT => "not",
         POP => "pop",
         RET => "ret",
+        STORE => "store",
         STOREARG => "storearg",
         STOREGLOBAL => "storeglobal",
         STORELOCAL => "storelocal",
@@ -153,6 +164,11 @@ impl Assembler {
         self.write_u8(ADD);
     }
 
+    pub fn alloc(&mut self, index: u32) {
+        self.write_u8(ALLOC);
+        self.write_u32(index);
+    }
+
     pub fn b(&mut self, label: &mut Label) {
         self.write_u8(B);
         self.write_label(label);
@@ -166,6 +182,11 @@ impl Assembler {
     pub fn callvalue(&mut self, arg_count: u16) {
         self.write_u8(CALLVALUE);
         self.write_u16(arg_count);
+    }
+
+    pub fn cell(&mut self, i: u16) {
+        self.write_u8(CELL);
+        self.write_u16(i);
     }
 
     pub fn div(&mut self) {
@@ -206,6 +227,10 @@ impl Assembler {
         self.write_u8(LE);
     }
 
+    pub fn load(&mut self) {
+        self.write_u8(LOAD);
+    }
+
     pub fn loadarg(&mut self, index: u16) {
         self.write_u8(LOADARG);
         self.write_u16(index);
@@ -241,6 +266,12 @@ impl Assembler {
         self.write_u8(NEG);
     }
 
+    pub fn newclosure(&mut self, fn_index: u32, cell_count: u16) {
+        self.write_u8(NEWCLOSURE);
+        self.write_u32(fn_index);
+        self.write_u16(cell_count);
+    }
+
     pub fn nil(&mut self) {
         self.write_u8(NIL);
     }
@@ -259,6 +290,10 @@ impl Assembler {
 
     pub fn ret(&mut self) {
         self.write_u8(RET);
+    }
+
+    pub fn store(&mut self) {
+        self.write_u8(STORE);
     }
 
     pub fn storearg(&mut self, index: u16) {
@@ -400,8 +435,8 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("  ")?;
         f.write_str(mnemonic(insts[p]))?;
         match insts[p] {
-            ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | MUL | NANBOX | NE | NEG | NIL
-            | NOP | NOT | POP | RET | SUB | SWAP | TRUE => {
+            ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | MUL | NANBOX | NE | NEG
+            | NIL | NOP | NOT | POP | RET | STORE | SUB | SWAP | TRUE => {
                 f.write_str("\n")?;
             }
             B | BIF => {
@@ -419,12 +454,19 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                     }
                 }
             }
-            CALLVALUE => {
+            CALLVALUE | CELL | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => {
                 if p + 3 > insts.len() {
                     return Err(fmt::Error);
                 }
-                let arg_count = u16::from_le_bytes(insts[p + 1..p + 3].try_into().unwrap());
-                write!(f, " {}\n", arg_count)?;
+                let n = u16::from_le_bytes(insts[p + 1..p + 3].try_into().unwrap());
+                write!(f, " {}\n", n)?;
+            }
+            ALLOC | FUNCTION | LOADGLOBAL | STOREGLOBAL | STRING => {
+                if p + 5 > insts.len() {
+                    return Err(fmt::Error);
+                }
+                let n = u32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
+                write!(f, " {}\n", n)?;
             }
             FLOAT64 => {
                 if p + 9 > insts.len() {
@@ -433,19 +475,13 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let n = f64::from_le_bytes(insts[p + 1..p + 9].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
-            FUNCTION | LOADGLOBAL | STOREGLOBAL | STRING => {
-                if p + 5 > insts.len() {
+            NEWCLOSURE => {
+                if p + 7 > insts.len() {
                     return Err(fmt::Error);
                 }
-                let n = u32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
-                write!(f, " {}\n", n)?;
-            }
-            LOADARG | LOADLOCAL | STOREARG | STORELOCAL => {
-                if p + 3 > insts.len() {
-                    return Err(fmt::Error);
-                }
-                let n = u16::from_le_bytes(insts[p + 1..p + 3].try_into().unwrap());
-                write!(f, " {}\n", n)?;
+                let fn_index = u32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
+                let slot_count = u16::from_le_bytes(insts[p + 5..p + 7].try_into().unwrap());
+                write!(f, " {} {}\n", fn_index, slot_count)?;
             }
             SYS => {
                 if p + 2 > insts.len() {

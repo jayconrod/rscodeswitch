@@ -1,5 +1,8 @@
 use std::fmt;
 
+/// LineMap translates raw byte offsets (Pos) into human-readable file
+/// locations (Position). This works by keeping an index of byte offsets
+/// of each line in each file passed to the lexer.
 pub struct LineMap {
     files: Vec<File>,
     base: usize,
@@ -19,6 +22,13 @@ impl LineMap {
         }
     }
 
+    /// add_file adds a file with the given name and size to the line map.
+    ///
+    /// add_file returns the base offset of this file. Pos values may be
+    /// constructed by adding this base offset to an offset within the file.
+    ///
+    /// After calling add_file, add_line may be called with the offset of
+    /// the beginning of each line, in order, not including the first line.
     pub fn add_file(&mut self, filename: &str, size: usize) -> usize {
         let base = self.base;
         self.files.push(File {
@@ -27,9 +37,12 @@ impl LineMap {
             lines: Vec::new(),
         });
         self.base += size;
+        self.add_line(0);
         base
     }
 
+    /// add_line adds the offset of the beginning of a line within the
+    /// current file (from the most recent call to add_file).
     pub fn add_line(&mut self, offset: usize) {
         let file = self.files.last_mut().unwrap();
         assert!(file.lines.last().map(|&l| l < offset).unwrap_or(true));
@@ -46,8 +59,8 @@ impl LineMap {
         assert!(from_file.offset == to_file.offset);
 
         let find_line_and_col = |pos: Pos| {
-            let line = from_file.lines.partition_point(|&l| l <= pos.offset);
-            let col = pos.offset - from_file.lines[line - 1];
+            let line = from_file.lines.partition_point(|&l| l <= pos.offset) - 1;
+            let col = pos.offset - from_file.lines[line];
             (line + 1, col + 1) // Count from 1, not 0.
         };
         let (from_line, from_col) = find_line_and_col(from);
