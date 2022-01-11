@@ -773,6 +773,16 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
                 infix: Some(&Parser::parse_binary_expr),
                 precedence: Precedence::Factor,
             },
+            Kind::And => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binary_expr),
+                precedence: Precedence::And,
+            },
+            Kind::Or => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binary_expr),
+                precedence: Precedence::Or,
+            },
             Kind::Bang => ParseRule {
                 prefix: Some(&Parser::parse_unary_expr),
                 infix: None,
@@ -867,8 +877,8 @@ struct ParseRule<'a, 'b, 'c, 'd> {
 enum Precedence {
     None,
     Assignment,
-    _Or,
-    _And,
+    Or,
+    And,
     Equality,
     Comparison,
     Term,
@@ -881,8 +891,8 @@ enum Precedence {
 impl Precedence {
     fn next(self) -> Precedence {
         match self {
-            Precedence::_Or => Precedence::_And,
-            Precedence::_And => Precedence::Equality,
+            Precedence::Or => Precedence::And,
+            Precedence::And => Precedence::Equality,
             Precedence::Equality => Precedence::Comparison,
             Precedence::Comparison => Precedence::Term,
             Precedence::Term => Precedence::Factor,

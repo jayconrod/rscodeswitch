@@ -1,0 +1,16 @@
+print true and true; // Output: true
+print true and false; // Output: false
+print false and true; // Output: false
+print false and false; // Output: false
+
+print true or true; // Output: true
+print true or false; // Output: true
+print false or true; // Output: true
+print false or false; // Output: false
+
+fun print_and_return(x) {
+  print x;
+  return x;
+}
+print_and_return(false) and print_and_return(true); // Output: false
+print_and_return(true) or print_and_return(false); // Output: true

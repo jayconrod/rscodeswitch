@@ -423,23 +423,48 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Expr::Binary(l, op, r) => {
                 self.compile_expr(l)?;
-                self.compile_expr(r)?;
                 match op.type_ {
-                    Kind::Eq => self.asm().eq(),
-                    Kind::Ne => self.asm().ne(),
-                    Kind::Lt => self.asm().lt(),
-                    Kind::Le => self.asm().le(),
-                    Kind::Gt => self.asm().gt(),
-                    Kind::Ge => self.asm().ge(),
-                    Kind::Plus => self.asm().add(),
-                    Kind::Minus => self.asm().sub(),
-                    Kind::Star => self.asm().mul(),
-                    Kind::Slash => self.asm().div(),
+                    Kind::And => {
+                        let mut after_label = Label::new();
+                        self.asm().dup();
+                        self.asm().not();
+                        self.asm().bif(&mut after_label);
+                        self.asm().pop();
+                        self.compile_expr(r)?;
+                        self.asm().not(); // ensure r produces a bool
+                        self.asm().not();
+                        self.asm().bind(&mut after_label);
+                    }
+                    Kind::Or => {
+                        let mut after_label = Label::new();
+                        self.asm().dup();
+                        self.asm().bif(&mut after_label);
+                        self.asm().pop();
+                        self.compile_expr(r)?;
+                        self.asm().not(); // ensure r produces a bool
+                        self.asm().not();
+                        self.asm().bind(&mut after_label);
+                    }
                     _ => {
-                        return Err(Error {
-                            position: self.lmap.position(op.from, op.to),
-                            message: format!("unknown binary operator {}", op.text),
-                        })
+                        self.compile_expr(r)?;
+                        match op.type_ {
+                            Kind::Eq => self.asm().eq(),
+                            Kind::Ne => self.asm().ne(),
+                            Kind::Lt => self.asm().lt(),
+                            Kind::Le => self.asm().le(),
+                            Kind::Gt => self.asm().gt(),
+                            Kind::Ge => self.asm().ge(),
+                            Kind::Plus => self.asm().add(),
+                            Kind::Minus => self.asm().sub(),
+                            Kind::Star => self.asm().mul(),
+                            Kind::Slash => self.asm().div(),
+                            _ => {
+                                return Err(Error {
+                                    position: self.lmap.position(op.from, op.to),
+                                    message: format!("unknown binary operator {}", op.text),
+                                })
+                            }
+                        }
                     }
                 }
             }
