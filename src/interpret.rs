@@ -264,12 +264,12 @@ impl<'a> Interpreter<'a> {
                             }
                             Type::Closure => {
                                 let c = (raw_callee as *const Closure).as_ref().unwrap();
-                                (c.function.as_ref().unwrap(), c.cell_addr(0))
+                                (&*c.function, c.cell_addr(0))
                             }
                             Type::Nanbox => {
                                 if let Some(c) = nanbox::to_closure(raw_callee) {
                                     let c = c.as_ref().unwrap();
-                                    (c.function.as_ref().unwrap(), c.cell_addr(0))
+                                    (&*c.function, c.cell_addr(0))
                                 } else {
                                     return_errorf!(
                                         "call of non-function ({})",
@@ -409,9 +409,10 @@ impl<'a> Interpreter<'a> {
                         let fn_index =
                             u32::from_le_bytes(*((ip as usize + 1) as *const [u8; 4])) as usize;
                         let cell_count = u16::from_le_bytes(*((ip as usize + 5) as *const [u8; 2]));
-                        let f = &pp.functions[fn_index] as *const Function;
+                        let f =
+                            &pp.functions[fn_index] as *const Function as usize as *mut Function;
                         let c = Closure::alloc(cell_count).as_mut().unwrap();
-                        c.function = f;
+                        c.function.set_ptr(f);
                         for i in 0..cell_count {
                             let cell = *((sp + (cell_count - i - 1) as usize * 8) as *mut *mut u64);
                             c.set_cell(i, cell);
@@ -477,6 +478,9 @@ impl<'a> Interpreter<'a> {
                             _ => unreachable!(),
                         };
                         *(p as *mut u64) = v;
+                        if vty.is_pointer() {
+                            HEAP.write_barrier(p as usize, v as usize);
+                        }
                     }
                     inst::STOREARG => {
                         let ai =
@@ -488,8 +492,14 @@ impl<'a> Interpreter<'a> {
                     }
                     inst::STOREGLOBAL => {
                         let i = *((ip as usize + 1) as *const u32) as usize;
-                        let v = pop!(Type::Nanbox);
+                        let (v, ty) = pop!();
                         self.global_slots[i] = v;
+                        if ty.is_pointer() {
+                            HEAP.write_barrier(
+                                &self.global_slots[i] as *const u64 as usize,
+                                v as usize,
+                            );
+                        }
                     }
                     inst::STORELOCAL => {
                         let i = *((ip as usize + 1) as *const u16) as usize;

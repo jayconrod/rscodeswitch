@@ -1,5 +1,5 @@
 use crate::data::{self, Slice};
-use crate::heap::{Handle, HEAP};
+use crate::heap::{Handle, Ptr, HEAP};
 use crate::inst;
 
 use std::error::Error;
@@ -108,6 +108,14 @@ impl Type {
             } // TODO: String should be data::String, not *const data::String.
         }
     }
+
+    pub fn is_pointer(&self) -> bool {
+        match self {
+            // TODO: String should be data::String, not *const data::String
+            Type::String | Type::Function | Type::Closure | Type::Nanbox | Type::Pointer(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for Type {
@@ -134,7 +142,7 @@ impl fmt::Display for Type {
 }
 
 pub struct Closure {
-    pub function: *const Function,
+    pub function: Ptr<Function>,
 }
 
 impl Closure {
@@ -155,6 +163,7 @@ impl Closure {
 
     pub unsafe fn set_cell(&mut self, i: u16, cell: *mut u64) {
         *(self.cell_addr(i)) = cell;
+        HEAP.write_barrier(self.cell_addr(i) as usize, cell as usize);
     }
 }
 
