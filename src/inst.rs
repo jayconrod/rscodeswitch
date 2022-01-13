@@ -3,7 +3,7 @@ use std::mem::swap;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 40.
+// Next opcode: 44.
 pub const ADD: u8 = 20;
 pub const ALLOC: u8 = 35;
 pub const B: u8 = 27;
@@ -23,6 +23,8 @@ pub const LOAD: u8 = 36;
 pub const LOADARG: u8 = 29;
 pub const LOADGLOBAL: u8 = 9;
 pub const LOADLOCAL: u8 = 11;
+pub const LOADNAMEDPROP: u8 = 42;
+pub const LOADPROTOTYPE: u8 = 40;
 pub const LT: u8 = 17;
 pub const MUL: u8 = 22;
 pub const NANBOX: u8 = 6;
@@ -38,6 +40,8 @@ pub const STORE: u8 = 37;
 pub const STOREARG: u8 = 30;
 pub const STOREGLOBAL: u8 = 10;
 pub const STORELOCAL: u8 = 12;
+pub const STORENAMEDPROP: u8 = 43;
+pub const STOREPROTOTYPE: u8 = 41;
 pub const STRING: u8 = 26;
 pub const SUB: u8 = 21;
 pub const SWAP: u8 = 34;
@@ -48,11 +52,12 @@ pub const SYS_PRINT: u8 = 1;
 
 pub fn size(op: u8) -> usize {
     match op {
-        ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | MUL | NANBOX | NE | NEG | NIL
-        | NOP | NOT | POP | RET | STORE | SUB | SWAP | TRUE => 1,
+        ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL | NANBOX
+        | NE | NEG | NIL | NOP | NOT | POP | RET | STORE | STOREPROTOTYPE | SUB | SWAP | TRUE => 1,
         SYS => 2,
         CALLVALUE | CELL | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
-        ALLOC | B | BIF | FUNCTION | LOADGLOBAL | STOREGLOBAL | STRING => 5,
+        ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STORENAMEDPROP
+        | STRING => 5,
         NEWCLOSURE => 7,
         FLOAT64 => 9,
         _ => panic!("unknown opcode"),
@@ -80,6 +85,8 @@ pub fn mnemonic(op: u8) -> &'static str {
         LOADARG => "loadarg",
         LOADGLOBAL => "loadglobal",
         LOADLOCAL => "loadlocal",
+        LOADNAMEDPROP => "loadnamedprop",
+        LOADPROTOTYPE => "loadprototype",
         LT => "lt",
         MUL => "mul",
         NANBOX => "nanbox",
@@ -95,6 +102,8 @@ pub fn mnemonic(op: u8) -> &'static str {
         STOREARG => "storearg",
         STOREGLOBAL => "storeglobal",
         STORELOCAL => "storelocal",
+        STORENAMEDPROP => "storenamedprop",
+        STOREPROTOTYPE => "storeprototype",
         STRING => "string",
         SUB => "sub",
         SWAP => "swap",
@@ -246,6 +255,15 @@ impl Assembler {
         self.write_u16(index);
     }
 
+    pub fn loadnamedprop(&mut self, name: u32) {
+        self.write_u8(LOADNAMEDPROP);
+        self.write_u32(name);
+    }
+
+    pub fn loadprototype(&mut self) {
+        self.write_u8(LOADPROTOTYPE);
+    }
+
     pub fn lt(&mut self) {
         self.write_u8(LT);
     }
@@ -309,6 +327,15 @@ impl Assembler {
     pub fn storelocal(&mut self, index: u16) {
         self.write_u8(STORELOCAL);
         self.write_u16(index);
+    }
+
+    pub fn storenamedprop(&mut self, name: u32) {
+        self.write_u8(STORENAMEDPROP);
+        self.write_u32(name);
+    }
+
+    pub fn storeprototype(&mut self) {
+        self.write_u8(STOREPROTOTYPE);
     }
 
     pub fn string(&mut self, i: u32) {
@@ -435,8 +462,9 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("  ")?;
         f.write_str(mnemonic(insts[p]))?;
         match insts[p] {
-            ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | MUL | NANBOX | NE | NEG
-            | NIL | NOP | NOT | POP | RET | STORE | SUB | SWAP | TRUE => {
+            ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL
+            | NANBOX | NE | NEG | NIL | NOP | NOT | POP | RET | STORE | STOREPROTOTYPE | SUB
+            | SWAP | TRUE => {
                 f.write_str("\n")?;
             }
             B | BIF => {
@@ -461,7 +489,8 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let n = u16::from_le_bytes(insts[p + 1..p + 3].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
-            ALLOC | FUNCTION | LOADGLOBAL | STOREGLOBAL | STRING => {
+            ALLOC | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STORENAMEDPROP
+            | STRING => {
                 if p + 5 > insts.len() {
                     return Err(fmt::Error);
                 }

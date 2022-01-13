@@ -1,5 +1,5 @@
-use crate::data::{self, Slice};
-use crate::heap::{Handle, Ptr, HEAP};
+use crate::data::{self, SetValue, Slice};
+use crate::heap::{Handle, Ptr, Set, HEAP};
 use crate::inst;
 
 use std::error::Error;
@@ -9,8 +9,8 @@ use std::mem;
 pub struct Package {
     pub globals: Vec<Global>,
     pub functions: Vec<Function>,
-    pub strings: Handle<Slice<data::String>>,
     pub types: Vec<Type>,
+    pub strings: Handle<Slice<data::String>>,
 }
 
 impl Package {
@@ -51,6 +51,14 @@ impl fmt::Display for Package {
             write!(f, "{}{}", sep, func)?;
             sep = "\n\n";
         }
+        for ty in &self.types {
+            write!(f, "{}type {}", sep, ty)?;
+            sep = "\n";
+        }
+        sep = "\n\n";
+        for s in &*self.strings {
+            write!(f, "{}string {}", sep, s)?;
+        }
         Ok(())
     }
 }
@@ -74,10 +82,26 @@ pub struct Function {
 }
 
 impl fmt::Display for Function {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "function {}() {{\n", self.name)?;
         inst::disassemble(&self.insts, f)?;
         f.write_str("}")
+    }
+}
+
+pub struct Class {
+    pub name: std::string::String,
+    pub methods: Vec<*const Function>,
+}
+
+impl fmt::Display for Class {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "class {} {{", self.name)?;
+        for method in &self.methods {
+            let name = unsafe { &method.as_ref().unwrap().name };
+            write!(f, "\n  method {}", name)?;
+        }
+        f.write_str("\n}")
     }
 }
 
@@ -92,6 +116,7 @@ pub enum Type {
     String,
     Function,
     Closure,
+    Object,
     Nanbox,
     Pointer(Box<Type>),
 }
@@ -103,6 +128,7 @@ impl Type {
             Type::Bool => 1,
             Type::Float64 => 8,
             Type::Nanbox => 8,
+            Type::Object => mem::size_of::<Object>(),
             Type::String | Type::Function | Type::Closure | Type::Pointer(_) => {
                 mem::size_of::<usize>()
             } // TODO: String should be data::String, not *const data::String.
@@ -132,6 +158,7 @@ impl fmt::Display for Type {
                     Type::String => "string",
                     Type::Function => "function",
                     Type::Closure => "closure",
+                    Type::Object => "object",
                     Type::Nanbox => "nanbox",
                     _ => unreachable!(),
                 };
@@ -164,6 +191,56 @@ impl Closure {
     pub unsafe fn set_cell(&mut self, i: u16, cell: *mut u64) {
         *(self.cell_addr(i)) = cell;
         HEAP.write_barrier(self.cell_addr(i) as usize, cell as usize);
+    }
+}
+
+pub struct Object {
+    pub prototype: Ptr<Object>,
+    pub properties: data::HashMap<data::String, data::SetValue<u64>>,
+}
+
+impl Object {
+    pub fn property(&self, name: &data::String) -> Option<u64> {
+        unsafe {
+            let mut o = self;
+            loop {
+                let v = o.properties.get(name);
+                if let Some(v) = v {
+                    return Some(v.value);
+                }
+                match o.prototype.unwrap().as_ref() {
+                    Some(p) => {
+                        o = p;
+                    }
+                    None => {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn set_property(&mut self, name: &data::String, value: u64) {
+        unsafe {
+            let mut o = (self as *mut Object).as_mut().unwrap();
+            let value = SetValue { value };
+            loop {
+                let v = o.properties.get_mut(name);
+                if let Some(v) = v {
+                    v.set(&value);
+                    return;
+                }
+                match o.prototype.unwrap_mut().as_mut() {
+                    Some(p) => {
+                        o = p;
+                    }
+                    None => {
+                        self.properties.insert(name, &value);
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 

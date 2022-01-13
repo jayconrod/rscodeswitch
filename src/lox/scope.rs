@@ -172,18 +172,9 @@ impl Default for VarUse {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ScopeKind {
     Global,
+    Class,
     Function,
     Local,
-}
-
-impl ScopeKind {
-    fn var_kind(self) -> VarKind {
-        match self {
-            ScopeKind::Global => VarKind::Global,
-            ScopeKind::Function => VarKind::Argument,
-            ScopeKind::Local => VarKind::Local,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -227,10 +218,13 @@ impl<'a, 'b> Resolver<'a, 'b> {
             let (begin_pos, end_pos) = decl.pos();
             match decl {
                 Decl::Var { name, var, .. } => {
-                    self.declare(*var, *name, begin_pos, end_pos)?;
+                    self.declare(*var, *name, VarKind::Global, begin_pos, end_pos)?;
                 }
                 Decl::Function { name, var, .. } => {
-                    self.declare(*var, *name, begin_pos, end_pos)?;
+                    self.declare(*var, *name, VarKind::Global, begin_pos, end_pos)?;
+                }
+                Decl::Class { name, var, .. } => {
+                    self.declare(*var, *name, VarKind::Global, begin_pos, end_pos)?;
                 }
                 _ => (),
             };
@@ -245,7 +239,8 @@ impl<'a, 'b> Resolver<'a, 'b> {
     }
 
     fn resolve_decl(&mut self, decl: &Decl<'a>) -> Result<(), Error> {
-        let is_global = self.ss.scopes[*self.scope_stack.last().unwrap()].kind == ScopeKind::Global;
+        let scope_kind = self.ss.scopes[*self.scope_stack.last().unwrap()].kind;
+        let (begin_pos, end_pos) = decl.pos();
         match decl {
             Decl::Var {
                 name, init, var, ..
@@ -253,9 +248,12 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 if let Some(init) = init {
                     self.resolve_expr(init)?;
                 }
-                if !is_global {
-                    let (begin_pos, end_pos) = decl.pos();
-                    self.declare(*var, *name, begin_pos, end_pos)?;
+                match scope_kind {
+                    ScopeKind::Global => (), // already declared
+                    ScopeKind::Local => {
+                        self.declare(*var, *name, VarKind::Local, begin_pos, end_pos)?;
+                    }
+                    ScopeKind::Function | ScopeKind::Class => unreachable!(),
                 }
                 Ok(())
             }
@@ -268,13 +266,23 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 var,
                 ..
             } => {
-                if !is_global {
-                    let (begin_pos, end_pos) = decl.pos();
-                    self.declare(*var, *name, begin_pos, end_pos)?;
+                match scope_kind {
+                    ScopeKind::Global => (), // already declared
+                    ScopeKind::Class => unimplemented!(),
+                    ScopeKind::Local => {
+                        self.declare(*var, *name, VarKind::Local, begin_pos, end_pos)?;
+                    }
+                    ScopeKind::Function => unreachable!(),
                 }
                 self.enter(*arg_scope, ScopeKind::Function);
                 for param in params {
-                    self.declare(param.var, param.name, param.name.from, param.name.to)?;
+                    self.declare(
+                        param.var,
+                        param.name,
+                        VarKind::Argument,
+                        param.name.from,
+                        param.name.to,
+                    )?;
                 }
                 self.enter(*body_scope, ScopeKind::Local);
                 for decl in &body.decls {
@@ -283,6 +291,27 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 self.leave();
                 self.leave();
                 self.shift_captured_params_in_function(params, body, *body_scope);
+                Ok(())
+            }
+            Decl::Class {
+                name,
+                methods,
+                scope,
+                var,
+                ..
+            } => {
+                match scope_kind {
+                    ScopeKind::Global => (), // already declared
+                    ScopeKind::Function | ScopeKind::Class => unreachable!(),
+                    ScopeKind::Local => {
+                        self.declare(*var, *name, VarKind::Local, begin_pos, end_pos)?;
+                    }
+                }
+                self.enter(*scope, ScopeKind::Class);
+                for method in methods {
+                    self.resolve_decl(method)?;
+                }
+                self.leave();
                 Ok(())
             }
             Decl::Stmt(stmt) => self.resolve_stmt(stmt),
@@ -413,6 +442,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
         &mut self,
         var_id: usize,
         name: Token<'a>,
+        kind: VarKind,
         begin_pos: Pos,
         end_pos: Pos,
     ) -> Result<(), Error> {
@@ -429,7 +459,6 @@ impl<'a, 'b> Resolver<'a, 'b> {
             });
         }
         let slot = scope.next_slot();
-        let kind = scope.kind.var_kind();
         let too_many_err = match kind {
             VarKind::Global if slot > u32::MAX as usize => Some("too many global variables"),
             VarKind::Argument if slot > u16::MAX as usize => Some("too many arguments"),
@@ -510,6 +539,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 self.ss.vars[var].kind = VarKind::Capture;
                 self.ss.vars[var].cell_slot = self.ss.vars[var].slot;
             }
+
             VarKind::Capture => (),
         }
 

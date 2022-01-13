@@ -204,6 +204,28 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 // Store the closure in a variable.
                 self.compile_define(&self.scopes.vars[*var]);
             }
+            Decl::Class {
+                name,
+                methods,
+                var,
+                begin_pos,
+                end_pos,
+                ..
+            } => {
+                self.compile_define_prepare(
+                    &self.scopes.vars[*var],
+                    name.text,
+                    *begin_pos,
+                    *end_pos,
+                )?;
+                let tyi = self.ensure_type(Type::Object, *begin_pos, *end_pos)?;
+                self.asm().alloc(tyi);
+                if !methods.is_empty() {
+                    unimplemented!();
+                }
+                self.asm().nanbox();
+                self.compile_define(&self.scopes.vars[*var]);
+            }
             Decl::Stmt(stmt) => self.compile_stmt(stmt)?,
         }
         Ok(())

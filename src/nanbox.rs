@@ -1,5 +1,5 @@
 use crate::data;
-use crate::package::Closure;
+use crate::package::{Closure, Object};
 
 const QNAN: u64 = 0x7ffc_0000_0000_0000;
 
@@ -9,6 +9,7 @@ const TAG_NIL: u64 = 1;
 const TAG_BOOL: u64 = 2;
 const TAG_STRING: u64 = 3;
 const TAG_CLOSURE: u64 = 4;
+const TAG_OBJECT: u64 = 5;
 
 const VALUE_MASK: u64 = 0x0003_ffff_ffff_ffff;
 
@@ -61,8 +62,20 @@ pub fn from_closure(f: *const Closure) -> u64 {
 }
 
 pub fn to_closure(v: u64) -> Option<*const Closure> {
-  if v & (QNAN | TAG_CLOSURE) == QNAN | TAG_CLOSURE {
+  if v & (QNAN | TAG_MASK) == QNAN | TAG_CLOSURE {
     Some((v & !QNAN & !TAG_MASK) as usize as *const Closure)
+  } else {
+    None
+  }
+}
+
+pub fn from_object(f: *const Object) -> u64 {
+  QNAN | TAG_OBJECT | f as u64
+}
+
+pub fn to_object(v: u64) -> Option<*const Object> {
+  if v & (QNAN | TAG_MASK) == QNAN | TAG_OBJECT {
+    Some((v & !QNAN & !TAG_MASK) as usize as *const Object)
   } else {
     None
   }
@@ -86,6 +99,9 @@ pub fn debug_str(v: u64) -> String {
   if let Some(_) = to_closure(v) {
     return String::from("<function>");
   }
+  if let Some(_) = to_object(v) {
+    return String::from("<object>");
+  }
   return format!("Nanbox {:?}", v);
 }
 
@@ -100,6 +116,8 @@ pub fn debug_type(v: u64) -> &'static str {
     "string"
   } else if to_closure(v).is_some() {
     "function"
+  } else if to_object(v).is_some() {
+    "object"
   } else {
     "invalid value"
   }

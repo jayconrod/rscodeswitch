@@ -2,7 +2,7 @@ use crate::data;
 use crate::heap::HEAP;
 use crate::inst;
 use crate::nanbox;
-use crate::package::{Closure, Function, Type};
+use crate::package::{Closure, Function, Object, Type};
 
 use std::error;
 use std::fmt;
@@ -109,7 +109,7 @@ impl<'a> Interpreter<'a> {
                         Type::Nil => {
                             return_errorf!("binary operator used with nil operand");
                         }
-                        Type::Bool | Type::Function | Type::Closure | Type::Pointer(_) => {
+                        Type::Bool | Type::Function | Type::Closure | Type::Object | Type::Pointer(_) => {
                             push!((l $op r) as u64, Type::Bool);
                         }
                         Type::Float64 => {
@@ -135,6 +135,8 @@ impl<'a> Interpreter<'a> {
                                 ls $op rs
                             } else if let (Some(lf), Some(rf)) = (nanbox::to_closure(l), nanbox::to_closure(r)) {
                                 lf $op rf
+                            } else if let (Some(lo), Some(ro)) = (nanbox::to_object(l), nanbox::to_object(r)) {
+                                lo $op ro
                             } else {
                                 true $op false
                             };
@@ -361,6 +363,62 @@ impl<'a> Interpreter<'a> {
                         let ty = types[types.len() - stack_depth + i].clone();
                         push!(v, ty);
                     }
+                    inst::LOADNAMEDPROP => {
+                        let i = *((ip as usize + 1) as *const u32) as usize;
+                        let name = &pp.strings[i];
+                        let (r, ty) = pop!();
+                        match ty {
+                            Type::Object => {
+                                // TODO: figure out where the property is based
+                                // on its static type. We need to know the
+                                // type of the property itself, too.
+                                unimplemented!();
+                            }
+                            Type::Nanbox => {
+                                let o = if let Some(o) = nanbox::to_object(r) {
+                                    o.as_ref().unwrap()
+                                } else {
+                                    return_errorf!(
+                                        "value is not an object: {}",
+                                        nanbox::debug_type(r)
+                                    );
+                                };
+                                let prop = if let Some(prop) = o.property(name) {
+                                    prop
+                                } else {
+                                    return_errorf!("object does not have property '{}'", &name);
+                                };
+                                push!(prop, Type::Nanbox);
+                            }
+                            _ => {
+                                return_errorf!("value is not an object: {}", ty);
+                            }
+                        }
+                    }
+                    inst::LOADPROTOTYPE => {
+                        let (v, ty) = pop!();
+                        let p = match ty {
+                            Type::Object => {
+                                let o = (v as *const Object).as_ref().unwrap();
+                                o.prototype.unwrap()
+                            }
+                            Type::Nanbox => {
+                                if let Some(o) = nanbox::to_object(v) {
+                                    let o = o.as_ref().unwrap();
+                                    o.prototype.unwrap()
+                                } else {
+                                    return_errorf!(
+                                        "value is not an object: {}",
+                                        nanbox::debug_type(v)
+                                    )
+                                }
+                            }
+                            _ => {
+                                return_errorf!("value is not an object: {}", ty);
+                            }
+                        };
+                        push!(p as *const Object as u64, Type::Object);
+                    }
                     inst::MUL => {
                         binop_num!(*)
                     }
@@ -376,6 +434,10 @@ impl<'a> Interpreter<'a> {
                             Type::Closure => {
                                 let f = v as *const Closure;
                                 nanbox::from_closure(f)
+                            }
+                            Type::Object => {
+                                let o = v as *const Object;
+                                nanbox::from_object(o)
                             }
                             Type::Float64 | Type::Nanbox => v,
                             _ => unreachable!(),
@@ -509,6 +571,39 @@ impl<'a> Interpreter<'a> {
                         *((fp as usize - (i + 1) * 8) as *mut u64) = v;
                         types[tyi] = ty;
                     }
+                    inst::STORENAMEDPROP => {
+                        let i = *((ip as usize + 1) as *const u32) as usize;
+                        let name = &pp.strings[i];
+                        let (v, vty) = pop!();
+                        let (r, rty) = pop!();
+                        match rty {
+                            Type::Object => {
+                                // TODO: figure out where the property is based
+                                // on its static type. We need to know the
+                                // type of the property itself, too.
+                                unimplemented!();
+                            }
+                            Type::Nanbox => {
+                                if vty != Type::Nanbox {
+                                    // TODO: store statically typed values
+                                    // in objects.
+                                    unimplemented!();
+                                }
+                                let o = if let Some(o) = nanbox::to_object(r) {
+                                    (o as usize as *mut Object).as_mut().unwrap()
+                                } else {
+                                    return_errorf!(
+                                        "value is not an object: {}",
+                                        nanbox::debug_type(r)
+                                    )
+                                };
+                                o.set_property(name, v);
+                            }
+                            _ => {
+                                return_errorf!("value is not an object: {}", rty);
+                            }
+                        }
+                    }
                     inst::STRING => {
                         let i = *((ip as usize + 1) as *const u32) as usize;
                         let s = &pp.strings[i] as *const data::String as u64;
@@ -559,6 +654,9 @@ impl<'a> Interpreter<'a> {
             },
             Type::Function | Type::Closure => {
                 write!(self.w, "<function>\n")
+            }
+            Type::Object => {
+                write!(self.w, "<object>\n")
             }
             Type::Nanbox => {
                 write!(self.w, "{}\n", nanbox::debug_str(v))

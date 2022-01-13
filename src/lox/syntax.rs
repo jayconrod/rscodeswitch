@@ -4,6 +4,17 @@ use std::boxed::Box;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
+pub trait DisplayIndent {
+    fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result;
+
+    fn write_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
+        for _ in 0..level {
+            f.write_str("  ")?;
+        }
+        Ok(())
+    }
+}
+
 pub struct Program<'a> {
     pub decls: Vec<Decl<'a>>,
     pub scope: usize,
@@ -39,6 +50,14 @@ pub enum Decl<'a> {
         body_scope: usize,
         var: usize,
     },
+    Class {
+        name: Token<'a>,
+        methods: Vec<Decl<'a>>,
+        begin_pos: Pos,
+        end_pos: Pos,
+        scope: usize,
+        var: usize,
+    },
     Stmt(Stmt<'a>),
 }
 
@@ -47,6 +66,7 @@ impl<'a> Decl<'a> {
         match self {
             Decl::Var { name, .. } => Some(*name),
             Decl::Function { name, .. } => Some(*name),
+            Decl::Class { name, .. } => Some(*name),
             Decl::Stmt(_) => None,
         }
     }
@@ -59,16 +79,23 @@ impl<'a> Decl<'a> {
             Decl::Function {
                 begin_pos, end_pos, ..
             } => (*begin_pos, *end_pos),
+            Decl::Class {
+                begin_pos, end_pos, ..
+            } => (*begin_pos, *end_pos),
             Decl::Stmt(stmt) => stmt.pos(),
         }
     }
 }
 
-impl<'a> Decl<'a> {
+impl<'a> Display for Decl<'a> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        self.fmt_indent(f, 0)
+    }
+}
+
+impl<'a> DisplayIndent for Decl<'a> {
     fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
-        for _ in 0..level {
-            f.write_str("  ")?;
-        }
+        self.write_indent(f, level)?;
         match self {
             Decl::Var { name, init, .. } => {
                 f.write_str("var ")?;
@@ -93,14 +120,22 @@ impl<'a> Decl<'a> {
                 f.write_str(") ")?;
                 body.fmt(f)
             }
+            Decl::Class { name, methods, .. } => {
+                f.write_str("class ")?;
+                f.write_str(name.text)?;
+                f.write_str(" {\n")?;
+                let mut sep = "";
+                for method in methods {
+                    f.write_str(sep)?;
+                    sep = "\n\n";
+                    method.fmt_indent(f, level + 1)?;
+                }
+                f.write_str("\n")?;
+                self.write_indent(f, level)?;
+                f.write_str("}")
+            }
             Decl::Stmt(stmt) => stmt.fmt(f),
         }
-    }
-}
-
-impl<'a> Display for Decl<'a> {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        self.fmt_indent(f, 0)
     }
 }
 
@@ -126,7 +161,9 @@ impl<'a> Block<'a> {
     fn pos(&self) -> (Pos, Pos) {
         (self.begin_pos, self.end_pos)
     }
+}
 
+impl<'a> DisplayIndent for Block<'a> {
     fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
         f.write_str("{\n")?;
         for decl in &self.decls {
@@ -209,7 +246,7 @@ impl<'a> Stmt<'a> {
     }
 }
 
-impl<'a> Stmt<'a> {
+impl<'a> DisplayIndent for Stmt<'a> {
     fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
         for _ in 0..level {
             f.write_str("  ")?;
@@ -428,6 +465,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         match type_ {
             Kind::Var => self.parse_var_decl(),
             Kind::Fun => self.parse_function_decl(),
+            Kind::Class => self.parse_class_decl(),
             _ => self.parse_stmt().map(|stmt| Decl::Stmt(stmt)),
         }
     }
@@ -457,10 +495,35 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_function_decl(&mut self) -> Result<Decl<'a>, Error> {
+        let begin_pos = self.expect(Kind::Fun)?.from;
+        match self.parse_function()? {
+            Decl::Function {
+                name,
+                params,
+                body,
+                begin_pos: _,
+                end_pos,
+                arg_scope,
+                body_scope,
+                var,
+            } => Ok(Decl::Function {
+                name,
+                params,
+                body,
+                begin_pos,
+                end_pos,
+                arg_scope,
+                body_scope,
+                var,
+            }),
+            _ => unreachable!(),
+        }
+    }
+
+    fn parse_function(&mut self) -> Result<Decl<'a>, Error> {
         let arg_scope = self.next_scope();
         let body_scope = self.next_scope();
         let var = self.next_var();
-        let begin_pos = self.expect(Kind::Fun)?.from;
         let name = self.expect(Kind::Ident)?;
         let params = self.parse_params()?;
         let body = self.parse_block()?;
@@ -469,10 +532,31 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             name,
             params,
             body,
-            begin_pos,
+            begin_pos: name.from,
             end_pos,
             arg_scope,
             body_scope,
+            var,
+        })
+    }
+
+    fn parse_class_decl(&mut self) -> Result<Decl<'a>, Error> {
+        let scope = self.next_scope();
+        let var = self.next_var();
+        let begin_pos = self.expect(Kind::Class)?.from;
+        let name = self.expect(Kind::Ident)?;
+        self.expect(Kind::LBrace)?;
+        let mut methods = Vec::new();
+        while self.peek() != Kind::RBrace {
+            methods.push(self.parse_function()?);
+        }
+        let end_pos = self.expect(Kind::RBrace)?.to;
+        Ok(Decl::Class {
+            name,
+            methods,
+            begin_pos,
+            end_pos,
+            scope,
             var,
         })
     }

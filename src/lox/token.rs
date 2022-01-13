@@ -24,6 +24,7 @@ pub enum Kind {
     Slash,
     Bang,
     And,
+    Class,
     Else,
     For,
     Fun,
@@ -63,6 +64,7 @@ impl fmt::Display for Kind {
             Kind::Slash => "/",
             Kind::Bang => "!",
             Kind::And => "'and'",
+            Kind::Class => "'class'",
             Kind::Else => "'else'",
             Kind::For => "'for'",
             Kind::Fun => "'fun'",
@@ -192,6 +194,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 let text = unsafe { from_utf8_unchecked(&self.data[self.p..end]) };
                 let type_ = match text {
                     "and" => Kind::And,
+                    "class" => Kind::Class,
                     "else" => Kind::Else,
                     "false" => Kind::Bool,
                     "for" => Kind::For,
