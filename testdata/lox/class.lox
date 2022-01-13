@@ -1,2 +1,4 @@
-class Foo {}
-print Foo; // Output: <object>
+class A {}
+print A; // Output: <function>
+var a = A();
+print a; // Output: <object>

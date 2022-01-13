@@ -604,6 +604,39 @@ impl<'a> Interpreter<'a> {
                             }
                         }
                     }
+                    inst::STOREPROTOTYPE => {
+                        let (p, pty) = pop!();
+                        let (o, oty) = pop!();
+                        assert_eq!(pty, oty);
+                        let (o, p) = match oty {
+                            Type::Object => {
+                                let o = (o as *mut Object).as_mut().unwrap();
+                                let p = p as *mut Object;
+                                (o, p)
+                            }
+                            Type::Nanbox => {
+                                let o = if let Some(o) = nanbox::to_object(o) {
+                                    (o as usize as *mut Object).as_mut().unwrap()
+                                } else {
+                                    return_errorf!(
+                                        "receiver is not an object: {}",
+                                        nanbox::debug_type(o)
+                                    )
+                                };
+                                let p = if let Some(p) = nanbox::to_object(p) {
+                                    p as usize as *mut Object
+                                } else {
+                                    return_errorf!(
+                                        "prototype is not an object: {}",
+                                        nanbox::debug_type(p)
+                                    )
+                                };
+                                (o, p)
+                            }
+                            _ => unreachable!(),
+                        };
+                        o.prototype.set_ptr(p);
+                    }
                     inst::STRING => {
                         let i = *((ip as usize + 1) as *const u32) as usize;
                         let s = &pp.strings[i] as *const data::String as u64;

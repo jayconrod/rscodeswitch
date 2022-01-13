@@ -212,17 +212,57 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 end_pos,
                 ..
             } => {
+                // Prepare storage for the class.
                 self.compile_define_prepare(
                     &self.scopes.vars[*var],
                     name.text,
                     *begin_pos,
                     *end_pos,
                 )?;
-                let tyi = self.ensure_type(Type::Object, *begin_pos, *end_pos)?;
-                self.asm().alloc(tyi);
+
+                // Create a prototype object.
+                let cell_type = Type::Pointer(Box::new(Type::Nanbox));
+                let cell_type_index = self.ensure_type(cell_type.clone(), *begin_pos, *end_pos)?;
+                self.asm().alloc(cell_type_index);
+                self.asm().dup();
+                let prototype_type_index = self.ensure_type(Type::Object, *begin_pos, *end_pos)?;
+                self.asm().alloc(prototype_type_index);
+                self.asm().nanbox();
+                self.asm().store();
+                // TODO: store methods in the prototype.
                 if !methods.is_empty() {
                     unimplemented!();
                 }
+
+                // Create a constructor closure which serves as the class value.
+                // The constructor allocates a new objects, sets its prototype,
+                // calls the initializer (if any), and returns the object.
+                let mut ctor_asm = Assembler::new();
+                let object_type_index = self.ensure_type(Type::Object, *begin_pos, *end_pos)?;
+                ctor_asm.alloc(object_type_index);
+                ctor_asm.nanbox();
+                ctor_asm.dup();
+                ctor_asm.cell(0);
+                ctor_asm.load();
+                ctor_asm.storeprototype();
+                // TODO: call initializer.
+                ctor_asm.ret();
+                let ctor_insts = ctor_asm
+                    .finish()
+                    .map_err(|err| Error::wrap(self.lmap.position(*begin_pos, *end_pos), &err))?;
+                let ctor = Function {
+                    name: format!("·{}·constructor", name.text),
+                    insts: ctor_insts,
+                    package: 0 as *mut Package,
+                    param_types: Vec::new(),
+                    cell_types: vec![cell_type],
+                };
+                let ctor_index = self.functions.len().try_into().map_err(|_| Error {
+                    position: self.lmap.position(*begin_pos, *end_pos),
+                    message: String::from("too many functions"),
+                })?;
+                self.functions.push(ctor);
+                self.asm().newclosure(ctor_index, 1);
                 self.asm().nanbox();
                 self.compile_define(&self.scopes.vars[*var]);
             }
