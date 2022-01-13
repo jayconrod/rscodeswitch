@@ -651,6 +651,16 @@ impl<'a> Interpreter<'a> {
                         push!(v1, ty1);
                         push!(v2, ty2);
                     }
+                    inst::SWAPN => {
+                        let n = *((ip as usize + 1) as *const u8);
+                        let top = sp as *mut u64;
+                        let slot = (sp + (n as usize + 1) * 8) as *mut u64;
+                        let v = *top;
+                        *top = *slot;
+                        *slot = v;
+                        let stack_depth = types.len();
+                        types.swap(stack_depth - 1, stack_depth - n as usize - 1);
+                    }
                     inst::SYS => {
                         let sys = *((ip as usize + 1) as *const u8);
                         match sys {

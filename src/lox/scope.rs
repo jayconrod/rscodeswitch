@@ -399,6 +399,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 self.resolve_expr(l)?;
                 self.resolve_expr(r)
             }
+            Expr::Property(expr, _) => self.resolve_expr(expr),
             Expr::Assign(l, r) => {
                 self.resolve_lvalue(l)?;
                 self.resolve_expr(r)
@@ -410,6 +411,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
     fn resolve_lvalue(&mut self, lvalue: &LValue<'a>) -> Result<(), Error> {
         match lvalue {
             LValue::Var { name, var_use, .. } => self.resolve(*name, *var_use),
+            LValue::Property { receiver, .. } => self.resolve_expr(receiver),
         }
     }
 

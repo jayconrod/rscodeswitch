@@ -353,6 +353,7 @@ pub enum Expr<'a> {
     },
     Unary(Token<'a>, Box<Expr<'a>>),
     Binary(Box<Expr<'a>>, Token<'a>, Box<Expr<'a>>),
+    Property(Box<Expr<'a>>, Token<'a>),
     Assign(LValue<'a>, Box<Expr<'a>>),
 }
 
@@ -372,6 +373,7 @@ impl<'a> Expr<'a> {
             } => (callee.pos().0, *end_pos),
             Expr::Unary(op, e) => (op.from, e.pos().1),
             Expr::Binary(l, _, r) => (l.pos().0, r.pos().0),
+            Expr::Property(e, name) => (e.pos().0, name.to),
             Expr::Assign(l, r) => (l.pos().0, r.pos().1),
         }
     }
@@ -401,19 +403,28 @@ impl<'a> Display for Expr<'a> {
             }
             Expr::Unary(op, e) => write!(f, "{}{}", op.text, e),
             Expr::Binary(l, op, r) => write!(f, "{} {} {}", l, op.text, r),
+            Expr::Property(e, name) => write!(f, "{}.{}", e, name.text),
             Expr::Assign(l, r) => write!(f, "{} = {}", l, r),
         }
     }
 }
 
 pub enum LValue<'a> {
-    Var { name: Token<'a>, var_use: usize },
+    Var {
+        name: Token<'a>,
+        var_use: usize,
+    },
+    Property {
+        receiver: Box<Expr<'a>>,
+        name: Token<'a>,
+    },
 }
 
 impl<'a> LValue<'a> {
     fn pos(&self) -> (Pos, Pos) {
         match self {
             LValue::Var { name, .. } => (name.from, name.to),
+            LValue::Property { receiver, name, .. } => (receiver.pos().0, name.to),
         }
     }
 }
@@ -422,6 +433,7 @@ impl<'a> Display for LValue<'a> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             LValue::Var { name, .. } => f.write_str(name.text),
+            LValue::Property { receiver, name, .. } => write!(f, "{}.{}", receiver, name.text),
         }
     }
 }
@@ -767,6 +779,26 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         })
     }
 
+    fn parse_property_expr(
+        &mut self,
+        receiver: Expr<'a>,
+        can_assign: bool,
+    ) -> Result<Expr<'a>, Error> {
+        self.expect(Kind::Dot)?;
+        let name = self.expect(Kind::Ident)?;
+        if can_assign && self.peek() == Kind::Assign {
+            let l = LValue::Property {
+                receiver: Box::new(receiver),
+                name,
+            };
+            self.take();
+            let r = self.parse_expr()?;
+            Ok(Expr::Assign(l, Box::new(r)))
+        } else {
+            Ok(Expr::Property(Box::new(receiver), name))
+        }
+    }
+
     fn parse_unary_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
         let op = self.tokens[self.next];
         match op.type_ {
@@ -827,6 +859,11 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
 
     fn get_rule<'d>(&self, type_: Kind) -> ParseRule<'a, 'b, 'c, 'd> {
         match type_ {
+            Kind::Dot => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_property_expr),
+                precedence: Precedence::Primary,
+            },
             Kind::LParen => ParseRule {
                 prefix: Some(&Parser::parse_group_expr),
                 infix: Some(&Parser::parse_call_expr),

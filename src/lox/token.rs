@@ -11,6 +11,7 @@ pub enum Kind {
     RBrace,
     Comma,
     Semi,
+    Dot,
     Assign,
     Eq,
     Ne,
@@ -51,6 +52,7 @@ impl fmt::Display for Kind {
             Kind::RBrace => "}",
             Kind::Comma => ",",
             Kind::Semi => ";",
+            Kind::Dot => ".",
             Kind::Assign => "=",
             Kind::Eq => "==",
             Kind::Ne => "!=",
@@ -156,6 +158,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 b'}' => Kind::RBrace,
                 b',' => Kind::Comma,
                 b';' => Kind::Semi,
+                b'.' => Kind::Dot, // TODO: fix conflict with floating point
                 b'=' if bnext != b'=' => Kind::Assign,
                 b'<' if bnext != b'=' => Kind::Lt,
                 b'>' if bnext != b'=' => Kind::Gt,

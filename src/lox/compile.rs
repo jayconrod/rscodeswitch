@@ -530,13 +530,27 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     }
                 }
             }
+            Expr::Property(e, name) => {
+                self.compile_expr(e)?;
+                let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                self.asm().loadnamedprop(si);
+            }
             Expr::Assign(l, r) => {
-                self.compile_expr(r)?;
-                self.asm().dup(); // TODO: only dup if the value is being used
                 match l {
                     LValue::Var { var_use, .. } => {
+                        self.compile_expr(r)?;
+                        self.asm().dup(); // TODO: only dup if the value is being used
                         let var_use = self.scopes.var_uses[*var_use];
                         self.compile_assign(var_use);
+                    }
+                    LValue::Property { receiver, name, .. } => {
+                        self.compile_expr(receiver)?;
+                        self.compile_expr(r)?;
+                        self.asm().dup(); // TODO: only dup if the value is being used
+                        self.asm().swapn(1);
+                        self.asm().swap();
+                        let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                        self.asm().storenamedprop(si);
                     }
                 }
             }

@@ -2,3 +2,7 @@ class A {}
 print A; // Output: <function>
 var a = A();
 print a; // Output: <object>
+a.x = 12;
+print a.x; // Output: 12
+print a.x = 34; // Output: 34
+print a.x; // Output: 34

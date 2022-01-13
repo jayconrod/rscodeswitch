@@ -3,7 +3,7 @@ use std::mem::swap;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 44.
+// Next opcode: 45.
 pub const ADD: u8 = 20;
 pub const ALLOC: u8 = 35;
 pub const B: u8 = 27;
@@ -45,6 +45,7 @@ pub const STOREPROTOTYPE: u8 = 41;
 pub const STRING: u8 = 26;
 pub const SUB: u8 = 21;
 pub const SWAP: u8 = 34;
+pub const SWAPN: u8 = 44;
 pub const SYS: u8 = 5;
 pub const TRUE: u8 = 7;
 
@@ -54,7 +55,7 @@ pub fn size(op: u8) -> usize {
     match op {
         ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL | NANBOX
         | NE | NEG | NIL | NOP | NOT | POP | RET | STORE | STOREPROTOTYPE | SUB | SWAP | TRUE => 1,
-        SYS => 2,
+        SWAPN | SYS => 2,
         CALLVALUE | CELL | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
         ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STORENAMEDPROP
         | STRING => 5,
@@ -107,6 +108,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         STRING => "string",
         SUB => "sub",
         SWAP => "swap",
+        SWAPN => "swapn",
         SYS => "sys",
         TRUE => "true",
         _ => panic!("unknown opcode"),
@@ -351,6 +353,11 @@ impl Assembler {
         self.write_u8(SWAP);
     }
 
+    pub fn swapn(&mut self, n: u8) {
+        self.write_u8(SWAPN);
+        self.write_u8(n);
+    }
+
     pub fn sys(&mut self, sys: u8) {
         self.write_u8(SYS);
         self.write_u8(sys);
@@ -511,6 +518,13 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let fn_index = u32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
                 let slot_count = u16::from_le_bytes(insts[p + 5..p + 7].try_into().unwrap());
                 write!(f, " {} {}\n", fn_index, slot_count)?;
+            }
+            SWAPN => {
+                if p + 2 > insts.len() {
+                    return Err(fmt::Error);
+                }
+                let n = insts[p + 1];
+                write!(f, " {}\n", n)?;
             }
             SYS => {
                 if p + 2 > insts.len() {
