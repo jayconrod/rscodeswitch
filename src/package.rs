@@ -1,4 +1,4 @@
-use crate::data::{self, SetValue, Slice};
+use crate::data::{self, Slice};
 use crate::heap::{Handle, Ptr, Set, HEAP};
 use crate::inst;
 
@@ -51,13 +51,14 @@ impl fmt::Display for Package {
             write!(f, "{}{}", sep, func)?;
             sep = "\n\n";
         }
-        for ty in &self.types {
-            write!(f, "{}type {}", sep, ty)?;
+        for (i, ty) in self.types.iter().enumerate() {
+            write!(f, "{}type {} {}", sep, i, ty)?;
             sep = "\n";
         }
         sep = "\n\n";
-        for s in &*self.strings {
-            write!(f, "{}string {}", sep, s)?;
+        for (i, s) in self.strings.iter().enumerate() {
+            write!(f, "{}string {} \"{}\"", sep, i, s)?;
+            sep = "\n";
         }
         Ok(())
     }
@@ -196,17 +197,17 @@ impl Closure {
 
 pub struct Object {
     pub prototype: Ptr<Object>,
-    pub properties: data::HashMap<data::String, data::SetValue<u64>>,
+    pub properties: data::HashMap<data::String, Property>,
 }
 
 impl Object {
-    pub fn property(&self, name: &data::String) -> Option<u64> {
+    pub fn property(&self, name: &data::String) -> Option<&Property> {
         unsafe {
             let mut o = self;
             loop {
-                let v = o.properties.get(name);
-                if let Some(v) = v {
-                    return Some(v.value);
+                let prop = o.properties.get(name);
+                if prop.is_some() {
+                    return prop;
                 }
                 match o.prototype.unwrap().as_ref() {
                     Some(p) => {
@@ -220,14 +221,14 @@ impl Object {
         }
     }
 
-    pub fn set_property(&mut self, name: &data::String, value: u64) {
+    pub fn set_property(&mut self, name: &data::String, kind: PropertyKind, value: u64) {
         unsafe {
             let mut o = (self as *mut Object).as_mut().unwrap();
-            let value = SetValue { value };
+            let prop = Property { kind, value };
             loop {
-                let v = o.properties.get_mut(name);
-                if let Some(v) = v {
-                    v.set(&value);
+                let existing = o.properties.get_mut(name);
+                if let Some(existing) = existing {
+                    existing.set(&prop);
                     return;
                 }
                 match o.prototype.unwrap_mut().as_mut() {
@@ -235,13 +236,47 @@ impl Object {
                         o = p;
                     }
                     None => {
-                        self.properties.insert(name, &value);
+                        self.properties.insert(name, &prop);
                         return;
                     }
                 }
             }
         }
     }
+
+    pub fn set_own_property(&mut self, name: &data::String, kind: PropertyKind, value: u64) {
+        let prop = Property { kind, value };
+        if let Some(existing) = self.properties.get_mut(name) {
+            existing.set(&prop);
+        } else {
+            self.properties.insert(name, &prop);
+        }
+    }
+}
+
+pub struct Property {
+    pub kind: PropertyKind,
+    pub value: u64,
+}
+
+impl Property {
+    pub fn init(&mut self, kind: PropertyKind, value: u64) {
+        self.kind = kind;
+        self.value = value;
+        HEAP.write_barrier_nanbox(&self.value as *const u64 as usize, value);
+    }
+}
+
+impl Set for Property {
+    fn set(&mut self, other: &Property) {
+        self.init(other.kind, other.value);
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum PropertyKind {
+    Field,
+    Method,
 }
 
 #[derive(Debug)]

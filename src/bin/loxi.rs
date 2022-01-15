@@ -38,11 +38,10 @@ fn run(args: &[String]) -> Result<(), String> {
 
         let mut w = stdout();
         let mut interp = Interpreter::new(&mut w);
-        for name in ["init", "main"] {
-            if let Some(f) = pkg.function_by_name(name) {
-                interp.interpret(f).map_err(err_to_string)?;
-            }
-        }
+        let f = pkg
+            .function_by_name("·init")
+            .ok_or_else(|| String::from("·init function not found"))?;
+        interp.interpret(f).map_err(err_to_string)?;
     }
     Ok(())
 }

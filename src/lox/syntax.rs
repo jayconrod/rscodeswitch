@@ -48,6 +48,7 @@ pub enum Decl<'a> {
         end_pos: Pos,
         arg_scope: usize,
         body_scope: usize,
+        this_var: Option<usize>,
         var: usize,
     },
     Class {
@@ -341,6 +342,10 @@ pub enum Expr<'a> {
         name: Token<'a>,
         var_use: usize,
     },
+    This {
+        token: Token<'a>,
+        var_use: usize,
+    },
     Group {
         expr: Box<Expr<'a>>,
         begin_pos: Pos,
@@ -353,7 +358,10 @@ pub enum Expr<'a> {
     },
     Unary(Token<'a>, Box<Expr<'a>>),
     Binary(Box<Expr<'a>>, Token<'a>, Box<Expr<'a>>),
-    Property(Box<Expr<'a>>, Token<'a>),
+    Property {
+        receiver: Box<Expr<'a>>,
+        name: Token<'a>,
+    },
     Assign(LValue<'a>, Box<Expr<'a>>),
 }
 
@@ -365,6 +373,7 @@ impl<'a> Expr<'a> {
             Expr::Number(t) => (t.from, t.to),
             Expr::String(t) => (t.from, t.to),
             Expr::Var { name, .. } => (name.from, name.to),
+            Expr::This { token, .. } => (token.from, token.to),
             Expr::Group {
                 begin_pos, end_pos, ..
             } => (*begin_pos, *end_pos),
@@ -373,7 +382,7 @@ impl<'a> Expr<'a> {
             } => (callee.pos().0, *end_pos),
             Expr::Unary(op, e) => (op.from, e.pos().1),
             Expr::Binary(l, _, r) => (l.pos().0, r.pos().0),
-            Expr::Property(e, name) => (e.pos().0, name.to),
+            Expr::Property { receiver, name } => (receiver.pos().0, name.to),
             Expr::Assign(l, r) => (l.pos().0, r.pos().1),
         }
     }
@@ -387,6 +396,7 @@ impl<'a> Display for Expr<'a> {
             Expr::Number(t) => f.write_str(t.text),
             Expr::String(t) => f.write_str(t.text),
             Expr::Var { name, .. } => f.write_str(name.text),
+            Expr::This { token, .. } => f.write_str(token.text),
             Expr::Group { expr, .. } => write!(f, "({})", expr),
             Expr::Call {
                 callee, arguments, ..
@@ -403,7 +413,7 @@ impl<'a> Display for Expr<'a> {
             }
             Expr::Unary(op, e) => write!(f, "{}{}", op.text, e),
             Expr::Binary(l, op, r) => write!(f, "{} {} {}", l, op.text, r),
-            Expr::Property(e, name) => write!(f, "{}.{}", e, name.text),
+            Expr::Property { receiver, name } => write!(f, "{}.{}", receiver, name.text),
             Expr::Assign(l, r) => write!(f, "{} = {}", l, r),
         }
     }
@@ -508,7 +518,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
 
     fn parse_function_decl(&mut self) -> Result<Decl<'a>, Error> {
         let begin_pos = self.expect(Kind::Fun)?.from;
-        match self.parse_function()? {
+        match self.parse_function(false)? {
             Decl::Function {
                 name,
                 params,
@@ -517,6 +527,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
                 end_pos,
                 arg_scope,
                 body_scope,
+                this_var,
                 var,
             } => Ok(Decl::Function {
                 name,
@@ -526,16 +537,22 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
                 end_pos,
                 arg_scope,
                 body_scope,
+                this_var,
                 var,
             }),
             _ => unreachable!(),
         }
     }
 
-    fn parse_function(&mut self) -> Result<Decl<'a>, Error> {
+    fn parse_function(&mut self, has_this: bool) -> Result<Decl<'a>, Error> {
         let arg_scope = self.next_scope();
         let body_scope = self.next_scope();
         let var = self.next_var();
+        let this_var = if has_this {
+            Some(self.next_var())
+        } else {
+            None
+        };
         let name = self.expect(Kind::Ident)?;
         let params = self.parse_params()?;
         let body = self.parse_block()?;
@@ -548,6 +565,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             end_pos,
             arg_scope,
             body_scope,
+            this_var,
             var,
         })
     }
@@ -560,7 +578,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         self.expect(Kind::LBrace)?;
         let mut methods = Vec::new();
         while self.peek() != Kind::RBrace {
-            methods.push(self.parse_function()?);
+            methods.push(self.parse_function(true)?);
         }
         let end_pos = self.expect(Kind::RBrace)?.to;
         Ok(Decl::Class {
@@ -795,7 +813,10 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             let r = self.parse_expr()?;
             Ok(Expr::Assign(l, Box::new(r)))
         } else {
-            Ok(Expr::Property(Box::new(receiver), name))
+            Ok(Expr::Property {
+                receiver: Box::new(receiver),
+                name,
+            })
         }
     }
 
@@ -839,6 +860,14 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
                 var_use: self.next_var_use(),
             })
         }
+    }
+
+    fn parse_this_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
+        let t = self.expect(Kind::This)?;
+        Ok(Expr::This {
+            token: t,
+            var_use: self.next_var_use(),
+        })
     }
 
     fn parse_nil_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
@@ -931,6 +960,11 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             },
             Kind::Ident => ParseRule {
                 prefix: Some(&Parser::parse_var_expr),
+                infix: None,
+                precedence: Precedence::None,
+            },
+            Kind::This => ParseRule {
+                prefix: Some(&Parser::parse_this_expr),
                 infix: None,
                 precedence: Precedence::None,
             },

@@ -2,7 +2,7 @@ use crate::data;
 use crate::heap::HEAP;
 use crate::inst;
 use crate::nanbox;
-use crate::package::{Closure, Function, Object, Type};
+use crate::package::{Closure, Function, Object, PropertyKind, Type};
 
 use std::error;
 use std::fmt;
@@ -99,6 +99,34 @@ impl<'a> Interpreter<'a> {
                     *(sp as *mut u64) = $x;
                     types.push($t);
                 }};
+            }
+
+            macro_rules! call {
+                ($callee:expr, $cell_addr:expr) => {{
+                    let callee = $callee;
+                    let cell_addr = $cell_addr;
+                    sp -= FRAME_SIZE;
+                    *((sp as usize + 24) as *mut u64) = func as *const Function as u64;
+                    func = callee;
+                    *((sp as usize + 16) as *mut u64) = cp as u64;
+                    cp = cell_addr;
+                    *((sp as usize + 8) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
+                    ip = &func.insts[0] as *const u8;
+                    *(sp as *mut u64) = fp as u64;
+                    fp = sp;
+                    pp = callee.package.as_ref().unwrap();
+                }};
+            }
+
+            macro_rules! shift_args {
+                ($addr:ident, $arg_count:ident) => {
+                    while $addr > sp {
+                        *($addr as *mut u64) = *(($addr - 8) as *mut u64);
+                        $addr -= 8;
+                    }
+                    sp += 8;
+                    types.remove(types.len() - $arg_count as usize - 1);
+                };
             }
 
             macro_rules! binop_eq {
@@ -256,9 +284,65 @@ impl<'a> Interpreter<'a> {
                             continue;
                         }
                     }
+                    inst::CALLNAMEDPROP => {
+                        let name_index = *((ip as usize + 1) as *const u32) as usize;
+                        let name = &pp.strings[name_index];
+                        let arg_count = *((ip as usize + 5) as *const u16) as usize;
+                        let mut addr = sp + arg_count * 8;
+                        let receiver = match types[types.len() - arg_count - 1] {
+                            Type::Object => (*(addr as *const *const Object)).as_ref().unwrap(),
+                            Type::Nanbox => {
+                                let r = *((sp + arg_count * 8) as *const u64);
+                                if let Some(o) = nanbox::to_object(r) {
+                                    o.as_ref().unwrap()
+                                } else {
+                                    return_errorf!(
+                                        "receiver is not an object: {}",
+                                        nanbox::debug_type(r)
+                                    );
+                                }
+                            }
+                            _ => unreachable!(),
+                        };
+                        let prop = if let Some(prop) = receiver.property(name) {
+                            prop
+                        } else {
+                            return_errorf!("property {} is not defined", name);
+                        };
+                        let callee = if let Some(c) = nanbox::to_closure(prop.value) {
+                            c.as_ref().unwrap()
+                        } else {
+                            return_errorf!("property {} is not a function", name);
+                        };
+                        let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
+                            // If this is not a method but a regular field that
+                            // happens to contain a function, shift the
+                            // arguments back to remove the receiver from the
+                            // stack. A method will pop the receiver (and so it
+                            // remains on the stack in that case), but a
+                            // function won't.
+                            // TODO: this is horrendously inefficient. Come up
+                            // with something better.
+                            shift_args!(addr, arg_count);
+                            arg_count
+                        } else {
+                            arg_count + 1
+                        };
+                        if arg_count_including_receiver != callee.function.param_types.len() {
+                            return_errorf!(
+                                "call to function with {} parameters, got {} arguments",
+                                callee.function.param_types.len(),
+                                arg_count_including_receiver
+                            );
+                        }
+                        call!(callee.function.unwrap_ref(), callee.cell_addr(0));
+                        continue;
+                    }
                     inst::CALLVALUE => {
-                        let arg_count = i16::from_le_bytes(*((ip as usize + 1) as *const [u8; 2]));
-                        let raw_callee = *((sp as usize + arg_count as usize * 8) as *const u64);
+                        let arg_count =
+                            i16::from_le_bytes(*((ip as usize + 1) as *const [u8; 2])) as usize;
+                        let mut addr = sp as usize + arg_count as usize * 8;
+                        let raw_callee = *(addr as *const u64);
                         let (callee, cells) = match types[types.len() - arg_count as usize - 1] {
                             Type::Function => {
                                 let f = (raw_callee as *const Function).as_ref().unwrap();
@@ -266,12 +350,12 @@ impl<'a> Interpreter<'a> {
                             }
                             Type::Closure => {
                                 let c = (raw_callee as *const Closure).as_ref().unwrap();
-                                (&*c.function, c.cell_addr(0))
+                                (c.function.unwrap_ref(), c.cell_addr(0))
                             }
                             Type::Nanbox => {
                                 if let Some(c) = nanbox::to_closure(raw_callee) {
                                     let c = c.as_ref().unwrap();
-                                    (&*c.function, c.cell_addr(0))
+                                    (c.function.unwrap_ref(), c.cell_addr(0))
                                 } else {
                                     return_errorf!(
                                         "call of non-function ({})",
@@ -281,16 +365,19 @@ impl<'a> Interpreter<'a> {
                             }
                             _ => unreachable!(),
                         };
-                        sp -= FRAME_SIZE;
-                        *((sp as usize + 24) as *mut u64) = func as *const Function as u64;
-                        func = callee;
-                        *((sp as usize + 16) as *mut u64) = cp as u64;
-                        cp = cells;
-                        *((sp as usize + 8) as *mut u64) = (ip as u64) + 3;
-                        ip = &func.insts[0] as *const u8;
-                        *(sp as *mut u64) = fp as u64;
-                        fp = sp;
-                        pp = callee.package.as_ref().unwrap();
+                        if arg_count != callee.param_types.len() {
+                            return_errorf!(
+                                "call to function with {} parameters, got {} arguments",
+                                callee.param_types.len(),
+                                arg_count
+                            );
+                        }
+                        // Remove the callee from the stack before the call.
+                        // CALLNAMEDPROP does this too when the called property
+                        // is a field instead of a method. See comment there.
+                        // TODO: this is a terrible, inefficient solution.
+                        shift_args!(addr, arg_count);
+                        call!(callee, cells);
                         continue;
                     }
                     inst::CELL => {
@@ -388,7 +475,7 @@ impl<'a> Interpreter<'a> {
                                 } else {
                                     return_errorf!("object does not have property '{}'", &name);
                                 };
-                                push!(prop, Type::Nanbox);
+                                push!(prop.value, Type::Nanbox);
                             }
                             _ => {
                                 return_errorf!("value is not an object: {}", ty);
@@ -571,6 +658,39 @@ impl<'a> Interpreter<'a> {
                         *((fp as usize - (i + 1) * 8) as *mut u64) = v;
                         types[tyi] = ty;
                     }
+                    inst::STOREMETHOD => {
+                        let i = *((ip as usize + 1) as *const u32) as usize;
+                        let name = &pp.strings[i];
+                        let (v, vty) = pop!();
+                        let (r, rty) = pop!();
+                        match rty {
+                            Type::Object => {
+                                // TODO: figure out where the property is based
+                                // on its static type. We need to know the
+                                // type of the property itself, too.
+                                unimplemented!();
+                            }
+                            Type::Nanbox => {
+                                if vty != Type::Nanbox {
+                                    // TODO: store statically typed values
+                                    // in objects.
+                                    unimplemented!();
+                                }
+                                let o = if let Some(o) = nanbox::to_object(r) {
+                                    (o as usize as *mut Object).as_mut().unwrap()
+                                } else {
+                                    return_errorf!(
+                                        "value is not an object: {}",
+                                        nanbox::debug_type(r)
+                                    )
+                                };
+                                o.set_own_property(name, PropertyKind::Method, v);
+                            }
+                            _ => {
+                                return_errorf!("value is not an object: {}", rty);
+                            }
+                        }
+                    }
                     inst::STORENAMEDPROP => {
                         let i = *((ip as usize + 1) as *const u32) as usize;
                         let name = &pp.strings[i];
@@ -597,7 +717,7 @@ impl<'a> Interpreter<'a> {
                                         nanbox::debug_type(r)
                                     )
                                 };
-                                o.set_property(name, v);
+                                o.set_property(name, PropertyKind::Field, v);
                             }
                             _ => {
                                 return_errorf!("value is not an object: {}", rty);

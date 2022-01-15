@@ -5,3 +5,4 @@ fun main() {
 }
 
 var g = 12;
+main();

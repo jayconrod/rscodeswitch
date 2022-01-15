@@ -1,11 +1,12 @@
-use crate::data::{self, List, SetValue};
+use crate::data::{self, List, SetValue, Slice};
 use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
 use crate::lox::scope::{CaptureFrom, ScopeSet, Var, VarKind, VarUse};
-use crate::lox::syntax::{Decl, Expr, ForInit, LValue, Program, Stmt};
-use crate::lox::token::Kind;
+use crate::lox::syntax::{Block, Decl, Expr, ForInit, LValue, Param, Program, Stmt};
+use crate::lox::token::{Kind, Token};
 use crate::package::{Function, Global, Package, Type};
 use crate::pos::{Error, LineMap, Pos};
+use std::collections::HashMap;
 use std::mem;
 
 pub fn compile(ast: &Program, scopes: &ScopeSet, lmap: &LineMap) -> Result<Box<Package>, Error> {
@@ -50,7 +51,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             Error::wrap(position, &err)
         })?;
         let init = Function {
-            name: String::from("init"),
+            name: String::from("·init"),
             insts: init_insts,
             package: 0 as *mut Package,
             param_types: Vec::new(),
@@ -70,7 +71,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
         mem::swap(&mut package.globals, &mut self.globals);
         mem::swap(&mut package.functions, &mut self.functions);
-        package.strings = Handle::new(self.strings.slice_mut());
+        package.strings = Handle::new(Slice::alloc());
+        package.strings.init_from_list(&self.strings);
         mem::swap(&mut package.types, &mut self.types);
         Ok(package)
     }
@@ -104,71 +106,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 arg_scope,
                 ..
             } => {
-                // Start compiling the function.
-                // Before anything else, move captured parameters into cells.
-                self.asm_stack.push(Assembler::new());
-                let mut cell_slot = 0;
-                for param in params {
-                    if self.scopes.vars[param.var].kind == VarKind::Capture {
-                        let ty_index = self.ensure_type(
-                            Type::Pointer(Box::new(Type::Nanbox)),
-                            param.name.from,
-                            param.name.to,
-                        )?;
-                        self.asm().alloc(ty_index);
-                        self.asm().dup();
-                        let arg_slot = self.scopes.vars[param.var].slot as u16;
-                        self.asm().loadarg(arg_slot);
-                        self.asm().store();
-                        assert_eq!(self.scopes.vars[param.var].cell_slot, cell_slot);
-                        cell_slot += 1;
-                    }
-                }
-
-                // Compile the function body.
-                for decl in &body.decls {
-                    self.compile_decl(decl)?;
-                }
-
-                // If the function didn't end with a return statement,
-                // return nil.
-                match body.decls.last() {
-                    Some(Decl::Stmt(Stmt::Return { .. })) => {}
-                    _ => {
-                        self.asm().nil();
-                        self.asm().nanbox();
-                        self.asm().ret();
-                    }
-                }
-
-                // Finish building the function and add it to the package.
-                let mut asm = self.asm_stack.pop().unwrap();
-                let insts = asm.finish().map_err(|err| {
-                    let (from, to) = decl.pos();
-                    Error::wrap(self.lmap.position(from, to), &err)
-                })?;
-                let mut param_types = Vec::new();
-                param_types.resize_with(params.len(), || Type::Nanbox);
-                let mut cell_types = Vec::new();
-                cell_types.resize_with(self.scopes.scopes[*arg_scope].captures.len(), || {
-                    Type::Pointer(Box::new(Type::Nanbox))
-                });
-                let f = Function {
-                    name: String::from(name.text),
-                    insts,
-                    package: 0 as *mut Package,
-                    param_types,
-                    cell_types,
-                };
-                let fn_index = u32::try_from(self.functions.len()).map_err(|_| {
-                    let (begin_pos, end_pos) = decl.pos();
-                    Error {
-                        position: self.lmap.position(begin_pos, end_pos),
-                        message: String::from("too many functions"),
-                    }
-                })?;
-                self.functions.push(f);
-
+                let (begin_pos, end_pos) = decl.pos();
+                let fn_index = self
+                    .compile_function(*name, params, body, *arg_scope, false, begin_pos, end_pos)?;
                 // Create a closure in the enclosing function.
                 // The closure has pointers to cells of variables captured from
                 // this function and enclosing functions.
@@ -179,27 +119,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     begin_pos,
                     end_pos,
                 )?;
-                for capture in &self.scopes.scopes[*arg_scope].captures {
-                    match capture.from {
-                        CaptureFrom::Local => {
-                            let slot = self.scopes.vars[capture.var].cell_slot as u16;
-                            self.asm().loadlocal(slot);
-                        }
-                        CaptureFrom::Closure(slot) => {
-                            self.asm().cell(slot as u16);
-                        }
-                    }
-                }
-                let capture_count = self.scopes.scopes[*arg_scope].captures.len();
-                let capture_count = u16::try_from(capture_count).map_err(|_| {
-                    let (begin_pos, end_pos) = decl.pos();
-                    Error {
-                        position: self.lmap.position(begin_pos, end_pos),
-                        message: String::from("too many captures"),
-                    }
-                })?;
-                self.asm().newclosure(fn_index, capture_count);
-                self.asm().nanbox();
+                self.compile_closure(fn_index, *arg_scope, begin_pos, end_pos)?;
 
                 // Store the closure in a variable.
                 self.compile_define(&self.scopes.vars[*var]);
@@ -228,11 +148,49 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let prototype_type_index = self.ensure_type(Type::Object, *begin_pos, *end_pos)?;
                 self.asm().alloc(prototype_type_index);
                 self.asm().nanbox();
-                self.asm().store();
-                // TODO: store methods in the prototype.
-                if !methods.is_empty() {
-                    unimplemented!();
+
+                // Store methods in the prototype.
+                let mut init_param_count: Option<u16> = None;
+                let mut method_names = HashMap::<&'a str, (Pos, Pos)>::new();
+                for method in methods {
+                    let (begin_pos, end_pos) = method.pos();
+                    match method {
+                        Decl::Function {
+                            name,
+                            params,
+                            body,
+                            arg_scope,
+                            ..
+                        } => {
+                            if let Some((prev_begin_pos, prev_end_pos)) =
+                                method_names.get(name.text)
+                            {
+                                return Err(Error {
+                                    position: self.lmap.position(begin_pos, end_pos),
+                                    message: format!(
+                                        "duplicate definition of {}; previous definition at {}",
+                                        name.text,
+                                        self.lmap.position(*prev_begin_pos, *prev_end_pos)
+                                    ),
+                                });
+                            }
+                            self.asm().dup();
+                            let fn_index = self.compile_function(
+                                *name, params, body, *arg_scope, true, begin_pos, end_pos,
+                            )?;
+                            self.compile_closure(fn_index, *arg_scope, begin_pos, end_pos)?;
+                            let name_index =
+                                self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                            self.asm().storemethod(name_index);
+                            method_names.insert(name.text, (begin_pos, end_pos));
+                            if name.text == "init" {
+                                init_param_count = Some(params.len() as u16);
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
                 }
+                self.asm().store(); // store prototype in cell
 
                 // Create a constructor closure which serves as the class value.
                 // The constructor allocates a new objects, sets its prototype,
@@ -245,7 +203,15 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 ctor_asm.cell(0);
                 ctor_asm.load();
                 ctor_asm.storeprototype();
-                // TODO: call initializer.
+                if let Some(arg_count) = init_param_count {
+                    ctor_asm.loadlocal(0);
+                    for i in 0..arg_count {
+                        ctor_asm.loadarg(i);
+                    }
+                    let si = self.ensure_string(b"init", *begin_pos, *end_pos)?;
+                    ctor_asm.callnamedprop(si, arg_count);
+                    ctor_asm.pop();
+                }
                 ctor_asm.ret();
                 let ctor_insts = ctor_asm
                     .finish()
@@ -254,8 +220,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     name: format!("·{}·constructor", name.text),
                     insts: ctor_insts,
                     package: 0 as *mut Package,
-                    param_types: Vec::new(),
-                    cell_types: vec![cell_type],
+                    param_types: vec![Type::Nanbox; init_param_count.unwrap_or(0) as usize],
+                    cell_types: vec![Type::Pointer(Box::new(Type::Nanbox))],
                 };
                 let ctor_index = self.functions.len().try_into().map_err(|_| Error {
                     position: self.lmap.position(*begin_pos, *end_pos),
@@ -268,6 +234,108 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Decl::Stmt(stmt) => self.compile_stmt(stmt)?,
         }
+        Ok(())
+    }
+
+    fn compile_function(
+        &mut self,
+        name: Token<'a>,
+        params: &Vec<Param<'a>>,
+        body: &Block<'a>,
+        arg_scope: usize,
+        is_method: bool,
+        begin_pos: Pos,
+        end_pos: Pos,
+    ) -> Result<u32, Error> {
+        // Start compiling the function.
+        // Before anything else, move captured parameters into cells.
+        self.asm_stack.push(Assembler::new());
+        let mut cell_slot = 0;
+        for param in params {
+            if self.scopes.vars[param.var].kind == VarKind::Capture {
+                let ty_index = self.ensure_type(
+                    Type::Pointer(Box::new(Type::Nanbox)),
+                    param.name.from,
+                    param.name.to,
+                )?;
+                self.asm().alloc(ty_index);
+                self.asm().dup();
+                let arg_slot = self.scopes.vars[param.var].slot as u16;
+                self.asm().loadarg(arg_slot);
+                self.asm().store();
+                assert_eq!(self.scopes.vars[param.var].cell_slot, cell_slot);
+                cell_slot += 1;
+            }
+        }
+
+        // Compile the function body.
+        for decl in &body.decls {
+            self.compile_decl(decl)?;
+        }
+
+        // If the function didn't end with a return statement,
+        // return nil.
+        match body.decls.last() {
+            Some(Decl::Stmt(Stmt::Return { .. })) => {}
+            _ => {
+                self.asm().nil();
+                self.asm().nanbox();
+                self.asm().ret();
+            }
+        }
+
+        // Finish building the function and add it to the package.
+        let mut asm = self.asm_stack.pop().unwrap();
+        let insts = asm
+            .finish()
+            .map_err(|err| Error::wrap(self.lmap.position(begin_pos, end_pos), &err))?;
+        let param_count = params.len() + (if is_method { 1 } else { 0 });
+        let mut param_types = Vec::new();
+        param_types.resize_with(param_count, || Type::Nanbox);
+        let mut cell_types = Vec::new();
+        cell_types.resize_with(self.scopes.scopes[arg_scope].captures.len(), || {
+            Type::Pointer(Box::new(Type::Nanbox))
+        });
+        let f = Function {
+            name: String::from(name.text),
+            insts,
+            package: 0 as *mut Package,
+            param_types,
+            cell_types,
+        };
+        let fn_index = u32::try_from(self.functions.len()).map_err(|_| Error {
+            position: self.lmap.position(begin_pos, end_pos),
+            message: String::from("too many functions"),
+        })?;
+        self.functions.push(f);
+        Ok(fn_index)
+    }
+
+    fn compile_closure(
+        &mut self,
+        fn_index: u32,
+        arg_scope: usize,
+        begin_pos: Pos,
+        end_pos: Pos,
+    ) -> Result<(), Error> {
+        for capture in &self.scopes.scopes[arg_scope].captures {
+            match capture.from {
+                CaptureFrom::Local => {
+                    let slot = self.scopes.vars[capture.var].cell_slot as u16;
+                    self.asm().loadlocal(slot);
+                }
+                CaptureFrom::Closure(slot) => {
+                    self.asm().cell(slot as u16);
+                }
+            }
+        }
+        let capture_count = self.scopes.scopes[arg_scope].captures.len();
+        let capture_count = u16::try_from(capture_count).map_err(|_| Error {
+            position: self.lmap.position(begin_pos, end_pos),
+            message: String::from("too many captures"),
+        })?;
+        self.asm().newclosure(fn_index, capture_count);
+        self.asm().nanbox();
         Ok(())
     }
 
@@ -424,7 +492,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.asm().string(index);
                 self.asm().nanbox();
             }
-            Expr::Var { var_use, .. } => {
+            Expr::Var { var_use, .. } | Expr::This { var_use, .. } => {
                 let vu = self.scopes.var_uses[*var_use];
                 let v = &self.scopes.vars[vu.var];
                 match v.kind {
@@ -462,13 +530,23 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         message: String::from("too many arguments"),
                     }
                 })?;
-                self.compile_expr(callee)?;
-                for arg in arguments {
-                    self.compile_expr(arg)?;
+                match callee.as_ref() {
+                    Expr::Property { receiver, name, .. } => {
+                        self.compile_expr(receiver)?;
+                        for arg in arguments {
+                            self.compile_expr(arg)?;
+                        }
+                        let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                        self.asm().callnamedprop(si, arg_count);
+                    }
+                    _ => {
+                        self.compile_expr(callee)?;
+                        for arg in arguments {
+                            self.compile_expr(arg)?;
+                        }
+                        self.asm().callvalue(arg_count);
+                    }
                 }
-                self.asm().callvalue(arg_count);
-                self.asm().swap();
-                self.asm().pop();
             }
             Expr::Unary(op, e) => {
                 self.compile_expr(e)?;
@@ -530,8 +608,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     }
                 }
             }
-            Expr::Property(e, name) => {
-                self.compile_expr(e)?;
+            Expr::Property { receiver, name, .. } => {
+                self.compile_expr(receiver)?;
                 let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
                 self.asm().loadnamedprop(si);
             }

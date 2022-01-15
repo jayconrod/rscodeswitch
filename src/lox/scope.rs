@@ -218,13 +218,13 @@ impl<'a, 'b> Resolver<'a, 'b> {
             let (begin_pos, end_pos) = decl.pos();
             match decl {
                 Decl::Var { name, var, .. } => {
-                    self.declare(*var, *name, VarKind::Global, begin_pos, end_pos)?;
+                    self.declare(*var, name.text, VarKind::Global, begin_pos, end_pos)?;
                 }
                 Decl::Function { name, var, .. } => {
-                    self.declare(*var, *name, VarKind::Global, begin_pos, end_pos)?;
+                    self.declare(*var, name.text, VarKind::Global, begin_pos, end_pos)?;
                 }
                 Decl::Class { name, var, .. } => {
-                    self.declare(*var, *name, VarKind::Global, begin_pos, end_pos)?;
+                    self.declare(*var, name.text, VarKind::Global, begin_pos, end_pos)?;
                 }
                 _ => (),
             };
@@ -251,7 +251,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 match scope_kind {
                     ScopeKind::Global => (), // already declared
                     ScopeKind::Local => {
-                        self.declare(*var, *name, VarKind::Local, begin_pos, end_pos)?;
+                        self.declare(*var, name.text, VarKind::Local, begin_pos, end_pos)?;
                     }
                     ScopeKind::Function | ScopeKind::Class => unreachable!(),
                 }
@@ -264,21 +264,36 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 arg_scope,
                 body_scope,
                 var,
+                this_var,
                 ..
             } => {
                 match scope_kind {
-                    ScopeKind::Global => (), // already declared
-                    ScopeKind::Class => unimplemented!(),
-                    ScopeKind::Local => {
-                        self.declare(*var, *name, VarKind::Local, begin_pos, end_pos)?;
+                    ScopeKind::Global | ScopeKind::Class => {
+                        // Global functions are already declared in
+                        // resolve_program, so we skip declaring them here.
+                        //
+                        // Class functions (methods) may only be accessed
+                        // with a property expression. They aren't visibile
+                        // in any normal scope, so we do nothing here.
                     }
-                    ScopeKind::Function => unreachable!(),
+                    ScopeKind::Local => {
+                        // Function declared in the body of another function.
+                        self.declare(*var, name.text, VarKind::Local, begin_pos, end_pos)?;
+                    }
+                    ScopeKind::Function => {
+                        // ScopeKind::Function is for the parameter list.
+                        // Functions can't be declared there.
+                        unreachable!();
+                    }
                 }
                 self.enter(*arg_scope, ScopeKind::Function);
+                if let Some(this_var) = this_var {
+                    self.declare(*this_var, "this", VarKind::Argument, begin_pos, end_pos)?;
+                }
                 for param in params {
                     self.declare(
                         param.var,
-                        param.name,
+                        param.name.text,
                         VarKind::Argument,
                         param.name.from,
                         param.name.to,
@@ -304,7 +319,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                     ScopeKind::Global => (), // already declared
                     ScopeKind::Function | ScopeKind::Class => unreachable!(),
                     ScopeKind::Local => {
-                        self.declare(*var, *name, VarKind::Local, begin_pos, end_pos)?;
+                        self.declare(*var, name.text, VarKind::Local, begin_pos, end_pos)?;
                     }
                 }
                 self.enter(*scope, ScopeKind::Class);
@@ -387,6 +402,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
     fn resolve_expr(&mut self, expr: &Expr<'a>) -> Result<(), Error> {
         match expr {
             Expr::Var { name, var_use, .. } => self.resolve(*name, *var_use),
+            Expr::This { token, var_use, .. } => self.resolve(*token, *var_use),
             Expr::Group { expr, .. } => self.resolve_expr(expr),
             Expr::Call {
                 callee, arguments, ..
@@ -399,7 +415,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 self.resolve_expr(l)?;
                 self.resolve_expr(r)
             }
-            Expr::Property(expr, _) => self.resolve_expr(expr),
+            Expr::Property { receiver, .. } => self.resolve_expr(receiver),
             Expr::Assign(l, r) => {
                 self.resolve_lvalue(l)?;
                 self.resolve_expr(r)
@@ -443,19 +459,19 @@ impl<'a, 'b> Resolver<'a, 'b> {
     fn declare(
         &mut self,
         var_id: usize,
-        name: Token<'a>,
+        name: &'a str,
         kind: VarKind,
         begin_pos: Pos,
         end_pos: Pos,
     ) -> Result<(), Error> {
         let scope = &mut self.ss.scopes[*self.scope_stack.last().unwrap()];
-        if let Some(prev) = scope.vars.get(name.text) {
+        if let Some(prev) = scope.vars.get(name) {
             let prev_var = &self.ss.vars[*prev];
             return Err(Error {
-                position: self.lmap.position(name.from, name.to),
+                position: self.lmap.position(begin_pos, end_pos),
                 message: format!(
                     "duplicate definition of {}; previous definition at {}",
-                    name.text,
+                    name,
                     self.lmap.position(prev_var.begin_pos, prev_var.end_pos)
                 ),
             });
@@ -469,12 +485,12 @@ impl<'a, 'b> Resolver<'a, 'b> {
         };
         if let Some(msg) = too_many_err {
             return Err(Error {
-                position: self.lmap.position(name.from, name.to),
+                position: self.lmap.position(begin_pos, end_pos),
                 message: String::from(msg),
             });
         }
 
-        scope.vars.insert(name.text, var_id);
+        scope.vars.insert(name, var_id);
         let var = Var {
             kind,
             slot,
@@ -541,7 +557,6 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 self.ss.vars[var].kind = VarKind::Capture;
                 self.ss.vars[var].cell_slot = self.ss.vars[var].slot;
             }
-
             VarKind::Capture => (),
         }
 

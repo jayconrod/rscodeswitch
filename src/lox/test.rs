@@ -44,11 +44,10 @@ fn interpret_test() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut got = Vec::new();
         let mut interp = Interpreter::new(&mut got);
-        for name in ["init", "main"] {
-            if let Some(f) = pkg.function_by_name(name) {
-                interp.interpret(f).map_err(|err| Error::wrap(path, &err))?;
-            }
-        }
+        let f = pkg
+            .function_by_name("·init")
+            .ok_or_else(|| Error::with_message(path, String::from("·init function not found")))?;
+        interp.interpret(f).map_err(|err| Error::wrap(path, &err))?;
         let got_str = str::from_utf8(&got)
             .map_err(|err| Error::wrap(path, &err))?
             .trim();

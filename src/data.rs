@@ -73,8 +73,22 @@ impl<T> Slice<T> {
         self.len = len;
     }
 
+    pub fn init_from_list(&mut self, list: &List<T>) {
+        self.data.set(&list.data.data);
+        self.len = list.len;
+    }
+
+    pub fn slice(&self, from: usize, to: usize) -> &[T] {
+        assert!(from <= to && to <= self.len);
+        unsafe {
+            let from_addr = self.data.unwrap() as usize + from * mem::size_of::<T>();
+            let len = to - from;
+            slice::from_raw_parts(from_addr as *const T, len)
+        }
+    }
+
     pub fn as_slice(&self) -> &[T] {
-        unsafe { slice::from_raw_parts(self.data.unwrap() as *const T, self.len) }
+        self.slice(0, self.len())
     }
 
     pub fn len(&self) -> usize {
@@ -177,7 +191,9 @@ impl<'a, T> Iterator for SliceIter<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
         if self.index < self.slice.len() {
-            Some(&self.slice[self.index])
+            let i = self.index;
+            self.index += 1;
+            Some(&self.slice[i])
         } else {
             None
         }
@@ -201,14 +217,6 @@ impl<T> List<T> {
 
     pub fn cap(&self) -> usize {
         self.data.len
-    }
-
-    pub fn slice(&self) -> &Slice<T> {
-        &self.data
-    }
-
-    pub fn slice_mut(&mut self) -> &mut Slice<T> {
-        &mut self.data
     }
 }
 

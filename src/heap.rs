@@ -38,6 +38,10 @@ impl Heap {
   pub fn write_barrier(&self, _from: usize, _to: usize) {
     // TODO: implement when there's something useful to do.
   }
+
+  pub fn write_barrier_nanbox(&self, _from: usize, _to: u64) {
+    // TODO: implement when there's something useful to do.
+  }
 }
 
 pub trait Set {
@@ -61,6 +65,10 @@ impl<T> Ptr<T> {
 
   pub fn unwrap_mut(&mut self) -> *mut T {
     self.p
+  }
+
+  pub fn unwrap_ref(&self) -> &T {
+    unsafe { self.p.as_ref().unwrap() }
   }
 }
 

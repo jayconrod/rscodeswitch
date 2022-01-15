@@ -13,3 +13,5 @@ fun main() {
   }
   print a; // Output: 34
 }
+main();
+

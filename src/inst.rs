@@ -3,11 +3,12 @@ use std::mem::swap;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 45.
+// Next opcode: 47.
 pub const ADD: u8 = 20;
 pub const ALLOC: u8 = 35;
 pub const B: u8 = 27;
 pub const BIF: u8 = 28;
+pub const CALLNAMEDPROP: u8 = 45;
 pub const CALLVALUE: u8 = 32;
 pub const CELL: u8 = 38;
 pub const DIV: u8 = 23;
@@ -40,6 +41,7 @@ pub const STORE: u8 = 37;
 pub const STOREARG: u8 = 30;
 pub const STOREGLOBAL: u8 = 10;
 pub const STORELOCAL: u8 = 12;
+pub const STOREMETHOD: u8 = 46;
 pub const STORENAMEDPROP: u8 = 43;
 pub const STOREPROTOTYPE: u8 = 41;
 pub const STRING: u8 = 26;
@@ -57,9 +59,9 @@ pub fn size(op: u8) -> usize {
         | NE | NEG | NIL | NOP | NOT | POP | RET | STORE | STOREPROTOTYPE | SUB | SWAP | TRUE => 1,
         SWAPN | SYS => 2,
         CALLVALUE | CELL | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
-        ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STORENAMEDPROP
-        | STRING => 5,
-        NEWCLOSURE => 7,
+        ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STOREMETHOD
+        | STORENAMEDPROP | STRING => 5,
+        CALLNAMEDPROP | NEWCLOSURE => 7,
         FLOAT64 => 9,
         _ => panic!("unknown opcode"),
     }
@@ -71,6 +73,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         ALLOC => "alloc",
         B => "b",
         BIF => "bif",
+        CALLNAMEDPROP => "callnamedprop",
         CALLVALUE => "callvalue",
         CELL => "cell",
         DIV => "div",
@@ -103,6 +106,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         STOREARG => "storearg",
         STOREGLOBAL => "storeglobal",
         STORELOCAL => "storelocal",
+        STOREMETHOD => "storemethod",
         STORENAMEDPROP => "storenamedprop",
         STOREPROTOTYPE => "storeprototype",
         STRING => "string",
@@ -188,6 +192,12 @@ impl Assembler {
     pub fn bif(&mut self, label: &mut Label) {
         self.write_u8(BIF);
         self.write_label(label);
+    }
+
+    pub fn callnamedprop(&mut self, name_index: u32, arg_count: u16) {
+        self.write_u8(CALLNAMEDPROP);
+        self.write_u32(name_index);
+        self.write_u16(arg_count);
     }
 
     pub fn callvalue(&mut self, arg_count: u16) {
@@ -329,6 +339,11 @@ impl Assembler {
     pub fn storelocal(&mut self, index: u16) {
         self.write_u8(STORELOCAL);
         self.write_u16(index);
+    }
+
+    pub fn storemethod(&mut self, name: u32) {
+        self.write_u8(STOREMETHOD);
+        self.write_u32(name);
     }
 
     pub fn storenamedprop(&mut self, name: u32) {
@@ -489,6 +504,14 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                     }
                 }
             }
+            CALLNAMEDPROP => {
+                if p + 7 > insts.len() {
+                    return Err(fmt::Error);
+                }
+                let name_index = u32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
+                let arg_count = u16::from_le_bytes(insts[p + 5..p + 7].try_into().unwrap());
+                write!(f, " {} {}\n", name_index, arg_count)?;
+            }
             CALLVALUE | CELL | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => {
                 if p + 3 > insts.len() {
                     return Err(fmt::Error);
@@ -496,8 +519,8 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let n = u16::from_le_bytes(insts[p + 1..p + 3].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
-            ALLOC | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STORENAMEDPROP
-            | STRING => {
+            ALLOC | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STOREMETHOD
+            | STORENAMEDPROP | STRING => {
                 if p + 5 > insts.len() {
                     return Err(fmt::Error);
                 }
