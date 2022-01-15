@@ -1,5 +1,5 @@
 use crate::data;
-use crate::heap::HEAP;
+use crate::heap::{Set, HEAP};
 use crate::inst;
 use crate::nanbox;
 use crate::package::{Closure, Function, Object, PropertyKind, Type};
@@ -101,23 +101,6 @@ impl<'a> Interpreter<'a> {
                 }};
             }
 
-            macro_rules! call {
-                ($callee:expr, $cell_addr:expr) => {{
-                    let callee = $callee;
-                    let cell_addr = $cell_addr;
-                    sp -= FRAME_SIZE;
-                    *((sp as usize + 24) as *mut u64) = func as *const Function as u64;
-                    func = callee;
-                    *((sp as usize + 16) as *mut u64) = cp as u64;
-                    cp = cell_addr;
-                    *((sp as usize + 8) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
-                    ip = &func.insts[0] as *const u8;
-                    *(sp as *mut u64) = fp as u64;
-                    fp = sp;
-                    pp = callee.package.as_ref().unwrap();
-                }};
-            }
-
             macro_rules! shift_args {
                 ($addr:ident, $arg_count:ident) => {
                     while $addr > sp {
@@ -127,6 +110,67 @@ impl<'a> Interpreter<'a> {
                     sp += 8;
                     types.remove(types.len() - $arg_count as usize - 1);
                 };
+            }
+
+            macro_rules! call_closure {
+                ($callee:expr, $arg_count:expr) => {{
+                    let callee = $callee;
+                    let arg_count = $arg_count;
+                    let callee_func = callee.function.unwrap_ref();
+                    if callee.bound_arg_count as usize + arg_count != callee_func.param_types.len()
+                    {
+                        return_errorf!(
+                            "call to function with {} parameters, but got {} arguments",
+                            callee_func.param_types.len(),
+                            arg_count
+                        );
+                    }
+
+                    // If the callee has bound arguments, insert them on the
+                    // stack before the regular arguments.
+                    if callee.bound_arg_count > 0 {
+                        let bound_arg_begin = sp + arg_count * 8 - 8;
+                        let delta = callee.bound_arg_count as usize * 8;
+                        let mut from = sp;
+                        sp -= delta;
+                        let mut to = sp;
+                        while from <= bound_arg_begin {
+                            *(to as *mut u64) = *(from as *mut u64);
+                            to += 8;
+                            from += 8;
+                        }
+                        for i in 0..callee.bound_arg_count {
+                            let to = (bound_arg_begin - i as usize * 8) as *mut u64;
+                            *to = callee.bound_arg(i);
+                        }
+                        types.resize(types.len() + callee.bound_arg_count as usize, Type::Nil);
+                        for i in 0..arg_count {
+                            let to = types.len() - i as usize - 1;
+                            let from = to - arg_count;
+                            let mut tmp = Type::Nil;
+                            mem::swap(&mut tmp, &mut types[from]);
+                            mem::swap(&mut types[to], &mut tmp);
+                        }
+                        for i in 0..(callee.bound_arg_count as usize) {
+                            let to = types.len() - callee_func.param_types.len() + i;
+                            types[to] = callee_func.param_types[i].clone();
+                        }
+                    }
+
+                    // Construct a stack frame for the callee, and set the
+                    // "registers" so the function's instructions, cells,
+                    // and package will be used.
+                    sp -= FRAME_SIZE;
+                    *((sp as usize + 24) as *mut u64) = func as *const Function as u64;
+                    func = callee_func;
+                    *((sp as usize + 16) as *mut u64) = cp as u64;
+                    cp = callee.cell_addr(0) as *mut *mut u64;
+                    *((sp as usize + 8) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
+                    ip = &func.insts[0] as *const u8;
+                    *(sp as *mut u64) = fp as u64;
+                    fp = sp;
+                    pp = callee_func.package.as_ref().unwrap();
+                }};
             }
 
             macro_rules! binop_eq {
@@ -328,14 +372,7 @@ impl<'a> Interpreter<'a> {
                         } else {
                             arg_count + 1
                         };
-                        if arg_count_including_receiver != callee.function.param_types.len() {
-                            return_errorf!(
-                                "call to function with {} parameters, got {} arguments",
-                                callee.function.param_types.len(),
-                                arg_count_including_receiver
-                            );
-                        }
-                        call!(callee.function.unwrap_ref(), callee.cell_addr(0));
+                        call_closure!(callee, arg_count_including_receiver);
                         continue;
                     }
                     inst::CALLVALUE => {
@@ -343,19 +380,11 @@ impl<'a> Interpreter<'a> {
                             i16::from_le_bytes(*((ip as usize + 1) as *const [u8; 2])) as usize;
                         let mut addr = sp as usize + arg_count as usize * 8;
                         let raw_callee = *(addr as *const u64);
-                        let (callee, cells) = match types[types.len() - arg_count as usize - 1] {
-                            Type::Function => {
-                                let f = (raw_callee as *const Function).as_ref().unwrap();
-                                (f, 0 as *mut *mut u64)
-                            }
-                            Type::Closure => {
-                                let c = (raw_callee as *const Closure).as_ref().unwrap();
-                                (c.function.unwrap_ref(), c.cell_addr(0))
-                            }
+                        let callee = match types[types.len() - arg_count as usize - 1] {
+                            Type::Closure => (raw_callee as *const Closure).as_ref().unwrap(),
                             Type::Nanbox => {
                                 if let Some(c) = nanbox::to_closure(raw_callee) {
-                                    let c = c.as_ref().unwrap();
-                                    (c.function.unwrap_ref(), c.cell_addr(0))
+                                    c.as_ref().unwrap()
                                 } else {
                                     return_errorf!(
                                         "call of non-function ({})",
@@ -365,19 +394,12 @@ impl<'a> Interpreter<'a> {
                             }
                             _ => unreachable!(),
                         };
-                        if arg_count != callee.param_types.len() {
-                            return_errorf!(
-                                "call to function with {} parameters, got {} arguments",
-                                callee.param_types.len(),
-                                arg_count
-                            );
-                        }
                         // Remove the callee from the stack before the call.
                         // CALLNAMEDPROP does this too when the called property
                         // is a field instead of a method. See comment there.
                         // TODO: this is a terrible, inefficient solution.
                         shift_args!(addr, arg_count);
-                        call!(callee, cells);
+                        call_closure!(callee, arg_count);
                         continue;
                     }
                     inst::CELL => {
@@ -475,7 +497,30 @@ impl<'a> Interpreter<'a> {
                                 } else {
                                     return_errorf!("object does not have property '{}'", &name);
                                 };
-                                push!(prop.value, Type::Nanbox);
+                                let value = if prop.kind == PropertyKind::Method {
+                                    // Method loaded as value without call.
+                                    // Allocate a new closure to bind the
+                                    // receiver, and return the bound method.
+                                    let method =
+                                        nanbox::to_closure(prop.value).unwrap().as_ref().unwrap();
+                                    let raw = Closure::alloc(
+                                        method.capture_count,
+                                        method.bound_arg_count + 1,
+                                    );
+                                    let bm = raw.as_mut().unwrap();
+                                    bm.function.set(&method.function);
+                                    for i in 0..method.capture_count {
+                                        bm.set_capture(i, method.capture(i));
+                                    }
+                                    for i in 0..method.bound_arg_count {
+                                        bm.set_bound_arg(i, method.bound_arg(i));
+                                    }
+                                    bm.set_bound_arg(method.bound_arg_count, r);
+                                    nanbox::from_closure(bm)
+                                } else {
+                                    prop.value
+                                };
+                                push!(value, Type::Nanbox);
                             }
                             _ => {
                                 return_errorf!("value is not an object: {}", ty);
@@ -557,17 +602,30 @@ impl<'a> Interpreter<'a> {
                     inst::NEWCLOSURE => {
                         let fn_index =
                             u32::from_le_bytes(*((ip as usize + 1) as *const [u8; 4])) as usize;
-                        let cell_count = u16::from_le_bytes(*((ip as usize + 5) as *const [u8; 2]));
+                        let capture_count =
+                            u16::from_le_bytes(*((ip as usize + 5) as *const [u8; 2]));
+                        let bound_arg_count =
+                            u16::from_le_bytes(*((ip as usize + 7) as *const [u8; 2]));
                         let f =
                             &pp.functions[fn_index] as *const Function as usize as *mut Function;
-                        let c = Closure::alloc(cell_count).as_mut().unwrap();
+                        let c = Closure::alloc(capture_count, bound_arg_count)
+                            .as_mut()
+                            .unwrap();
                         c.function.set_ptr(f);
-                        for i in 0..cell_count {
-                            let cell = *((sp + (cell_count - i - 1) as usize * 8) as *mut *mut u64);
-                            c.set_cell(i, cell);
+                        let cell_count = capture_count as usize + bound_arg_count as usize;
+                        let mut from = sp + cell_count * 8 - 8;
+                        for i in 0..capture_count {
+                            let v = *(from as *mut *mut u64);
+                            c.set_capture(i, v);
+                            from -= 8;
                         }
-                        sp += cell_count as usize * 8;
-                        types.truncate(types.len() - cell_count as usize);
+                        for i in 0..bound_arg_count {
+                            let v = *(from as *mut u64);
+                            c.set_bound_arg(i, v);
+                            from -= 8;
+                        }
+                        sp += cell_count * 8;
+                        types.truncate(types.len() - cell_count);
                         push!(c as *const Closure as u64, Type::Closure);
                     }
                     inst::NIL => {

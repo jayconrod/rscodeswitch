@@ -37,4 +37,28 @@ fun outer(x) {
 var o = outer("captured");
 o.m(); // Output: captured
 
-// TODO: bound method
+class BoundMethod {
+  init(x) {
+    this.x = x;
+  }
+  print_x() {
+    print this.x;
+  }
+}
+var bm = BoundMethod("instance of BoundMethod");
+var px = bm.print_x;
+px(); // Output: instance of BoundMethod
+
+fun outer_for_bound_method(x, y) {
+  class BoundMethodWithCapture {
+    init(x) {
+      this.x = x;
+    }
+    add(z) {
+      return this.x + y + z;
+    }
+  }
+  return BoundMethodWithCapture(x);
+}
+var bmc = outer_for_bound_method(1, 2);
+print bmc.add(3); // Output: 6

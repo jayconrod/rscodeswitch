@@ -61,8 +61,8 @@ pub fn size(op: u8) -> usize {
         CALLVALUE | CELL | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
         ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STOREMETHOD
         | STORENAMEDPROP | STRING => 5,
-        CALLNAMEDPROP | NEWCLOSURE => 7,
-        FLOAT64 => 9,
+        CALLNAMEDPROP => 7,
+        FLOAT64 | NEWCLOSURE => 9,
         _ => panic!("unknown opcode"),
     }
 }
@@ -296,10 +296,11 @@ impl Assembler {
         self.write_u8(NEG);
     }
 
-    pub fn newclosure(&mut self, fn_index: u32, cell_count: u16) {
+    pub fn newclosure(&mut self, fn_index: u32, capture_count: u16, bound_arg_count: u16) {
         self.write_u8(NEWCLOSURE);
         self.write_u32(fn_index);
-        self.write_u16(cell_count);
+        self.write_u16(capture_count);
+        self.write_u16(bound_arg_count);
     }
 
     pub fn nil(&mut self) {
@@ -535,12 +536,13 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 write!(f, " {}\n", n)?;
             }
             NEWCLOSURE => {
-                if p + 7 > insts.len() {
+                if p + 9 > insts.len() {
                     return Err(fmt::Error);
                 }
                 let fn_index = u32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
-                let slot_count = u16::from_le_bytes(insts[p + 5..p + 7].try_into().unwrap());
-                write!(f, " {} {}\n", fn_index, slot_count)?;
+                let capture_count = u16::from_le_bytes(insts[p + 5..p + 7].try_into().unwrap());
+                let bound_arg_count = u16::from_le_bytes(insts[p + 7..p + 9].try_into().unwrap());
+                write!(f, " {} {} {}\n", fn_index, capture_count, bound_arg_count)?;
             }
             SWAPN => {
                 if p + 2 > insts.len() {

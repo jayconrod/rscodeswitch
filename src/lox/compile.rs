@@ -228,7 +228,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     message: String::from("too many functions"),
                 })?;
                 self.functions.push(ctor);
-                self.asm().newclosure(ctor_index, 1);
+                self.asm().newclosure(ctor_index, 1, 0);
                 self.asm().nanbox();
                 self.compile_define(&self.scopes.vars[*var]);
             }
@@ -334,7 +334,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             position: self.lmap.position(begin_pos, end_pos),
             message: String::from("too many captures"),
         })?;
-        self.asm().newclosure(fn_index, capture_count);
+        self.asm().newclosure(fn_index, capture_count, 0);
         self.asm().nanbox();
         Ok(())
     }

@@ -541,11 +541,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
         // This will cause the compiler to move it into the heap.
         match self.ss.vars[var].kind {
             VarKind::Global => panic!("global variable can't be captured"),
-            VarKind::Local | VarKind::Argument => {
-                // When a local variable is captured, it uses the same stack
-                // slot to hold the cell instead of the variable's value.
-                // So we set cell_slot equal to slot.
-                //
+            VarKind::Argument => {
                 // When an argument is captured, we allocate a new local slot
                 // and copy the argument into it because we don't want to
                 // change the actual type of the argument slot. We're
@@ -553,7 +549,14 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 // argument, and that new local slot needs to be before other
                 // local variables, since we won't write to it with storelocal.
                 // So we'll need to shift other locals back. That's done in
-                // shift_captured_params_in_function.
+                // shift_captured_params_in_function, which also assigns
+                // the captured parameter's cell slot.
+                self.ss.vars[var].kind = VarKind::Capture;
+            }
+            VarKind::Local => {
+                // When a local variable is captured, it uses the same stack
+                // slot to hold the cell instead of the variable's value.
+                // So we set cell_slot equal to slot.
                 self.ss.vars[var].kind = VarKind::Capture;
                 self.ss.vars[var].cell_slot = self.ss.vars[var].slot;
             }
@@ -629,6 +632,14 @@ impl<'a, 'b> Resolver<'a, 'b> {
         self.shift_vars_in_scope(body_scope, param_capture_count);
         for decl in &body.decls {
             self.shift_vars_in_decl(decl, param_capture_count);
+        }
+        let mut cell_slot = 0;
+        for p in params {
+            let var = &mut self.ss.vars[p.var];
+            if var.kind == VarKind::Capture {
+                var.cell_slot = cell_slot;
+                cell_slot += 1;
+            }
         }
     }
 

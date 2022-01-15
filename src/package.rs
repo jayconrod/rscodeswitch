@@ -1,5 +1,5 @@
 use crate::data::{self, Slice};
-use crate::heap::{Handle, Ptr, Set, HEAP};
+use crate::heap::{self, Handle, Ptr, Set, HEAP};
 use crate::inst;
 
 use std::error::Error;
@@ -169,29 +169,72 @@ impl fmt::Display for Type {
     }
 }
 
+/// A Closure is a callable object that consists of a function, a number of
+/// captured variables from its declaring environment, and a number of
+/// bound arguments.
 pub struct Closure {
     pub function: Ptr<Function>,
+    pub capture_count: u16,
+    pub bound_arg_count: u16,
 }
 
 impl Closure {
-    pub fn alloc(n: u16) -> *mut Closure {
-        let size = mem::size_of::<Closure>() + n as usize * 8;
-        HEAP.allocate(size) as *mut Closure
+    pub fn alloc(capture_count: u16, bound_arg_count: u16) -> *mut Closure {
+        unsafe {
+            let cell_count = capture_count as usize + bound_arg_count as usize;
+            let size = mem::size_of::<Closure>() + cell_count * 8;
+            let raw = HEAP.allocate(size) as *mut Closure;
+            let c = raw.as_mut().unwrap();
+            c.capture_count = capture_count;
+            c.bound_arg_count = bound_arg_count;
+            raw
+        }
     }
 
-    pub fn cell_addr(&self, i: u16) -> *mut *mut u64 {
+    pub fn cell_addr(&self, i: u32) -> usize {
         let base = self as *const Closure as usize;
-        let offset = mem::size_of::<Closure>() + i as usize * 8;
-        (base + offset) as *mut *mut u64
+        let cell_base_offset =
+            (mem::size_of::<Closure>() + heap::ALLOC_ALIGNMENT - 1) & !(heap::ALLOC_ALIGNMENT - 1);
+        base + cell_base_offset + i as usize * 8
     }
 
-    pub unsafe fn cell(&self, i: u16) -> *mut u64 {
-        *(self.cell_addr(i))
+    pub fn capture(&self, i: u16) -> *mut u64 {
+        unsafe {
+            assert!(i < self.capture_count);
+            let addr = self.cell_addr(i as u32) as *mut *mut u64;
+            *addr
+        }
     }
 
-    pub unsafe fn set_cell(&mut self, i: u16, cell: *mut u64) {
-        *(self.cell_addr(i)) = cell;
-        HEAP.write_barrier(self.cell_addr(i) as usize, cell as usize);
+    pub fn set_capture(&mut self, i: u16, cell: *mut u64) {
+        unsafe {
+            assert!(i < self.capture_count);
+            let addr = self.cell_addr(i as u32) as *mut *mut u64;
+            *addr = cell;
+            HEAP.write_barrier(addr as usize, cell as usize);
+        }
+    }
+
+    pub fn bound_arg(&self, i: u16) -> u64 {
+        unsafe {
+            assert!(i < self.bound_arg_count);
+            let addr = self.cell_addr(self.capture_count as u32 + i as u32) as *mut u64;
+            *addr
+        }
+    }
+
+    pub fn set_bound_arg(&mut self, i: u16, arg: u64) {
+        unsafe {
+            assert!(i < self.bound_arg_count);
+            let addr = self.cell_addr(self.capture_count as u32 + i as u32) as *mut u64;
+            *addr = arg;
+            let ty = &self.function.unwrap_ref().param_types[i as usize];
+            if *ty == Type::Nanbox {
+                HEAP.write_barrier_nanbox(addr as usize, arg);
+            } else if ty.is_pointer() {
+                HEAP.write_barrier(addr as usize, arg as usize);
+            }
+        }
     }
 }
 
