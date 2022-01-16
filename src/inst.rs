@@ -3,14 +3,15 @@ use std::mem::swap;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 47.
+// Next opcode: 49.
 pub const ADD: u8 = 20;
 pub const ALLOC: u8 = 35;
 pub const B: u8 = 27;
 pub const BIF: u8 = 28;
 pub const CALLNAMEDPROP: u8 = 45;
+pub const CALLNAMEDPROPWITHPROTOTYPE: u8 = 47;
 pub const CALLVALUE: u8 = 32;
-pub const CELL: u8 = 38;
+pub const CAPTURE: u8 = 38;
 pub const DIV: u8 = 23;
 pub const DUP: u8 = 13;
 pub const EQ: u8 = 14;
@@ -36,6 +37,7 @@ pub const NIL: u8 = 33;
 pub const NOP: u8 = 1;
 pub const NOT: u8 = 24;
 pub const POP: u8 = 3;
+pub const PROTOTYPE: u8 = 48;
 pub const RET: u8 = 4;
 pub const STORE: u8 = 37;
 pub const STOREARG: u8 = 30;
@@ -56,12 +58,13 @@ pub const SYS_PRINT: u8 = 1;
 pub fn size(op: u8) -> usize {
     match op {
         ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL | NANBOX
-        | NE | NEG | NIL | NOP | NOT | POP | RET | STORE | STOREPROTOTYPE | SUB | SWAP | TRUE => 1,
+        | NE | NEG | NIL | NOP | NOT | POP | PROTOTYPE | RET | STORE | STOREPROTOTYPE | SUB
+        | SWAP | TRUE => 1,
         SWAPN | SYS => 2,
-        CALLVALUE | CELL | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
+        CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
         ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STOREMETHOD
         | STORENAMEDPROP | STRING => 5,
-        CALLNAMEDPROP => 7,
+        CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE => 7,
         FLOAT64 | NEWCLOSURE => 9,
         _ => panic!("unknown opcode"),
     }
@@ -74,8 +77,9 @@ pub fn mnemonic(op: u8) -> &'static str {
         B => "b",
         BIF => "bif",
         CALLNAMEDPROP => "callnamedprop",
+        CALLNAMEDPROPWITHPROTOTYPE => "callnamedpropwithprototype",
         CALLVALUE => "callvalue",
-        CELL => "cell",
+        CAPTURE => "capture",
         DIV => "div",
         DUP => "dup",
         EQ => "eq",
@@ -101,6 +105,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         NOP => "nop",
         NOT => "not",
         POP => "pop",
+        PROTOTYPE => "prototype",
         RET => "ret",
         STORE => "store",
         STOREARG => "storearg",
@@ -200,13 +205,19 @@ impl Assembler {
         self.write_u16(arg_count);
     }
 
+    pub fn callnamedpropwithprototype(&mut self, name_index: u32, arg_count: u16) {
+        self.write_u8(CALLNAMEDPROPWITHPROTOTYPE);
+        self.write_u32(name_index);
+        self.write_u16(arg_count);
+    }
+
     pub fn callvalue(&mut self, arg_count: u16) {
         self.write_u8(CALLVALUE);
         self.write_u16(arg_count);
     }
 
-    pub fn cell(&mut self, i: u16) {
-        self.write_u8(CELL);
+    pub fn capture(&mut self, i: u16) {
+        self.write_u8(CAPTURE);
         self.write_u16(i);
     }
 
@@ -317,6 +328,10 @@ impl Assembler {
 
     pub fn pop(&mut self) {
         self.write_u8(POP);
+    }
+
+    pub fn prototype(&mut self) {
+        self.write_u8(PROTOTYPE);
     }
 
     pub fn ret(&mut self) {
@@ -486,8 +501,8 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(mnemonic(insts[p]))?;
         match insts[p] {
             ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL
-            | NANBOX | NE | NEG | NIL | NOP | NOT | POP | RET | STORE | STOREPROTOTYPE | SUB
-            | SWAP | TRUE => {
+            | NANBOX | NE | NEG | NIL | NOP | NOT | POP | PROTOTYPE | RET | STORE
+            | STOREPROTOTYPE | SUB | SWAP | TRUE => {
                 f.write_str("\n")?;
             }
             B | BIF => {
@@ -505,7 +520,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                     }
                 }
             }
-            CALLNAMEDPROP => {
+            CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE => {
                 if p + 7 > insts.len() {
                     return Err(fmt::Error);
                 }
@@ -513,7 +528,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let arg_count = u16::from_le_bytes(insts[p + 5..p + 7].try_into().unwrap());
                 write!(f, " {} {}\n", name_index, arg_count)?;
             }
-            CALLVALUE | CELL | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => {
+            CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => {
                 if p + 3 > insts.len() {
                     return Err(fmt::Error);
                 }

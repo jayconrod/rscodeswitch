@@ -1,0 +1,28 @@
+class A {
+  init(x) {
+    this.x = x;
+  }
+
+  print_self() {
+    print this.x;
+    this.print_y();
+  }
+
+  print_y() {}
+}
+
+class B < A {
+  init(x, y) {
+    super.init(x);
+    this.y = y;
+  }
+
+  print_y() {
+    print this.y;
+  }
+}
+
+var b = B(1, 2);
+b.print_self();
+// Output: 1
+// Output: 2

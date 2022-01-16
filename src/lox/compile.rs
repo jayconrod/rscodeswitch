@@ -128,6 +128,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 name,
                 methods,
                 var,
+                base_var_use,
                 begin_pos,
                 end_pos,
                 ..
@@ -140,17 +141,75 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     *end_pos,
                 )?;
 
-                // Create a prototype object.
-                let cell_type = Type::Pointer(Box::new(Type::Nanbox));
-                let cell_type_index = self.ensure_type(cell_type.clone(), *begin_pos, *end_pos)?;
-                self.asm().alloc(cell_type_index);
+                // Create a constructor closure which serves as the class value.
+                // The constructor allocates a new objects, sets its prototype,
+                // calls the initializer (if any), and returns the object.
+                // TODO: this should be a callable object, not a closure.
+                // Not sure how to represent that yet. But in JavaScript,
+                // a class is a constructor function with methods on the
+                // prototype, and functions are special kinds of objects.
+                let init_param_count = methods.iter().find_map(|m| match m {
+                    Decl::Function { name, params, .. } if name.text == "init" => {
+                        Some(params.len() as u16)
+                    }
+                    _ => None,
+                });
+                let mut ctor_asm = Assembler::new();
+                let object_type_index = self.ensure_type(Type::Object, *begin_pos, *end_pos)?;
+                ctor_asm.alloc(object_type_index);
+                ctor_asm.dup();
+                ctor_asm.prototype();
+                ctor_asm.storeprototype();
+                ctor_asm.nanbox();
+                if let Some(arg_count) = init_param_count {
+                    ctor_asm.dup();
+                    for i in 0..arg_count {
+                        ctor_asm.loadarg(i);
+                    }
+                    let si = self.ensure_string(b"init", *begin_pos, *end_pos)?;
+                    ctor_asm.callnamedprop(si, arg_count);
+                    ctor_asm.pop();
+                }
+                ctor_asm.ret();
+                let ctor_insts = ctor_asm
+                    .finish()
+                    .map_err(|err| Error::wrap(self.lmap.position(*begin_pos, *end_pos), &err))?;
+                let ctor = Function {
+                    name: format!("·{}·constructor", name.text),
+                    insts: ctor_insts,
+                    package: 0 as *mut Package,
+                    param_types: vec![Type::Nanbox; init_param_count.unwrap_or(0) as usize],
+                    cell_types: Vec::new(),
+                };
+                let ctor_index = self.functions.len().try_into().map_err(|_| Error {
+                    position: self.lmap.position(*begin_pos, *end_pos),
+                    message: String::from("too many functions"),
+                })?;
+                self.functions.push(ctor);
+                self.asm().newclosure(ctor_index, 0, 0);
                 self.asm().dup();
+
+                // Create a prototype object. Don't box it yet.
                 let prototype_type_index = self.ensure_type(Type::Object, *begin_pos, *end_pos)?;
                 self.asm().alloc(prototype_type_index);
-                self.asm().nanbox();
+
+                // If there's a base class, load its prototype, and use it as
+                // our prototype's prototype.
+                if let Some(base_var_use) = base_var_use {
+                    self.asm().dup();
+                    self.compile_var_use(&self.scopes.var_uses[*base_var_use]);
+                    self.asm().loadprototype();
+                    self.asm().storeprototype();
+                }
 
                 // Store methods in the prototype.
-                let mut init_param_count: Option<u16> = None;
+                if !methods.is_empty() {
+                    // Box the prototype. The methods are boxed, and the
+                    // instructions below expect both receiver and value
+                    // to be boxed or neither.
+                    self.asm().dup();
+                    self.asm().nanbox();
+                }
                 let mut method_names = HashMap::<&'a str, (Pos, Pos)>::new();
                 for method in methods {
                     let (begin_pos, end_pos) = method.pos();
@@ -183,52 +242,17 @@ impl<'a, 'b> Compiler<'a, 'b> {
                                 self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
                             self.asm().storemethod(name_index);
                             method_names.insert(name.text, (begin_pos, end_pos));
-                            if name.text == "init" {
-                                init_param_count = Some(params.len() as u16);
-                            }
                         }
                         _ => unreachable!(),
                     };
                 }
-                self.asm().store(); // store prototype in cell
-
-                // Create a constructor closure which serves as the class value.
-                // The constructor allocates a new objects, sets its prototype,
-                // calls the initializer (if any), and returns the object.
-                let mut ctor_asm = Assembler::new();
-                let object_type_index = self.ensure_type(Type::Object, *begin_pos, *end_pos)?;
-                ctor_asm.alloc(object_type_index);
-                ctor_asm.nanbox();
-                ctor_asm.dup();
-                ctor_asm.cell(0);
-                ctor_asm.load();
-                ctor_asm.storeprototype();
-                if let Some(arg_count) = init_param_count {
-                    ctor_asm.loadlocal(0);
-                    for i in 0..arg_count {
-                        ctor_asm.loadarg(i);
-                    }
-                    let si = self.ensure_string(b"init", *begin_pos, *end_pos)?;
-                    ctor_asm.callnamedprop(si, arg_count);
-                    ctor_asm.pop();
+                if !methods.is_empty() {
+                    self.asm().pop(); // boxed prototype
                 }
-                ctor_asm.ret();
-                let ctor_insts = ctor_asm
-                    .finish()
-                    .map_err(|err| Error::wrap(self.lmap.position(*begin_pos, *end_pos), &err))?;
-                let ctor = Function {
-                    name: format!("·{}·constructor", name.text),
-                    insts: ctor_insts,
-                    package: 0 as *mut Package,
-                    param_types: vec![Type::Nanbox; init_param_count.unwrap_or(0) as usize],
-                    cell_types: vec![Type::Pointer(Box::new(Type::Nanbox))],
-                };
-                let ctor_index = self.functions.len().try_into().map_err(|_| Error {
-                    position: self.lmap.position(*begin_pos, *end_pos),
-                    message: String::from("too many functions"),
-                })?;
-                self.functions.push(ctor);
-                self.asm().newclosure(ctor_index, 1, 0);
+
+                // Store the prototype in the constructor closure,
+                // box the constructor closure, and store it in a variable.
+                self.asm().storeprototype();
                 self.asm().nanbox();
                 self.compile_define(&self.scopes.vars[*var]);
             }
@@ -325,7 +349,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     self.asm().loadlocal(slot);
                 }
                 CaptureFrom::Closure(slot) => {
-                    self.asm().cell(slot as u16);
+                    self.asm().capture(slot as u16);
                 }
             }
         }
@@ -493,29 +517,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.asm().nanbox();
             }
             Expr::Var { var_use, .. } | Expr::This { var_use, .. } => {
-                let vu = self.scopes.var_uses[*var_use];
-                let v = &self.scopes.vars[vu.var];
-                match v.kind {
-                    VarKind::Global => self.asm().loadglobal(v.slot.try_into().unwrap()),
-                    VarKind::Argument => self.asm().loadarg(v.slot.try_into().unwrap()),
-                    VarKind::Local => self.asm().loadlocal(v.slot.try_into().unwrap()),
-                    VarKind::Capture => {
-                        match vu.cell {
-                            Some(i) => {
-                                // Captured from enclosing function.
-                                // The cell pointing to the variable is embedded in
-                                // this function's closure.
-                                self.asm().cell(i.try_into().unwrap());
-                            }
-                            None => {
-                                // Captured variable defined in this function.
-                                // Load the cell from the stack.
-                                self.asm().loadlocal(v.cell_slot.try_into().unwrap());
-                            }
-                        };
-                        self.asm().load();
-                    }
-                }
+                self.compile_var_use(&self.scopes.var_uses[*var_use]);
             }
             Expr::Group { expr, .. } => {
                 self.compile_expr(expr)?;
@@ -538,6 +540,17 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         }
                         let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
                         self.asm().callnamedprop(si, arg_count);
+                    }
+                    Expr::Super { name, var_use, .. } => {
+                        self.compile_var_use(&self.scopes.var_uses[*var_use]);
+                        self.asm().dup();
+                        self.asm().loadprototype();
+                        self.asm().loadprototype();
+                        for arg in arguments {
+                            self.compile_expr(arg)?;
+                        }
+                        let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                        self.asm().callnamedpropwithprototype(si, arg_count);
                     }
                     _ => {
                         self.compile_expr(callee)?;
@@ -610,6 +623,12 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Expr::Property { receiver, name, .. } => {
                 self.compile_expr(receiver)?;
+                let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                self.asm().loadnamedprop(si);
+            }
+            Expr::Super { name, var_use, .. } => {
+                self.compile_var_use(&self.scopes.var_uses[*var_use]);
+                self.asm().loadprototype();
                 let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
                 self.asm().loadnamedprop(si);
             }
@@ -693,7 +712,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         // Captured from enclosing function.
                         // The cell pointing to the variable is embedded in
                         // this function's closure.
-                        self.asm().cell(i.try_into().unwrap());
+                        self.asm().capture(i.try_into().unwrap());
                     }
                     None => {
                         // Captured variable defined in this function.
@@ -703,6 +722,31 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 }
                 self.asm().swap();
                 self.asm().store();
+            }
+        }
+    }
+
+    fn compile_var_use(&mut self, var_use: &VarUse) {
+        let v = &self.scopes.vars[var_use.var];
+        match v.kind {
+            VarKind::Global => self.asm().loadglobal(v.slot.try_into().unwrap()),
+            VarKind::Argument => self.asm().loadarg(v.slot.try_into().unwrap()),
+            VarKind::Local => self.asm().loadlocal(v.slot.try_into().unwrap()),
+            VarKind::Capture => {
+                match var_use.cell {
+                    Some(i) => {
+                        // Captured from enclosing function.
+                        // The cell pointing to the variable is embedded in
+                        // this function's closure.
+                        self.asm().capture(i.try_into().unwrap());
+                    }
+                    None => {
+                        // Captured variable defined in this function.
+                        // Load the cell from the stack.
+                        self.asm().loadlocal(v.cell_slot.try_into().unwrap());
+                    }
+                };
+                self.asm().load();
             }
         }
     }

@@ -12,7 +12,7 @@ use std::mem;
 // Each stack frame consists of (with descending stack address):
 //
 //   - Caller: *const Function
-//   - Caller's cells: *[*mut u64; ?]
+//   - Caller's closure: *const Closure
 //   - Return address: *const u8
 //   - Caller's fp
 const FRAME_SIZE: usize = 32;
@@ -33,29 +33,53 @@ impl<'a> Interpreter<'a> {
     pub fn interpret(&mut self, mut func: &Function) -> Result<(), Error> {
         unsafe {
             assert!(func.param_types.is_empty());
+
+            // pp points to the current function's package.
             let mut pp = func.package.as_ref().unwrap();
             if self.global_slots.is_empty() {
                 self.global_slots.resize(pp.globals.len(), 0);
             }
-            let mut cp = 0 as *mut *mut u64;
+
+            // cp points to the current function's closure. cp is null if
+            // the function was called directly without a closure.
+            let mut cp = 0 as *const Closure;
 
             let mut stack = Stack::new();
+            // sp is the top of the stack. sp points to the last temporary
+            // stack slot. The stack grows down.
             let mut sp = stack.end() - FRAME_SIZE;
+
+            // fp is the frame pointer. fp points to the caller's saved fp
+            // in the stack frame. The addresses of local variables and
+            // arguments are based on fp.
             let mut fp = sp;
+
+            // ip is the instruction pointer. ip points to the next instruction
+            // to execute.
             let mut ip = &func.insts[0] as *const u8;
+
+            // types is a stack containing types of values on the stack,
+            // including from calling functions. types should contain mostly
+            // static information, but some types may be more specific than
+            // can be statically inferred.
             let mut types = Vec::new();
 
+            // Construct the stack frame.
             *((fp + 24) as *mut u64) = 0; // caller
             *((fp + 16) as *mut u64) = 0; // caller's cells
             *((fp + 8) as *mut u64) = 0; // return address
             *(fp as *mut u64) = 0; // caller's fp
 
+            // return_errorf! stops execution, formats an error, and returns it.
             macro_rules! return_errorf {
                 ($($x:expr),*) => {
                     return Err(Error{message: format!($($x,)*)})
                 };
             }
 
+            // pop! removes and returns the value on top of the stack.
+            // If pop! is called with a type, it checks that the type on
+            // top of the type stack is the same.
             macro_rules! pop {
                 () => {{
                     let v = *(sp as *mut u64);
@@ -73,6 +97,8 @@ impl<'a> Interpreter<'a> {
                 }};
             }
 
+            // pop_cond! removes and returns the value on top of the stack
+            // as a bool, to be used as a condition.
             macro_rules! pop_cond {
                 () => {{
                     let (v, ty) = pop!();
@@ -93,6 +119,7 @@ impl<'a> Interpreter<'a> {
                 }};
             }
 
+            // push! adds a given value and type to the top of the stack.
             macro_rules! push {
                 ($x:expr, $t:expr) => {{
                     sp -= 8;
@@ -101,17 +128,33 @@ impl<'a> Interpreter<'a> {
                 }};
             }
 
+            // shift_args! shifts a number of values on top of the stack
+            // back by a given number of slots, deleting values earlier
+            // in the stack.
+            // TODO: this is used in function calls and is inefficient.
+            // Is there a better way?
             macro_rules! shift_args {
-                ($addr:ident, $arg_count:ident) => {
-                    while $addr > sp {
-                        *($addr as *mut u64) = *(($addr - 8) as *mut u64);
-                        $addr -= 8;
+                ($arg_count:ident, $by:expr) => {{
+                    let arg_count = $arg_count as usize;
+                    let by = $by;
+                    let mut from = sp + arg_count * 8 - 8;
+                    let mut to = from + by * 8;
+                    while from >= sp {
+                        *(to as *mut u64) = *(from as *mut u64);
+                        from -= 8;
+                        to -= 8;
                     }
-                    sp += 8;
-                    types.remove(types.len() - $arg_count as usize - 1);
-                };
+                    sp += by * 8;
+                    types.drain(types.len() - arg_count - by..types.len() - arg_count);
+                }};
             }
 
+            // call_closure! sets up a call to the given closure, with a number
+            // of arguments on the stack. If the callee has bound arguments,
+            // they're inserted on the stack before the arguments that are
+            // already there. After call_closure!, ip points to the first
+            // instruction of the callee, so 'continue' should run to avoid
+            // incrementing ip.
             macro_rules! call_closure {
                 ($callee:expr, $arg_count:expr) => {{
                     let callee = $callee;
@@ -164,7 +207,7 @@ impl<'a> Interpreter<'a> {
                     *((sp as usize + 24) as *mut u64) = func as *const Function as u64;
                     func = callee_func;
                     *((sp as usize + 16) as *mut u64) = cp as u64;
-                    cp = callee.cell_addr(0) as *mut *mut u64;
+                    cp = callee;
                     *((sp as usize + 8) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
                     ip = &func.insts[0] as *const u8;
                     *(sp as *mut u64) = fp as u64;
@@ -173,6 +216,7 @@ impl<'a> Interpreter<'a> {
                 }};
             }
 
+            // binop_eq! implements the == and != operators.
             macro_rules! binop_eq {
                 ($op:tt) => {{
                     let (r, ty) = pop!();
@@ -218,6 +262,7 @@ impl<'a> Interpreter<'a> {
                 }};
             }
 
+            // binop_cmp! implements the <, <=, >, and >= operators.
             macro_rules! binop_cmp {
                 ($op:tt) => {{
                     let (r, ty) = pop!();
@@ -248,6 +293,7 @@ impl<'a> Interpreter<'a> {
                 }}
             }
 
+            // binop_num! implements other numeric operators.
             macro_rules! binop_num {
                 ($op:tt) => {{
                     let (r, ty) = pop!();
@@ -332,11 +378,13 @@ impl<'a> Interpreter<'a> {
                         let name_index = *((ip as usize + 1) as *const u32) as usize;
                         let name = &pp.strings[name_index];
                         let arg_count = *((ip as usize + 5) as *const u16) as usize;
-                        let mut addr = sp + arg_count * 8;
+                        let receiver_addr = sp + arg_count * 8;
                         let receiver = match types[types.len() - arg_count - 1] {
-                            Type::Object => (*(addr as *const *const Object)).as_ref().unwrap(),
+                            Type::Object => {
+                                (*(receiver_addr as *const *const Object)).as_ref().unwrap()
+                            }
                             Type::Nanbox => {
-                                let r = *((sp + arg_count * 8) as *const u64);
+                                let r = *(receiver_addr as *const u64);
                                 if let Some(o) = nanbox::to_object(r) {
                                     o.as_ref().unwrap()
                                 } else {
@@ -367,9 +415,55 @@ impl<'a> Interpreter<'a> {
                             // function won't.
                             // TODO: this is horrendously inefficient. Come up
                             // with something better.
-                            shift_args!(addr, arg_count);
+                            shift_args!(arg_count, 1);
                             arg_count
                         } else {
+                            arg_count + 1
+                        };
+                        call_closure!(callee, arg_count_including_receiver);
+                        continue;
+                    }
+                    inst::CALLNAMEDPROPWITHPROTOTYPE => {
+                        let name_index = *((ip as usize + 1) as *const u32) as usize;
+                        let name = &pp.strings[name_index];
+                        let arg_count = *((ip as usize + 5) as *const u16) as usize;
+                        let prototype_addr = sp + arg_count * 8;
+                        let prototype = match types[types.len() - arg_count - 1] {
+                            Type::Object => (*(prototype_addr as *const *const Object))
+                                .as_ref()
+                                .unwrap(),
+                            Type::Nanbox => {
+                                let r = *(prototype_addr as *const u64);
+                                if let Some(o) = nanbox::to_object(r) {
+                                    o.as_ref().unwrap()
+                                } else {
+                                    return_errorf!(
+                                        "prototype is not an object: {}",
+                                        nanbox::debug_type(r)
+                                    );
+                                }
+                            }
+                            _ => unreachable!(),
+                        };
+                        let prop = if let Some(prop) = prototype.property(name) {
+                            prop
+                        } else {
+                            return_errorf!("property {} is not defined", name);
+                        };
+                        let callee = if let Some(c) = nanbox::to_closure(prop.value) {
+                            c.as_ref().unwrap()
+                        } else {
+                            return_errorf!("property {} is not a function", name);
+                        };
+                        let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
+                            // Not a method but a regular field that happens to
+                            // contain a function. See comment in CALLNAMEDPROP.
+                            shift_args!(arg_count, 2);
+                            arg_count
+                        } else {
+                            // Regular method call. We still need to remove the
+                            // prototype from the stack though.
+                            shift_args!(arg_count, 1);
                             arg_count + 1
                         };
                         call_closure!(callee, arg_count_including_receiver);
@@ -378,8 +472,8 @@ impl<'a> Interpreter<'a> {
                     inst::CALLVALUE => {
                         let arg_count =
                             i16::from_le_bytes(*((ip as usize + 1) as *const [u8; 2])) as usize;
-                        let mut addr = sp as usize + arg_count as usize * 8;
-                        let raw_callee = *(addr as *const u64);
+                        let callee_addr = sp + arg_count * 8;
+                        let raw_callee = *(callee_addr as *const u64);
                         let callee = match types[types.len() - arg_count as usize - 1] {
                             Type::Closure => (raw_callee as *const Closure).as_ref().unwrap(),
                             Type::Nanbox => {
@@ -398,14 +492,15 @@ impl<'a> Interpreter<'a> {
                         // CALLNAMEDPROP does this too when the called property
                         // is a field instead of a method. See comment there.
                         // TODO: this is a terrible, inefficient solution.
-                        shift_args!(addr, arg_count);
+                        shift_args!(arg_count, 1);
                         call_closure!(callee, arg_count);
                         continue;
                     }
-                    inst::CELL => {
-                        let i = i16::from_le_bytes(*((ip as usize + 1) as *const [u8; 2])) as usize;
-                        let cell = *((cp as usize + i * mem::size_of::<usize>()) as *const u64);
-                        let ty = func.cell_types[i].clone();
+                    inst::CAPTURE => {
+                        let i = u16::from_le_bytes(*((ip as usize + 1) as *const [u8; 2]));
+                        let c = cp.as_ref().unwrap();
+                        let cell = c.capture(i) as u64;
+                        let ty = c.function.cell_types[i as usize].clone();
                         push!(cell, ty);
                     }
                     inst::DIV => {
@@ -534,15 +629,20 @@ impl<'a> Interpreter<'a> {
                                 let o = (v as *const Object).as_ref().unwrap();
                                 o.prototype.unwrap()
                             }
+                            Type::Closure => {
+                                let c = (v as *const Closure).as_ref().unwrap();
+                                c.prototype.unwrap()
+                            }
                             Type::Nanbox => {
                                 if let Some(o) = nanbox::to_object(v) {
-                                    let o = o.as_ref().unwrap();
-                                    o.prototype.unwrap()
+                                    o.as_ref().unwrap().prototype.unwrap()
+                                } else if let Some(c) = nanbox::to_closure(v) {
+                                    c.as_ref().unwrap().prototype.unwrap()
                                 } else {
                                     return_errorf!(
                                         "value is not an object: {}",
                                         nanbox::debug_type(v)
-                                    )
+                                    );
                                 }
                             }
                             _ => {
@@ -656,6 +756,12 @@ impl<'a> Interpreter<'a> {
                         sp += 8;
                         types.pop();
                     }
+                    inst::PROTOTYPE => {
+                        let c = cp.as_ref().unwrap();
+                        let p = c.prototype.unwrap();
+                        assert!(!p.is_null());
+                        push!(p as u64, Type::Object);
+                    }
                     inst::RET => {
                         let ret_sp = sp;
                         let stack_depth = (fp - sp) / 8;
@@ -670,7 +776,7 @@ impl<'a> Interpreter<'a> {
                             }
                         };
                         pp = func.package.as_ref().unwrap();
-                        cp = *((fp + 16) as *const *mut *mut u64);
+                        cp = *((fp + 16) as *const *const Closure);
                         ip = *((fp + 8) as *const *const u8);
                         fp = *(fp as *const usize);
                         let v = *(ret_sp as *const u64);
@@ -783,37 +889,19 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     inst::STOREPROTOTYPE => {
-                        let (p, pty) = pop!();
+                        let p = pop!(Type::Object) as *mut Object;
                         let (o, oty) = pop!();
-                        assert_eq!(pty, oty);
-                        let (o, p) = match oty {
+                        match oty {
                             Type::Object => {
                                 let o = (o as *mut Object).as_mut().unwrap();
-                                let p = p as *mut Object;
-                                (o, p)
+                                o.prototype.set_ptr(p);
                             }
-                            Type::Nanbox => {
-                                let o = if let Some(o) = nanbox::to_object(o) {
-                                    (o as usize as *mut Object).as_mut().unwrap()
-                                } else {
-                                    return_errorf!(
-                                        "receiver is not an object: {}",
-                                        nanbox::debug_type(o)
-                                    )
-                                };
-                                let p = if let Some(p) = nanbox::to_object(p) {
-                                    p as usize as *mut Object
-                                } else {
-                                    return_errorf!(
-                                        "prototype is not an object: {}",
-                                        nanbox::debug_type(p)
-                                    )
-                                };
-                                (o, p)
+                            Type::Closure => {
+                                let c = (o as *mut Closure).as_mut().unwrap();
+                                c.prototype.set_ptr(p);
                             }
                             _ => unreachable!(),
-                        };
-                        o.prototype.set_ptr(p);
+                        }
                     }
                     inst::STRING => {
                         let i = *((ip as usize + 1) as *const u32) as usize;
@@ -910,6 +998,8 @@ impl Stack {
 
 #[derive(Debug)]
 pub struct Error {
+    // TODO: include source locations in error messages. This requires some
+    // mechanism to map instruction addresses to source locations.
     message: String,
 }
 

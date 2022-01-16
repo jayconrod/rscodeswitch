@@ -171,9 +171,11 @@ impl fmt::Display for Type {
 
 /// A Closure is a callable object that consists of a function, a number of
 /// captured variables from its declaring environment, and a number of
-/// bound arguments.
+/// bound arguments. If the closure is to be used as a constructor, it may
+/// contain a prototype object to be used by new instances.
 pub struct Closure {
     pub function: Ptr<Function>,
+    pub prototype: Ptr<Object>,
     pub capture_count: u16,
     pub bound_arg_count: u16,
 }

@@ -13,6 +13,8 @@ use std::str;
 
 use regex::Regex;
 
+// TODO: also need a convenient way to test for errors.
+
 #[test]
 fn interpret_test() -> Result<(), Box<dyn std::error::Error>> {
     let filter_re_opt = match env::var("CODESWITCH_TEST_FILTER") {

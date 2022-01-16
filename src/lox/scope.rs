@@ -4,6 +4,8 @@ use crate::pos::{Error, LineMap, Pos};
 
 use std::collections::HashMap;
 
+// TODO: define types for indexing scopes, vars, var_uses, rather than usize.
+
 /// ScopeSet contains information about all the scopes, definitions, and uses
 /// in a program.
 pub struct ScopeSet<'a> {
@@ -310,11 +312,17 @@ impl<'a, 'b> Resolver<'a, 'b> {
             }
             Decl::Class {
                 name,
+                base,
                 methods,
                 scope,
                 var,
+                base_var_use,
                 ..
             } => {
+                if let Some(base) = base {
+                    let base_var_use = base_var_use.unwrap();
+                    self.resolve(*base, base_var_use)?;
+                }
                 match scope_kind {
                     ScopeKind::Global => (), // already declared
                     ScopeKind::Function | ScopeKind::Class => unreachable!(),
@@ -416,6 +424,13 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 self.resolve_expr(r)
             }
             Expr::Property { receiver, .. } => self.resolve_expr(receiver),
+            Expr::Super { token, var_use, .. } => {
+                let t = Token {
+                    text: "this",
+                    ..*token
+                };
+                self.resolve(t, *var_use)
+            }
             Expr::Assign(l, r) => {
                 self.resolve_lvalue(l)?;
                 self.resolve_expr(r)

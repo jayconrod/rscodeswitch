@@ -4,6 +4,9 @@ use std::boxed::Box;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
+// TODO: recover from syntax errors and report multiple errors when they occur.
+// Actually every stage of the compiler should do this.
+
 pub trait DisplayIndent {
     fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result;
 
@@ -53,11 +56,13 @@ pub enum Decl<'a> {
     },
     Class {
         name: Token<'a>,
+        base: Option<Token<'a>>,
         methods: Vec<Decl<'a>>,
         begin_pos: Pos,
         end_pos: Pos,
         scope: usize,
         var: usize,
+        base_var_use: Option<usize>,
     },
     Stmt(Stmt<'a>),
 }
@@ -121,9 +126,18 @@ impl<'a> DisplayIndent for Decl<'a> {
                 f.write_str(") ")?;
                 body.fmt(f)
             }
-            Decl::Class { name, methods, .. } => {
+            Decl::Class {
+                name,
+                base,
+                methods,
+                ..
+            } => {
                 f.write_str("class ")?;
                 f.write_str(name.text)?;
+                if let Some(base) = base {
+                    f.write_str(" < ")?;
+                    f.write_str(base.text)?;
+                }
                 f.write_str(" {\n")?;
                 let mut sep = "";
                 for method in methods {
@@ -362,6 +376,11 @@ pub enum Expr<'a> {
         receiver: Box<Expr<'a>>,
         name: Token<'a>,
     },
+    Super {
+        token: Token<'a>,
+        name: Token<'a>,
+        var_use: usize,
+    },
     Assign(LValue<'a>, Box<Expr<'a>>),
 }
 
@@ -383,6 +402,7 @@ impl<'a> Expr<'a> {
             Expr::Unary(op, e) => (op.from, e.pos().1),
             Expr::Binary(l, _, r) => (l.pos().0, r.pos().0),
             Expr::Property { receiver, name } => (receiver.pos().0, name.to),
+            Expr::Super { token, name, .. } => (token.from, name.to),
             Expr::Assign(l, r) => (l.pos().0, r.pos().1),
         }
     }
@@ -413,7 +433,8 @@ impl<'a> Display for Expr<'a> {
             }
             Expr::Unary(op, e) => write!(f, "{}{}", op.text, e),
             Expr::Binary(l, op, r) => write!(f, "{} {} {}", l, op.text, r),
-            Expr::Property { receiver, name } => write!(f, "{}.{}", receiver, name.text),
+            Expr::Property { receiver, name, .. } => write!(f, "{}.{}", receiver, name.text),
+            Expr::Super { token, name, .. } => write!(f, "{}.{}", token.text, name.text),
             Expr::Assign(l, r) => write!(f, "{} = {}", l, r),
         }
     }
@@ -575,6 +596,12 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         let var = self.next_var();
         let begin_pos = self.expect(Kind::Class)?.from;
         let name = self.expect(Kind::Ident)?;
+        let (base, base_var_use) = if self.peek() == Kind::Lt {
+            self.take();
+            (Some(self.expect(Kind::Ident)?), Some(self.next_var_use()))
+        } else {
+            (None, None)
+        };
         self.expect(Kind::LBrace)?;
         let mut methods = Vec::new();
         while self.peek() != Kind::RBrace {
@@ -583,11 +610,13 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         let end_pos = self.expect(Kind::RBrace)?.to;
         Ok(Decl::Class {
             name,
+            base,
             methods,
             begin_pos,
             end_pos,
             scope,
             var,
+            base_var_use,
         })
     }
 
@@ -870,6 +899,17 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         })
     }
 
+    fn parse_super_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
+        let t = self.expect(Kind::Super)?;
+        self.expect(Kind::Dot)?;
+        let name = self.expect(Kind::Ident)?;
+        Ok(Expr::Super {
+            token: t,
+            name,
+            var_use: self.next_var_use(),
+        })
+    }
+
     fn parse_nil_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
         Ok(Expr::Nil(self.expect(Kind::Nil)?))
     }
@@ -965,6 +1005,11 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             },
             Kind::This => ParseRule {
                 prefix: Some(&Parser::parse_this_expr),
+                infix: None,
+                precedence: Precedence::None,
+            },
+            Kind::Super => ParseRule {
+                prefix: Some(&Parser::parse_super_expr),
                 infix: None,
                 precedence: Precedence::None,
             },
