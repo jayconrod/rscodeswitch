@@ -94,8 +94,7 @@ impl fmt::Display for Kind {
 pub struct Token<'a> {
     pub type_: Kind,
     pub text: &'a str,
-    pub from: Pos,
-    pub to: Pos,
+    pub pos: Pos,
 }
 
 pub fn lex<'a>(
@@ -266,11 +265,9 @@ impl<'a, 'b> Lexer<'a, 'b> {
         self.tokens.push(Token {
             type_: type_,
             text: unsafe { from_utf8_unchecked(&self.data[self.p..end]) },
-            from: Pos {
-                offset: self.base + self.p,
-            },
-            to: Pos {
-                offset: self.base + end,
+            pos: Pos {
+                begin: self.base + self.p,
+                end: self.base + end,
             },
         });
         self.p = end
@@ -289,13 +286,11 @@ impl<'a, 'b> Lexer<'a, 'b> {
     }
 
     fn error_end(&self, end: usize, message: String) -> Result<(), Error> {
-        let from = Pos {
-            offset: self.base + self.p,
+        let pos = Pos {
+            begin: self.base + self.p,
+            end: self.base + end,
         };
-        let to = Pos {
-            offset: self.base + end,
-        };
-        let position = self.tset.position(from, to);
+        let position = self.tset.position(pos);
         Err(Error { position, message })
     }
 }

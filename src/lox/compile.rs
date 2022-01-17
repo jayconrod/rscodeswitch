@@ -80,12 +80,15 @@ impl<'a, 'b> Compiler<'a, 'b> {
     fn compile_decl(&mut self, decl: &Decl<'a>) -> Result<(), Error> {
         match decl {
             Decl::Var {
-                name, init, var, ..
+                name,
+                init,
+                var,
+                pos,
+                ..
             } => {
                 // Ensure storage for the varaible.
                 let v = &self.scopes.vars[*var];
-                let (begin_pos, end_pos) = decl.pos();
-                self.compile_define_prepare(v, name.text, begin_pos, end_pos)?;
+                self.compile_define_prepare(v, name.text, *pos)?;
 
                 // Compile the initializer, if any.
                 if let Some(e) = init {
@@ -104,22 +107,16 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 body,
                 var,
                 arg_scope,
+                pos,
                 ..
             } => {
-                let (begin_pos, end_pos) = decl.pos();
-                let fn_index = self
-                    .compile_function(*name, params, body, *arg_scope, false, begin_pos, end_pos)?;
+                let fn_index =
+                    self.compile_function(*name, params, body, *arg_scope, false, *pos)?;
                 // Create a closure in the enclosing function.
                 // The closure has pointers to cells of variables captured from
                 // this function and enclosing functions.
-                let (begin_pos, end_pos) = decl.pos();
-                self.compile_define_prepare(
-                    &self.scopes.vars[*var],
-                    name.text,
-                    begin_pos,
-                    end_pos,
-                )?;
-                self.compile_closure(fn_index, *arg_scope, begin_pos, end_pos)?;
+                self.compile_define_prepare(&self.scopes.vars[*var], name.text, *pos)?;
+                self.compile_closure(fn_index, *arg_scope, *pos)?;
 
                 // Store the closure in a variable.
                 self.compile_define(&self.scopes.vars[*var]);
@@ -129,17 +126,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 methods,
                 var,
                 base_var_use,
-                begin_pos,
-                end_pos,
+                pos,
                 ..
             } => {
                 // Prepare storage for the class.
-                self.compile_define_prepare(
-                    &self.scopes.vars[*var],
-                    name.text,
-                    *begin_pos,
-                    *end_pos,
-                )?;
+                self.compile_define_prepare(&self.scopes.vars[*var], name.text, *pos)?;
 
                 // Create a constructor closure which serves as the class value.
                 // The constructor allocates a new objects, sets its prototype,
@@ -155,7 +146,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     _ => None,
                 });
                 let mut ctor_asm = Assembler::new();
-                let object_type_index = self.ensure_type(Type::Object, *begin_pos, *end_pos)?;
+                let object_type_index = self.ensure_type(Type::Object, *pos)?;
                 ctor_asm.alloc(object_type_index);
                 ctor_asm.dup();
                 ctor_asm.prototype();
@@ -166,14 +157,14 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     for i in 0..arg_count {
                         ctor_asm.loadarg(i);
                     }
-                    let si = self.ensure_string(b"init", *begin_pos, *end_pos)?;
+                    let si = self.ensure_string(b"init", *pos)?;
                     ctor_asm.callnamedprop(si, arg_count);
                     ctor_asm.pop();
                 }
                 ctor_asm.ret();
                 let ctor_insts = ctor_asm
                     .finish()
-                    .map_err(|err| Error::wrap(self.lmap.position(*begin_pos, *end_pos), &err))?;
+                    .map_err(|err| Error::wrap(self.lmap.position(*pos), &err))?;
                 let ctor = Function {
                     name: format!("·{}·constructor", name.text),
                     insts: ctor_insts,
@@ -182,7 +173,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     cell_types: Vec::new(),
                 };
                 let ctor_index = self.functions.len().try_into().map_err(|_| Error {
-                    position: self.lmap.position(*begin_pos, *end_pos),
+                    position: self.lmap.position(*pos),
                     message: String::from("too many functions"),
                 })?;
                 self.functions.push(ctor);
@@ -190,7 +181,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.asm().dup();
 
                 // Create a prototype object. Don't box it yet.
-                let prototype_type_index = self.ensure_type(Type::Object, *begin_pos, *end_pos)?;
+                let prototype_type_index = self.ensure_type(Type::Object, *pos)?;
                 self.asm().alloc(prototype_type_index);
 
                 // If there's a base class, load its prototype, and use it as
@@ -210,38 +201,34 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     self.asm().dup();
                     self.asm().nanbox();
                 }
-                let mut method_names = HashMap::<&'a str, (Pos, Pos)>::new();
+                let mut method_names = HashMap::<&'a str, Pos>::new();
                 for method in methods {
-                    let (begin_pos, end_pos) = method.pos();
                     match method {
                         Decl::Function {
                             name,
                             params,
                             body,
                             arg_scope,
+                            pos,
                             ..
                         } => {
-                            if let Some((prev_begin_pos, prev_end_pos)) =
-                                method_names.get(name.text)
-                            {
+                            if let Some(prev_pos) = method_names.get(name.text) {
                                 return Err(Error {
-                                    position: self.lmap.position(begin_pos, end_pos),
+                                    position: self.lmap.position(*pos),
                                     message: format!(
                                         "duplicate definition of {}; previous definition at {}",
                                         name.text,
-                                        self.lmap.position(*prev_begin_pos, *prev_end_pos)
+                                        self.lmap.position(*prev_pos),
                                     ),
                                 });
                             }
                             self.asm().dup();
-                            let fn_index = self.compile_function(
-                                *name, params, body, *arg_scope, true, begin_pos, end_pos,
-                            )?;
-                            self.compile_closure(fn_index, *arg_scope, begin_pos, end_pos)?;
-                            let name_index =
-                                self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                            let fn_index =
+                                self.compile_function(*name, params, body, *arg_scope, true, *pos)?;
+                            self.compile_closure(fn_index, *arg_scope, *pos)?;
+                            let name_index = self.ensure_string(name.text.as_bytes(), name.pos)?;
                             self.asm().storemethod(name_index);
-                            method_names.insert(name.text, (begin_pos, end_pos));
+                            method_names.insert(name.text, *pos);
                         }
                         _ => unreachable!(),
                     };
@@ -268,8 +255,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         body: &Block<'a>,
         arg_scope: usize,
         is_method: bool,
-        begin_pos: Pos,
-        end_pos: Pos,
+        pos: Pos,
     ) -> Result<u32, Error> {
         // Start compiling the function.
         // Before anything else, move captured parameters into cells.
@@ -277,11 +263,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let mut cell_slot = 0;
         for param in params {
             if self.scopes.vars[param.var].kind == VarKind::Capture {
-                let ty_index = self.ensure_type(
-                    Type::Pointer(Box::new(Type::Nanbox)),
-                    param.name.from,
-                    param.name.to,
-                )?;
+                let ty_index =
+                    self.ensure_type(Type::Pointer(Box::new(Type::Nanbox)), param.name.pos)?;
                 self.asm().alloc(ty_index);
                 self.asm().dup();
                 let arg_slot = self.scopes.vars[param.var].slot as u16;
@@ -312,7 +295,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let mut asm = self.asm_stack.pop().unwrap();
         let insts = asm
             .finish()
-            .map_err(|err| Error::wrap(self.lmap.position(begin_pos, end_pos), &err))?;
+            .map_err(|err| Error::wrap(self.lmap.position(pos), &err))?;
         let param_count = params.len() + (if is_method { 1 } else { 0 });
         let mut param_types = Vec::new();
         param_types.resize_with(param_count, || Type::Nanbox);
@@ -328,20 +311,14 @@ impl<'a, 'b> Compiler<'a, 'b> {
             cell_types,
         };
         let fn_index = u32::try_from(self.functions.len()).map_err(|_| Error {
-            position: self.lmap.position(begin_pos, end_pos),
+            position: self.lmap.position(pos),
             message: String::from("too many functions"),
         })?;
         self.functions.push(f);
         Ok(fn_index)
     }
 
-    fn compile_closure(
-        &mut self,
-        fn_index: u32,
-        arg_scope: usize,
-        begin_pos: Pos,
-        end_pos: Pos,
-    ) -> Result<(), Error> {
+    fn compile_closure(&mut self, fn_index: u32, arg_scope: usize, pos: Pos) -> Result<(), Error> {
         for capture in &self.scopes.scopes[arg_scope].captures {
             match capture.from {
                 CaptureFrom::Local => {
@@ -355,7 +332,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
         let capture_count = self.scopes.scopes[arg_scope].captures.len();
         let capture_count = u16::try_from(capture_count).map_err(|_| Error {
-            position: self.lmap.position(begin_pos, end_pos),
+            position: self.lmap.position(pos),
             message: String::from("too many captures"),
         })?;
         self.asm().newclosure(fn_index, capture_count, 0);
@@ -490,7 +467,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     }
                     _ => {
                         return Err(Error {
-                            position: self.lmap.position(t.from, t.to),
+                            position: self.lmap.position(t.pos),
                             message: format!("not a real bool: '{}'", t.text),
                         })
                     }
@@ -498,7 +475,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Expr::Number(t) => {
                 let n = t.text.parse().map_err(|_| Error {
-                    position: self.lmap.position(t.from, t.to),
+                    position: self.lmap.position(t.pos),
                     message: format!("could not express '{}' as 64-bit floating point", t.text),
                 })?;
                 self.asm().float64(n);
@@ -508,11 +485,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let raw = t.text.as_bytes();
                 if raw.len() < 2 || raw[0] != b'"' || raw[raw.len() - 1] != b'"' {
                     return Err(Error {
-                        position: self.lmap.position(t.from, t.to),
+                        position: self.lmap.position(t.pos),
                         message: format!("not a real string: '{}'", t.text),
                     });
                 }
-                let index = self.ensure_string(&raw[1..raw.len() - 1], t.from, t.to)?;
+                let index = self.ensure_string(&raw[1..raw.len() - 1], t.pos)?;
                 self.asm().string(index);
                 self.asm().nanbox();
             }
@@ -525,12 +502,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
             Expr::Call {
                 callee, arguments, ..
             } => {
-                let arg_count = u16::try_from(arguments.len()).map_err(|_| {
-                    let (begin_pos, end_pos) = expr.pos();
-                    Error {
-                        position: self.lmap.position(begin_pos, end_pos),
-                        message: String::from("too many arguments"),
-                    }
+                let arg_count = u16::try_from(arguments.len()).map_err(|_| Error {
+                    position: self.lmap.position(expr.pos()),
+                    message: String::from("too many arguments"),
                 })?;
                 match callee.as_ref() {
                     Expr::Property { receiver, name, .. } => {
@@ -538,7 +512,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         for arg in arguments {
                             self.compile_expr(arg)?;
                         }
-                        let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                        let si = self.ensure_string(name.text.as_bytes(), name.pos)?;
                         self.asm().callnamedprop(si, arg_count);
                     }
                     Expr::Super { name, var_use, .. } => {
@@ -549,7 +523,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         for arg in arguments {
                             self.compile_expr(arg)?;
                         }
-                        let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                        let si = self.ensure_string(name.text.as_bytes(), name.pos)?;
                         self.asm().callnamedpropwithprototype(si, arg_count);
                     }
                     _ => {
@@ -568,7 +542,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     Kind::Bang => self.asm().not(),
                     _ => {
                         return Err(Error {
-                            position: self.lmap.position(op.from, op.to),
+                            position: self.lmap.position(op.pos),
                             message: format!("unknown unary operator {}", op.text),
                         })
                     }
@@ -613,7 +587,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             Kind::Slash => self.asm().div(),
                             _ => {
                                 return Err(Error {
-                                    position: self.lmap.position(op.from, op.to),
+                                    position: self.lmap.position(op.pos),
                                     message: format!("unknown binary operator {}", op.text),
                                 })
                             }
@@ -623,13 +597,13 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Expr::Property { receiver, name, .. } => {
                 self.compile_expr(receiver)?;
-                let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                let si = self.ensure_string(name.text.as_bytes(), name.pos)?;
                 self.asm().loadnamedprop(si);
             }
             Expr::Super { name, var_use, .. } => {
                 self.compile_var_use(&self.scopes.var_uses[*var_use]);
                 self.asm().loadprototype();
-                let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                let si = self.ensure_string(name.text.as_bytes(), name.pos)?;
                 self.asm().loadnamedprop(si);
             }
             Expr::Assign(l, r) => {
@@ -646,7 +620,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.asm().dup(); // TODO: only dup if the value is being used
                         self.asm().swapn(1);
                         self.asm().swap();
-                        let si = self.ensure_string(name.text.as_bytes(), name.from, name.to)?;
+                        let si = self.ensure_string(name.text.as_bytes(), name.pos)?;
                         self.asm().storenamedprop(si);
                     }
                 }
@@ -655,13 +629,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         Ok(())
     }
 
-    fn compile_define_prepare(
-        &mut self,
-        var: &Var,
-        name: &str,
-        begin_pos: Pos,
-        end_pos: Pos,
-    ) -> Result<(), Error> {
+    fn compile_define_prepare(&mut self, var: &Var, name: &str, pos: Pos) -> Result<(), Error> {
         match var.kind {
             VarKind::Global => {
                 *self.ensure_global(var.slot) = Global {
@@ -671,8 +639,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             VarKind::Local => Ok(()),
             VarKind::Capture => {
-                let tyi =
-                    self.ensure_type(Type::Pointer(Box::new(Type::Nanbox)), begin_pos, end_pos)?;
+                let tyi = self.ensure_type(Type::Pointer(Box::new(Type::Nanbox)), pos)?;
                 self.asm().alloc(tyi);
                 self.asm().dup();
                 Ok(())
@@ -767,13 +734,13 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
     }
 
-    fn ensure_string(&mut self, s: &[u8], from: Pos, to: Pos) -> Result<u32, Error> {
+    fn ensure_string(&mut self, s: &[u8], pos: Pos) -> Result<u32, Error> {
         let hs = Handle::new(data::String::from_bytes(s));
         match self.string_index.get(&*hs) {
             Some(v) => Ok(v.value),
             None => {
                 let i = u32::try_from((*self.strings).len()).map_err(|_| Error {
-                    position: self.lmap.position(from, to),
+                    position: self.lmap.position(pos),
                     message: format!("too many strings"),
                 })?;
                 (*self.strings).push(&*hs);
@@ -783,10 +750,10 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
     }
 
-    fn ensure_type(&mut self, type_: Type, from: Pos, to: Pos) -> Result<u32, Error> {
+    fn ensure_type(&mut self, type_: Type, pos: Pos) -> Result<u32, Error> {
         // TODO: deduplicate types.
         let i = u32::try_from(self.types.len()).map_err(|_| Error {
-            position: self.lmap.position(from, to),
+            position: self.lmap.position(pos),
             message: format!("too many types"),
         })?;
         self.types.push(type_);

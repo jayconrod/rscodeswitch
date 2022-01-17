@@ -107,8 +107,7 @@ pub struct Var {
     /// a scope with kind Function.
     pub cell_slot: usize,
 
-    pub begin_pos: Pos,
-    pub end_pos: Pos,
+    pub pos: Pos,
 }
 
 impl Default for Var {
@@ -117,8 +116,7 @@ impl Default for Var {
             kind: VarKind::Global,
             slot: !0,
             cell_slot: !0,
-            begin_pos: Pos { offset: !0 },
-            end_pos: Pos { offset: !0 },
+            pos: Pos::default(),
         }
     }
 }
@@ -217,16 +215,16 @@ impl<'a, 'b> Resolver<'a, 'b> {
         // case, global variables may be used in the file before
         // they're declared.
         for decl in &prog.decls {
-            let (begin_pos, end_pos) = decl.pos();
+            let pos = decl.pos();
             match decl {
                 Decl::Var { name, var, .. } => {
-                    self.declare(*var, name.text, VarKind::Global, begin_pos, end_pos)?;
+                    self.declare(*var, name.text, VarKind::Global, pos)?;
                 }
                 Decl::Function { name, var, .. } => {
-                    self.declare(*var, name.text, VarKind::Global, begin_pos, end_pos)?;
+                    self.declare(*var, name.text, VarKind::Global, pos)?;
                 }
                 Decl::Class { name, var, .. } => {
-                    self.declare(*var, name.text, VarKind::Global, begin_pos, end_pos)?;
+                    self.declare(*var, name.text, VarKind::Global, pos)?;
                 }
                 _ => (),
             };
@@ -242,10 +240,13 @@ impl<'a, 'b> Resolver<'a, 'b> {
 
     fn resolve_decl(&mut self, decl: &Decl<'a>) -> Result<(), Error> {
         let scope_kind = self.ss.scopes[*self.scope_stack.last().unwrap()].kind;
-        let (begin_pos, end_pos) = decl.pos();
         match decl {
             Decl::Var {
-                name, init, var, ..
+                name,
+                init,
+                var,
+                pos,
+                ..
             } => {
                 if let Some(init) = init {
                     self.resolve_expr(init)?;
@@ -253,7 +254,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 match scope_kind {
                     ScopeKind::Global => (), // already declared
                     ScopeKind::Local => {
-                        self.declare(*var, name.text, VarKind::Local, begin_pos, end_pos)?;
+                        self.declare(*var, name.text, VarKind::Local, *pos)?;
                     }
                     ScopeKind::Function | ScopeKind::Class => unreachable!(),
                 }
@@ -267,6 +268,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 body_scope,
                 var,
                 this_var,
+                pos,
                 ..
             } => {
                 match scope_kind {
@@ -280,7 +282,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                     }
                     ScopeKind::Local => {
                         // Function declared in the body of another function.
-                        self.declare(*var, name.text, VarKind::Local, begin_pos, end_pos)?;
+                        self.declare(*var, name.text, VarKind::Local, *pos)?;
                     }
                     ScopeKind::Function => {
                         // ScopeKind::Function is for the parameter list.
@@ -290,15 +292,14 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 }
                 self.enter(*arg_scope, ScopeKind::Function);
                 if let Some(this_var) = this_var {
-                    self.declare(*this_var, "this", VarKind::Argument, begin_pos, end_pos)?;
+                    self.declare(*this_var, "this", VarKind::Argument, *pos)?;
                 }
                 for param in params {
                     self.declare(
                         param.var,
                         param.name.text,
                         VarKind::Argument,
-                        param.name.from,
-                        param.name.to,
+                        param.name.pos,
                     )?;
                 }
                 self.enter(*body_scope, ScopeKind::Local);
@@ -317,6 +318,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 scope,
                 var,
                 base_var_use,
+                pos,
                 ..
             } => {
                 if let Some(base) = base {
@@ -327,7 +329,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                     ScopeKind::Global => (), // already declared
                     ScopeKind::Function | ScopeKind::Class => unreachable!(),
                     ScopeKind::Local => {
-                        self.declare(*var, name.text, VarKind::Local, begin_pos, end_pos)?;
+                        self.declare(*var, name.text, VarKind::Local, *pos)?;
                     }
                 }
                 self.enter(*scope, ScopeKind::Class);
@@ -476,18 +478,17 @@ impl<'a, 'b> Resolver<'a, 'b> {
         var_id: usize,
         name: &'a str,
         kind: VarKind,
-        begin_pos: Pos,
-        end_pos: Pos,
+        pos: Pos,
     ) -> Result<(), Error> {
         let scope = &mut self.ss.scopes[*self.scope_stack.last().unwrap()];
         if let Some(prev) = scope.vars.get(name) {
             let prev_var = &self.ss.vars[*prev];
             return Err(Error {
-                position: self.lmap.position(begin_pos, end_pos),
+                position: self.lmap.position(pos),
                 message: format!(
                     "duplicate definition of {}; previous definition at {}",
                     name,
-                    self.lmap.position(prev_var.begin_pos, prev_var.end_pos)
+                    self.lmap.position(prev_var.pos),
                 ),
             });
         }
@@ -500,7 +501,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
         };
         if let Some(msg) = too_many_err {
             return Err(Error {
-                position: self.lmap.position(begin_pos, end_pos),
+                position: self.lmap.position(pos),
                 message: String::from(msg),
             });
         }
@@ -510,8 +511,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
             kind,
             slot,
             cell_slot: !0,
-            begin_pos,
-            end_pos,
+            pos,
         };
         *self.ss.ensure_var(var_id) = var;
         Ok(())
@@ -546,7 +546,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
             stack_def_index -= 1;
         }
         Err(Error {
-            position: self.lmap.position(name.from, name.to),
+            position: self.lmap.position(name.pos),
             message: format!("undefined symbol: {}", name.text),
         })
     }

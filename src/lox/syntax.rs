@@ -39,30 +39,27 @@ pub enum Decl<'a> {
     Var {
         name: Token<'a>,
         init: Option<Expr<'a>>,
-        begin_pos: Pos,
-        end_pos: Pos,
+        pos: Pos,
         var: usize,
     },
     Function {
         name: Token<'a>,
         params: Vec<Param<'a>>,
         body: Block<'a>,
-        begin_pos: Pos,
-        end_pos: Pos,
         arg_scope: usize,
         body_scope: usize,
         this_var: Option<usize>,
         var: usize,
+        pos: Pos,
     },
     Class {
         name: Token<'a>,
         base: Option<Token<'a>>,
         methods: Vec<Decl<'a>>,
-        begin_pos: Pos,
-        end_pos: Pos,
         scope: usize,
         var: usize,
         base_var_use: Option<usize>,
+        pos: Pos,
     },
     Stmt(Stmt<'a>),
 }
@@ -77,17 +74,9 @@ impl<'a> Decl<'a> {
         }
     }
 
-    pub fn pos(&self) -> (Pos, Pos) {
+    pub fn pos(&self) -> Pos {
         match self {
-            Decl::Var {
-                begin_pos, end_pos, ..
-            } => (*begin_pos, *end_pos),
-            Decl::Function {
-                begin_pos, end_pos, ..
-            } => (*begin_pos, *end_pos),
-            Decl::Class {
-                begin_pos, end_pos, ..
-            } => (*begin_pos, *end_pos),
+            Decl::Var { pos, .. } | Decl::Function { pos, .. } | Decl::Class { pos, .. } => *pos,
             Decl::Stmt(stmt) => stmt.pos(),
         }
     }
@@ -168,14 +157,7 @@ impl<'a> Display for Param<'a> {
 pub struct Block<'a> {
     pub decls: Vec<Decl<'a>>,
     pub scope: usize,
-    pub begin_pos: Pos,
-    pub end_pos: Pos,
-}
-
-impl<'a> Block<'a> {
-    fn pos(&self) -> (Pos, Pos) {
-        (self.begin_pos, self.end_pos)
-    }
+    pub pos: Pos,
 }
 
 impl<'a> DisplayIndent for Block<'a> {
@@ -202,19 +184,18 @@ pub enum Stmt<'a> {
     Block(Box<Block<'a>>),
     Print {
         expr: Expr<'a>,
-        begin_pos: Pos,
-        end_pos: Pos,
+        pos: Pos,
     },
     If {
         cond: Expr<'a>,
         true_stmt: Box<Stmt<'a>>,
         false_stmt: Option<Box<Stmt<'a>>>,
-        begin_pos: Pos,
+        pos: Pos,
     },
     While {
         cond: Expr<'a>,
         body: Box<Stmt<'a>>,
-        begin_pos: Pos,
+        pos: Pos,
     },
     For {
         init: ForInit<'a>,
@@ -222,41 +203,24 @@ pub enum Stmt<'a> {
         incr: Option<Expr<'a>>,
         body: Box<Stmt<'a>>,
         scope: usize,
-        begin_pos: Pos,
+        pos: Pos,
     },
     Return {
         expr: Option<Expr<'a>>,
-        begin_pos: Pos,
-        end_pos: Pos,
+        pos: Pos,
     },
 }
 
 impl<'a> Stmt<'a> {
-    fn pos(&self) -> (Pos, Pos) {
+    fn pos(&self) -> Pos {
         match self {
             Stmt::Expr(e) => e.pos(),
-            Stmt::Block(b) => b.pos(),
-            Stmt::Print {
-                begin_pos, end_pos, ..
-            } => (*begin_pos, *end_pos),
-            Stmt::If {
-                begin_pos,
-                true_stmt,
-                false_stmt,
-                ..
-            } => match false_stmt {
-                Some(b) => (*begin_pos, b.pos().1),
-                None => (*begin_pos, true_stmt.pos().1),
-            },
-            Stmt::While {
-                begin_pos, body, ..
-            } => (*begin_pos, body.pos().1),
-            Stmt::For {
-                begin_pos, body, ..
-            } => (*begin_pos, body.pos().1),
-            Stmt::Return {
-                begin_pos, end_pos, ..
-            } => (*begin_pos, *end_pos),
+            Stmt::Block(b) => b.pos,
+            Stmt::Print { pos, .. }
+            | Stmt::If { pos, .. }
+            | Stmt::While { pos, .. }
+            | Stmt::For { pos, .. }
+            | Stmt::Return { pos, .. } => *pos,
         }
     }
 }
@@ -362,13 +326,12 @@ pub enum Expr<'a> {
     },
     Group {
         expr: Box<Expr<'a>>,
-        begin_pos: Pos,
-        end_pos: Pos,
+        pos: Pos,
     },
     Call {
         callee: Box<Expr<'a>>,
         arguments: Vec<Expr<'a>>,
-        end_pos: Pos,
+        pos: Pos,
     },
     Unary(Token<'a>, Box<Expr<'a>>),
     Binary(Box<Expr<'a>>, Token<'a>, Box<Expr<'a>>),
@@ -385,25 +348,18 @@ pub enum Expr<'a> {
 }
 
 impl<'a> Expr<'a> {
-    pub fn pos(&self) -> (Pos, Pos) {
+    pub fn pos(&self) -> Pos {
         match self {
-            Expr::Nil(t) => (t.from, t.to),
-            Expr::Bool(t) => (t.from, t.to),
-            Expr::Number(t) => (t.from, t.to),
-            Expr::String(t) => (t.from, t.to),
-            Expr::Var { name, .. } => (name.from, name.to),
-            Expr::This { token, .. } => (token.from, token.to),
-            Expr::Group {
-                begin_pos, end_pos, ..
-            } => (*begin_pos, *end_pos),
-            Expr::Call {
-                callee, end_pos, ..
-            } => (callee.pos().0, *end_pos),
-            Expr::Unary(op, e) => (op.from, e.pos().1),
-            Expr::Binary(l, _, r) => (l.pos().0, r.pos().0),
-            Expr::Property { receiver, name } => (receiver.pos().0, name.to),
-            Expr::Super { token, name, .. } => (token.from, name.to),
-            Expr::Assign(l, r) => (l.pos().0, r.pos().1),
+            Expr::Nil(t) | Expr::Bool(t) | Expr::Number(t) | Expr::String(t) => t.pos,
+            Expr::Var { name, .. } => name.pos,
+            Expr::This { token, .. } => token.pos,
+            Expr::Group { pos, .. } => *pos,
+            Expr::Call { pos, .. } => *pos,
+            Expr::Unary(op, e) => op.pos.combine(e.pos()),
+            Expr::Binary(l, _, r) => l.pos().combine(r.pos()),
+            Expr::Property { receiver, name } => receiver.pos().combine(name.pos),
+            Expr::Super { token, name, .. } => token.pos.combine(name.pos),
+            Expr::Assign(l, r) => l.pos().combine(r.pos()),
         }
     }
 }
@@ -452,10 +408,10 @@ pub enum LValue<'a> {
 }
 
 impl<'a> LValue<'a> {
-    fn pos(&self) -> (Pos, Pos) {
+    fn pos(&self) -> Pos {
         match self {
-            LValue::Var { name, .. } => (name.from, name.to),
-            LValue::Property { receiver, name, .. } => (receiver.pos().0, name.to),
+            LValue::Var { name, .. } => name.pos,
+            LValue::Property { receiver, name, .. } => receiver.pos().combine(name.pos),
         }
     }
 }
@@ -515,7 +471,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
 
     fn parse_var_decl(&mut self) -> Result<Decl<'a>, Error> {
         let var = self.next_var();
-        let begin_pos = self.expect(Kind::Var)?.from;
+        let begin_pos = self.expect(Kind::Var)?.pos;
         let name = self.expect(Kind::Ident)?;
         let type_ = self.peek();
         let init = match type_ {
@@ -527,39 +483,36 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
             Kind::Semi => None,
             _ => return Err(self.error(format!("expected '=' or ';', found {}", type_))),
         };
-        let end_pos = self.expect(Kind::Semi)?.to;
+        let end_pos = self.expect(Kind::Semi)?.pos;
         Ok(Decl::Var {
             name,
             init,
-            begin_pos,
-            end_pos,
             var,
+            pos: begin_pos.combine(end_pos),
         })
     }
 
     fn parse_function_decl(&mut self) -> Result<Decl<'a>, Error> {
-        let begin_pos = self.expect(Kind::Fun)?.from;
+        let begin_pos = self.expect(Kind::Fun)?.pos;
         match self.parse_function(false)? {
             Decl::Function {
                 name,
                 params,
                 body,
-                begin_pos: _,
-                end_pos,
                 arg_scope,
                 body_scope,
                 this_var,
                 var,
+                pos: function_pos,
             } => Ok(Decl::Function {
                 name,
                 params,
                 body,
-                begin_pos,
-                end_pos,
                 arg_scope,
                 body_scope,
                 this_var,
                 var,
+                pos: begin_pos.combine(function_pos),
             }),
             _ => unreachable!(),
         }
@@ -577,24 +530,23 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         let name = self.expect(Kind::Ident)?;
         let params = self.parse_params()?;
         let body = self.parse_block()?;
-        let end_pos = body.pos().1;
+        let pos = name.pos.combine(body.pos);
         Ok(Decl::Function {
             name,
             params,
             body,
-            begin_pos: name.from,
-            end_pos,
             arg_scope,
             body_scope,
             this_var,
             var,
+            pos,
         })
     }
 
     fn parse_class_decl(&mut self) -> Result<Decl<'a>, Error> {
         let scope = self.next_scope();
         let var = self.next_var();
-        let begin_pos = self.expect(Kind::Class)?.from;
+        let begin_pos = self.expect(Kind::Class)?.pos;
         let name = self.expect(Kind::Ident)?;
         let (base, base_var_use) = if self.peek() == Kind::Lt {
             self.take();
@@ -607,16 +559,16 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         while self.peek() != Kind::RBrace {
             methods.push(self.parse_function(true)?);
         }
-        let end_pos = self.expect(Kind::RBrace)?.to;
+        let end_pos = self.expect(Kind::RBrace)?.pos;
+        let pos = begin_pos.combine(end_pos);
         Ok(Decl::Class {
             name,
             base,
             methods,
-            begin_pos,
-            end_pos,
             scope,
             var,
             base_var_use,
+            pos,
         })
     }
 
@@ -640,18 +592,14 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
 
     fn parse_block(&mut self) -> Result<Block<'a>, Error> {
         let scope = self.next_scope();
-        let begin_pos = self.expect(Kind::LBrace)?.from;
+        let begin_pos = self.expect(Kind::LBrace)?.pos;
         let mut decls = Vec::new();
         while self.peek() != Kind::RBrace {
             decls.push(self.parse_decl()?);
         }
-        let end_pos = self.expect(Kind::RBrace)?.to;
-        Ok(Block {
-            decls,
-            scope,
-            begin_pos,
-            end_pos,
-        })
+        let end_pos = self.expect(Kind::RBrace)?.pos;
+        let pos = begin_pos.combine(end_pos);
+        Ok(Block { decls, scope, pos })
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt<'a>, Error> {
@@ -673,52 +621,48 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_print_stmt(&mut self) -> Result<Stmt<'a>, Error> {
-        let begin_pos = self.expect(Kind::Print)?.from;
+        let begin_pos = self.expect(Kind::Print)?.pos;
         let expr = self.parse_expr()?;
-        let end_pos = self.expect(Kind::Semi)?.to;
-        Ok(Stmt::Print {
-            expr,
-            begin_pos,
-            end_pos,
-        })
+        let end_pos = self.expect(Kind::Semi)?.pos;
+        let pos = begin_pos.combine(end_pos);
+        Ok(Stmt::Print { expr, pos })
     }
 
     fn parse_if_stmt(&mut self) -> Result<Stmt<'a>, Error> {
-        let begin_pos = self.expect(Kind::If)?.from;
+        let begin_pos = self.expect(Kind::If)?.pos;
         self.expect(Kind::LParen)?;
         let cond = self.parse_expr()?;
         self.expect(Kind::RParen)?;
         let true_stmt = Box::new(self.parse_stmt()?);
-        let false_stmt = if self.peek() == Kind::Else {
+        let (false_stmt, pos) = if self.peek() == Kind::Else {
             self.take();
-            Some(Box::new(self.parse_stmt()?))
+            let false_stmt = Box::new(self.parse_stmt()?);
+            let pos = begin_pos.combine(false_stmt.pos());
+            (Some(false_stmt), pos)
         } else {
-            None
+            (None, begin_pos.combine(true_stmt.pos()))
         };
         Ok(Stmt::If {
             cond,
             true_stmt,
             false_stmt,
-            begin_pos,
+            pos,
         })
     }
 
     fn parse_while_stmt(&mut self) -> Result<Stmt<'a>, Error> {
-        let begin_pos = self.expect(Kind::While)?.from;
+        let begin_pos = self.expect(Kind::While)?.pos;
         self.expect(Kind::LParen)?;
         let cond = self.parse_expr()?;
         self.expect(Kind::RParen)?;
         let body = Box::new(self.parse_stmt()?);
-        Ok(Stmt::While {
-            cond,
-            body,
-            begin_pos,
-        })
+        let pos = begin_pos.combine(body.pos());
+        Ok(Stmt::While { cond, body, pos })
     }
 
     fn parse_for_stmt(&mut self) -> Result<Stmt<'a>, Error> {
         let scope = self.next_scope();
-        let begin_pos = self.expect(Kind::For)?.from;
+        let begin_pos = self.expect(Kind::For)?.pos;
         self.expect(Kind::LParen)?;
         let init = match self.peek() {
             Kind::Var => ForInit::Var(Box::new(self.parse_var_decl()?)),
@@ -743,29 +687,27 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         };
         self.expect(Kind::RParen)?;
         let body = Box::new(self.parse_stmt()?);
+        let pos = begin_pos.combine(body.pos());
         Ok(Stmt::For {
             init,
             cond,
             incr,
             body,
             scope,
-            begin_pos,
+            pos,
         })
     }
 
     fn parse_return_stmt(&mut self) -> Result<Stmt<'a>, Error> {
-        let begin_pos = self.expect(Kind::Return)?.from;
+        let begin_pos = self.expect(Kind::Return)?.pos;
         let expr = if self.peek() == Kind::Semi {
             None
         } else {
             Some(self.parse_expr()?)
         };
-        let end_pos = self.expect(Kind::Semi)?.to;
-        Ok(Stmt::Return {
-            expr,
-            begin_pos,
-            end_pos,
-        })
+        let end_pos = self.expect(Kind::Semi)?.pos;
+        let pos = begin_pos.combine(end_pos);
+        Ok(Stmt::Return { expr, pos })
     }
 
     fn parse_expr(&mut self) -> Result<Expr<'a>, Error> {
@@ -796,14 +738,11 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     }
 
     fn parse_group_expr(&mut self, _: bool) -> Result<Expr<'a>, Error> {
-        let begin_pos = self.expect(Kind::LParen)?.from;
+        let begin_pos = self.expect(Kind::LParen)?.pos;
         let expr = Box::new(self.parse_expr()?);
-        let end_pos = self.expect(Kind::RParen)?.to;
-        Ok(Expr::Group {
-            expr,
-            begin_pos,
-            end_pos,
-        })
+        let end_pos = self.expect(Kind::RParen)?.pos;
+        let pos = begin_pos.combine(end_pos);
+        Ok(Expr::Group { expr, pos })
     }
 
     fn parse_call_expr(&mut self, callee: Expr<'a>, _: bool) -> Result<Expr<'a>, Error> {
@@ -818,11 +757,12 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
                 self.take();
             }
         }
-        let end_pos = self.expect(Kind::RParen)?.to;
+        let end_pos = self.expect(Kind::RParen)?.pos;
+        let pos = callee.pos().combine(end_pos);
         Ok(Expr::Call {
             callee: Box::new(callee),
             arguments,
-            end_pos,
+            pos,
         })
     }
 
@@ -1060,7 +1000,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
 
     fn error(&self, message: String) -> Error {
         let t = &self.tokens[self.next];
-        let position = self.lmap.position(t.from, t.to);
+        let position = self.lmap.position(t.pos);
         Error { position, message }
     }
 }

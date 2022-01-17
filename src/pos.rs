@@ -15,6 +15,8 @@ struct File {
 }
 
 impl LineMap {
+    /// Creates a new, empty LineMap. add_file, then add_line must be called
+    /// before translating positions.
     pub fn new() -> LineMap {
         LineMap {
             files: Vec::<File>::new(),
@@ -22,7 +24,7 @@ impl LineMap {
         }
     }
 
-    /// add_file adds a file with the given name and size to the line map.
+    /// Adds a file with the given name and size to the line map.
     ///
     /// add_file returns the base offset of this file. Pos values may be
     /// constructed by adding this base offset to an offset within the file.
@@ -41,7 +43,7 @@ impl LineMap {
         base
     }
 
-    /// add_line adds the offset of the beginning of a line within the
+    /// Adds the offset of the beginning of a line within the
     /// current file (from the most recent call to add_file).
     pub fn add_line(&mut self, offset: usize) {
         let file = self.files.last_mut().unwrap();
@@ -49,28 +51,31 @@ impl LineMap {
         file.lines.push(offset);
     }
 
-    pub fn position(&self, from: Pos, to: Pos) -> Position {
-        let find_file = |pos: Pos| {
-            let i = self.files.partition_point(|f| f.offset <= pos.offset);
+    /// Expands a Pos (which only contains offsets in a LineMap) into a
+    /// human-readable Position. Position takes more space, so this should only
+    /// be done when needed.
+    pub fn position(&self, p: Pos) -> Position {
+        let find_file = |offset: usize| {
+            let i = self.files.partition_point(|f| f.offset <= offset);
             &self.files[i - 1]
         };
-        let from_file = find_file(from);
-        let to_file = find_file(to);
+        let from_file = find_file(p.begin);
+        let to_file = find_file(p.end);
         assert!(from_file.offset == to_file.offset);
 
-        let find_line_and_col = |pos: Pos| {
-            let line = from_file.lines.partition_point(|&l| l <= pos.offset) - 1;
-            let col = pos.offset - from_file.lines[line];
+        let find_line_and_col = |offset: usize| {
+            let line = from_file.lines.partition_point(|&l| l <= offset) - 1;
+            let col = offset - from_file.lines[line];
             (line + 1, col + 1) // Count from 1, not 0.
         };
-        let (from_line, from_col) = find_line_and_col(from);
-        let (to_line, to_col) = find_line_and_col(to);
+        let (begin_line, begin_col) = find_line_and_col(p.begin);
+        let (end_line, end_col) = find_line_and_col(p.end);
         Position {
             filename: from_file.filename.clone(),
-            from_line,
-            from_col,
-            to_line,
-            to_col,
+            begin_line,
+            begin_col,
+            end_line,
+            end_col,
         }
     }
 
@@ -81,46 +86,66 @@ impl LineMap {
         };
         Position {
             filename,
-            from_line: 0,
-            from_col: 0,
-            to_line: 0,
-            to_col: 0,
+            begin_line: 0,
+            begin_col: 0,
+            end_line: 0,
+            end_col: 0,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Pos {
-    pub offset: usize,
+    pub begin: usize,
+    pub end: usize,
+}
+
+impl Pos {
+    pub fn combine(self, other: Pos) -> Pos {
+        Pos {
+            begin: self.begin,
+            end: other.end,
+        }
+    }
+}
+
+impl Default for Pos {
+    fn default() -> Pos {
+        Pos { begin: 0, end: 0 }
+    }
 }
 
 #[derive(Debug)]
 pub struct Position {
     pub filename: String,
-    pub from_line: usize,
-    pub from_col: usize,
-    pub to_line: usize,
-    pub to_col: usize,
+    pub begin_line: usize,
+    pub begin_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
 }
 
 impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.from_line == 0 {
+        if self.begin_line == 0 {
             write!(f, "{}", self.filename)
-        } else if self.from_col == 0 {
-            if self.from_line == self.to_line {
-                write!(f, "{}:{}", self.filename, self.from_line)
+        } else if self.begin_col == 0 {
+            if self.begin_line == self.end_line {
+                write!(f, "{}:{}", self.filename, self.begin_line)
             } else {
-                write!(f, "{}:{}-{}", self.filename, self.from_line, self.to_line)
+                write!(f, "{}:{}-{}", self.filename, self.begin_line, self.end_line)
             }
         } else {
-            if self.from_line == self.to_line && self.from_col == self.to_col {
-                write!(f, "{}:{}.{}", self.filename, self.from_line, self.from_col)
+            if self.begin_line == self.end_line && self.begin_col == self.end_col {
+                write!(
+                    f,
+                    "{}:{}.{}",
+                    self.filename, self.begin_line, self.begin_col
+                )
             } else {
                 write!(
                     f,
                     "{}:{}.{}-{}.{}",
-                    self.filename, self.from_line, self.from_col, self.to_line, self.to_col
+                    self.filename, self.begin_line, self.begin_col, self.end_line, self.end_col
                 )
             }
         }
