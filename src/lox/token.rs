@@ -251,9 +251,9 @@ impl<'a, 'b> Lexer<'a, 'b> {
 
             // Unrecognized character or non-UTF-8 byte.
             if b.is_ascii() {
-                return self.error(format!("unexpected character: '{}'", b));
+                return self.error(format!("unexpected character '{}'", b as char));
             } else {
-                return self.error(format!("unexpected non-ascii character: {}", b));
+                return self.error(format!("unexpected non-ascii byte {}", b));
             }
         }
 

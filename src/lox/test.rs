@@ -37,30 +37,9 @@ fn interpret_test() -> Result<(), Box<dyn std::error::Error>> {
         }
         did_match = true;
 
-        let mut lmap = LineMap::new();
         let data = fs::read(&path).map_err(|err| Error::wrap(path, &err))?;
-        let tokens = token::lex(&path, &data, &mut lmap).map_err(|err| Error::wrap(path, &err))?;
-        let ast = syntax::parse(&tokens, &lmap).map_err(|err| Error::wrap(path, &err))?;
-        let scopes = scope::resolve(&ast, &lmap).map_err(|err| Error::wrap(path, &err))?;
-        let pkg = compile::compile(&ast, &scopes, &lmap).map_err(|err| Error::wrap(path, &err))?;
-
-        let mut got = Vec::new();
-        let mut interp = Interpreter::new(&mut got);
-        let f = pkg
-            .function_by_name("·init")
-            .ok_or_else(|| Error::with_message(path, String::from("·init function not found")))?;
-        interp.interpret(f).map_err(|err| Error::wrap(path, &err))?;
-        let got_str = str::from_utf8(&got)
-            .map_err(|err| Error::wrap(path, &err))?
-            .trim();
-        let want_str =
-            expected_output(str::from_utf8(&data).map_err(|err| Error::wrap(path, &err))?);
-        if got_str != want_str {
-            return Err(Box::new(Error::with_message(
-                path,
-                format!("got:\n{}\n\nwant:\n{}", got_str, want_str),
-            )));
-        }
+        let res = try_interpret(path, &data);
+        check_result(path, &data, res)?;
     }
     if !did_match {
         Err(Box::new(Error::with_message(
@@ -72,25 +51,86 @@ fn interpret_test() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn expected_output(mut data: &str) -> String {
-    const MARKER: &'static str = "// Output:";
-    let mut buf = String::new();
-    let mut sep = "";
-    loop {
-        match data.find(MARKER) {
-            None => return buf,
-            Some(com_idx) => {
-                let begin_idx = com_idx + MARKER.len();
-                let end_idx = match data[begin_idx..].find('\n') {
-                    None => data.len(),
-                    Some(i) => begin_idx + i,
-                };
-                buf.push_str(sep);
-                sep = "\n";
-                buf.push_str(data[begin_idx..end_idx].trim());
-                data = &data[end_idx..];
+fn try_interpret(path: &str, data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut lmap = LineMap::new();
+    let tokens = token::lex(path, data, &mut lmap)?;
+    let ast = syntax::parse(&tokens, &lmap)?;
+    let scopes = scope::resolve(&ast, &lmap)?;
+    let pkg = compile::compile(&ast, &scopes, &lmap)?;
+
+    let mut output = Vec::new();
+    let mut interp = Interpreter::new(&mut output);
+    let f = pkg
+        .function_by_name("·init")
+        .ok_or_else(|| Error::with_message(path, String::from("·init function not found")))?;
+    interp.interpret(f)?;
+    Ok(output)
+}
+
+fn check_result(
+    filename: &str,
+    data: &[u8],
+    res: Result<Vec<u8>, Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data_str = str::from_utf8(data)?;
+    let error_re = Regex::new(r"(?m)// Error:\s*(.*)$").unwrap();
+    if let Some(m) = error_re.captures(data_str) {
+        let begin = m.get(0).unwrap().start();
+        let line = data[..begin]
+            .iter()
+            .fold(1, |c, &b| c + (b == b'\n') as usize);
+        let message = m.get(1).unwrap().as_str();
+        let want_re_src = format!(
+            r"^{}:{}[.-][^:]*:.*({}).*$",
+            regex::escape(filename),
+            line,
+            regex::escape(message)
+        );
+        let want_re = Regex::new(&want_re_src).unwrap();
+        return match res {
+            Ok(_) => Err(Box::new(Error::with_message(
+                filename,
+                String::from("unexpected success"),
+            ))),
+            Err(err) => {
+                let got = format!("{}", err);
+                if want_re.is_match(&got) {
+                    Ok(())
+                } else {
+                    Err(Box::new(Error::with_message(
+                        filename,
+                        format!(
+                            "got error '{}'; want error on line {} containing '{}'",
+                            got, line, message
+                        ),
+                    )))
+                }
             }
+        };
+    }
+
+    let got = match res {
+        Ok(ref output) => str::from_utf8(output)?.trim(),
+        Err(_) => {
+            return res.map(|_| ());
         }
+    };
+
+    let want_re = Regex::new(r"(?m)// Output:\s*(.*)\s*$").unwrap();
+    let mut want = String::new();
+    let mut sep = "";
+    for m in want_re.captures_iter(data_str) {
+        want += sep;
+        sep = "\n";
+        want += m.get(1).unwrap().as_str();
+    }
+    if got == want {
+        Ok(())
+    } else {
+        Err(Box::new(Error::with_message(
+            filename,
+            format!("got:\n{}\n\nwant:\n{}", got, want),
+        )))
     }
 }
 
