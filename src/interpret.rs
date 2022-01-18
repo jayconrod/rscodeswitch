@@ -3,9 +3,8 @@ use crate::heap::{Set, HEAP};
 use crate::inst;
 use crate::nanbox;
 use crate::package::{Closure, Function, Object, PropertyKind, Type};
+use crate::pos::{Error, Position};
 
-use std::error;
-use std::fmt;
 use std::io::Write;
 use std::mem;
 
@@ -72,9 +71,11 @@ impl<'a> Interpreter<'a> {
 
             // return_errorf! stops execution, formats an error, and returns it.
             macro_rules! return_errorf {
-                ($($x:expr),*) => {
-                    return Err(Error{message: format!($($x,)*)})
-                };
+                ($($x:expr),*) => {{
+                    let position = Position::from("<unknown>");
+                    let message = format!($($x,)*);
+                    return Err(Error{position, message})
+                }};
             }
 
             // pop! removes and returns the value on top of the stack.
@@ -975,6 +976,7 @@ impl<'a> Interpreter<'a> {
             }
         };
         r.map_err(|_| Error {
+            position: Position::from("<unknown>"),
             message: String::from("error printing value"),
         })
     }
@@ -995,18 +997,3 @@ impl Stack {
         &mut self.data[0] as *mut u8 as usize + self.data.len()
     }
 }
-
-#[derive(Debug)]
-pub struct Error {
-    // TODO: include source locations in error messages. This requires some
-    // mechanism to map instruction addresses to source locations.
-    message: String,
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.message.fmt(f)
-    }
-}
-
-impl error::Error for Error {}

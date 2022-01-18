@@ -1,4 +1,5 @@
-use std::fmt;
+use std::fmt::{self, Display, Formatter};
+use std::path::{Path, PathBuf};
 
 /// LineMap translates raw byte offsets (Pos) into human-readable file
 /// locations (Position). This works by keeping an index of byte offsets
@@ -10,7 +11,7 @@ pub struct LineMap {
 
 struct File {
     offset: usize,
-    filename: String,
+    path: PathBuf,
     lines: Vec<usize>,
 }
 
@@ -31,11 +32,11 @@ impl LineMap {
     ///
     /// After calling add_file, add_line may be called with the offset of
     /// the beginning of each line, in order, not including the first line.
-    pub fn add_file(&mut self, filename: &str, size: usize) -> usize {
+    pub fn add_file(&mut self, filename: &Path, size: usize) -> usize {
         let base = self.base;
         self.files.push(File {
             offset: base,
-            filename: String::from(filename),
+            path: PathBuf::from(filename),
             lines: Vec::new(),
         });
         self.base += size;
@@ -71,7 +72,7 @@ impl LineMap {
         let (begin_line, begin_col) = find_line_and_col(p.begin);
         let (end_line, end_col) = find_line_and_col(p.end);
         Position {
-            filename: from_file.filename.clone(),
+            path: from_file.path.clone(),
             begin_line,
             begin_col,
             end_line,
@@ -80,12 +81,12 @@ impl LineMap {
     }
 
     pub fn first_file(&self) -> Position {
-        let filename = match self.files.first() {
-            Some(f) => f.filename.clone(),
-            None => String::from(""),
+        let path = match self.files.first() {
+            Some(f) => f.path.clone(),
+            None => PathBuf::from(""),
         };
         Position {
-            filename,
+            path,
             begin_line: 0,
             begin_col: 0,
             end_line: 0,
@@ -117,35 +118,50 @@ impl Default for Pos {
 
 #[derive(Debug)]
 pub struct Position {
-    pub filename: String,
+    pub path: PathBuf,
     pub begin_line: usize,
     pub begin_col: usize,
     pub end_line: usize,
     pub end_col: usize,
 }
 
-impl fmt::Display for Position {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl From<&str> for Position {
+    fn from(path: &str) -> Position {
+        Position::from(PathBuf::from(path).as_path())
+    }
+}
+
+impl From<&Path> for Position {
+    fn from(path: &Path) -> Position {
+        Position {
+            path: PathBuf::from(path),
+            begin_line: 0,
+            begin_col: 0,
+            end_line: 0,
+            end_col: 0,
+        }
+    }
+}
+
+impl Display for Position {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let path = self.path.to_string_lossy();
         if self.begin_line == 0 {
-            write!(f, "{}", self.filename)
+            write!(f, "{}", path)
         } else if self.begin_col == 0 {
             if self.begin_line == self.end_line {
-                write!(f, "{}:{}", self.filename, self.begin_line)
+                write!(f, "{}:{}", path, self.begin_line)
             } else {
-                write!(f, "{}:{}-{}", self.filename, self.begin_line, self.end_line)
+                write!(f, "{}:{}-{}", path, self.begin_line, self.end_line)
             }
         } else {
             if self.begin_line == self.end_line && self.begin_col == self.end_col {
-                write!(
-                    f,
-                    "{}:{}.{}",
-                    self.filename, self.begin_line, self.begin_col
-                )
+                write!(f, "{}:{}.{}", path, self.begin_line, self.begin_col)
             } else {
                 write!(
                     f,
                     "{}:{}.{}-{}.{}",
-                    self.filename, self.begin_line, self.begin_col, self.end_line, self.end_col
+                    path, self.begin_line, self.begin_col, self.end_line, self.end_col
                 )
             }
         }
@@ -159,16 +175,55 @@ pub struct Error {
 }
 
 impl Error {
-    pub fn wrap(position: Position, err: &dyn std::error::Error) -> Error {
+    pub fn new(position: Position, message: &str) -> Error {
+        Error {
+            position,
+            message: String::from(message),
+        }
+    }
+
+    pub fn wrap(position: Position, err: &dyn Display) -> Error {
         let message = format!("{}", err);
         Error { position, message }
     }
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{}: {}", self.position, self.message)
     }
 }
 
 impl std::error::Error for Error {}
+
+#[derive(Debug)]
+pub struct ErrorList(pub Vec<Error>);
+
+impl ErrorList {
+    pub fn new(position: Position, message: &str) -> ErrorList {
+        ErrorList::from(Error::new(position, message))
+    }
+
+    pub fn wrap(position: Position, err: &dyn Display) -> ErrorList {
+        ErrorList::from(Error::wrap(position, err))
+    }
+}
+
+impl From<Error> for ErrorList {
+    fn from(err: Error) -> ErrorList {
+        ErrorList(vec![err])
+    }
+}
+
+impl Display for ErrorList {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let mut sep = "";
+        for err in &self.0 {
+            write!(f, "{}{}", sep, err)?;
+            sep = "\n";
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ErrorList {}

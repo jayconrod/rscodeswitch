@@ -1,174 +1,146 @@
 use crate::interpret::Interpreter;
 use crate::lox::compile;
-use crate::lox::scope;
-use crate::lox::syntax;
-use crate::lox::token;
-use crate::pos::LineMap;
+use crate::pos::{ErrorList, Position};
 
 use std::env;
-use std::error;
-use std::fmt::{self, Debug, Display, Formatter};
+use std::fmt::Display;
 use std::fs;
+use std::path::Path;
 use std::str;
 
+use lazy_regex::regex;
 use regex::Regex;
 
 // TODO: also need a convenient way to test for errors.
 
 #[test]
-fn interpret_test() -> Result<(), Box<dyn std::error::Error>> {
+fn interpret_test() {
+    fn print_error<T: Display>(err: T) -> ! {
+        eprintln!("{}", err);
+        panic!("unexpected error")
+    }
     let filter_re_opt = match env::var("CODESWITCH_TEST_FILTER") {
-        Ok(s) => Some(Regex::new(&s)?),
+        Ok(s) => Some(Regex::new(&s).unwrap()),
         _ => None,
     };
 
     let mut did_match = false;
-    for fi in fs::read_dir("testdata/lox").map_err(|err| Box::new(err))? {
-        let fi = fi.map_err(|err| Box::new(err))?;
-        let path_buf = fi.path();
-        let path = match path_buf.to_str() {
-            Some(path) if path.ends_with(".lox") => path,
-            _ => continue,
+    for fi in fs::read_dir("testdata/lox").map_err(print_error).unwrap() {
+        let fi = fi.map_err(print_error).unwrap();
+        let path = fi.path();
+        let path_str = match path.to_str() {
+            Some(s) => s,
+            None => continue,
         };
         if let Some(ref filter_re) = filter_re_opt {
-            if !filter_re.is_match(path) {
+            if !filter_re.is_match(path_str) {
                 continue;
             }
         }
         did_match = true;
 
-        let data = fs::read(&path).map_err(|err| Error::wrap(path, &err))?;
-        let res = try_interpret(path, &data);
-        check_result(path, &data, res)?;
+        let res = try_compile_and_interpret(&path);
+        let data = fs::read(&path).map_err(print_error).unwrap();
+        check_result(&path, &data, res)
+            .map_err(print_error)
+            .unwrap();
     }
     if !did_match {
-        Err(Box::new(Error::with_message(
-            "",
-            String::from("no tests matched pattern"),
-        )))
-    } else {
-        Ok(())
+        panic!("no tests matched pattern");
     }
 }
 
-fn try_interpret(path: &str, data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut lmap = LineMap::new();
-    let tokens = token::lex(path, data, &mut lmap)?;
-    let ast = syntax::parse(&tokens, &lmap)?;
-    let scopes = scope::resolve(&ast, &lmap)?;
-    let pkg = compile::compile(&ast, &scopes, &lmap)?;
-
+fn try_compile_and_interpret(path: &Path) -> Result<Vec<u8>, ErrorList> {
+    let package = compile::compile_file(path)?;
     let mut output = Vec::new();
     let mut interp = Interpreter::new(&mut output);
-    let f = pkg
-        .function_by_name("·init")
-        .ok_or_else(|| Error::with_message(path, String::from("·init function not found")))?;
-    interp.interpret(f)?;
-    Ok(output)
+    let f = package.function_by_name("·init").ok_or_else(|| {
+        let position = Position::from(path);
+        ErrorList::new(position, "·init function not found")
+    })?;
+    match interp.interpret(f) {
+        Ok(_) => Ok(output),
+        Err(err) => Err(ErrorList::from(err)),
+    }
 }
 
 fn check_result(
-    filename: &str,
+    path: &Path,
     data: &[u8],
-    res: Result<Vec<u8>, Box<dyn std::error::Error>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let data_str = str::from_utf8(data)?;
-    let error_re = Regex::new(r"(?m)// Error:\s*(.*)$").unwrap();
-    if let Some(m) = error_re.captures(data_str) {
-        let begin = m.get(0).unwrap().start();
-        let line = data[..begin]
-            .iter()
-            .fold(1, |c, &b| c + (b == b'\n') as usize);
-        let message = m.get(1).unwrap().as_str();
-        let want_re_src = format!(
-            r"^{}:{}[.-][^:]*:.*({}).*$",
-            regex::escape(filename),
-            line,
-            regex::escape(message)
-        );
-        let want_re = Regex::new(&want_re_src).unwrap();
-        return match res {
-            Ok(_) => Err(Box::new(Error::with_message(
-                filename,
-                String::from("unexpected success"),
-            ))),
-            Err(err) => {
-                let got = format!("{}", err);
-                if want_re.is_match(&got) {
-                    Ok(())
-                } else {
-                    Err(Box::new(Error::with_message(
-                        filename,
-                        format!(
-                            "got error '{}'; want error on line {} containing '{}'",
-                            got, line, message
-                        ),
-                    )))
-                }
+    res: Result<Vec<u8>, ErrorList>,
+) -> Result<(), ErrorList> {
+    let want = parse_want(path, data)?;
+    match (res, want) {
+        (Ok(_), Want::Error(want_text)) => Err(ErrorList::new(
+            Position::from(path),
+            &format!(
+                "unexpected success; expected error containing '{}'",
+                want_text
+            ),
+        )),
+        (Err(errs), Want::Output(_)) => Err(ErrorList::new(
+            Position::from(path),
+            &format!("unexpected error: {}", errs),
+        )),
+        (Err(errs), Want::Error(want_text)) => {
+            let pos_re_src = format!(r"(?m)^{}:[^:]*:\s*", regex::escape(path.to_str().unwrap()));
+            let pos_re = Regex::new(&pos_re_src).unwrap();
+            let got_text_raw = errs.to_string();
+            let got_text = pos_re.replace_all(&got_text_raw, "");
+            if got_text == want_text {
+                Ok(())
+            } else {
+                Err(ErrorList::new(
+                    Position::from(path),
+                    &format!("got errors:\n{}\n\nwant errors:\n{}", got_text, want_text),
+                ))
             }
-        };
-    }
-
-    let got = match res {
-        Ok(ref output) => str::from_utf8(output)?.trim(),
-        Err(_) => {
-            return res.map(|_| ());
         }
-    };
+        (Ok(got), Want::Output(want_text)) => {
+            let got_text = str::from_utf8(&got)
+                .map_err(|err| ErrorList::wrap(Position::from(path), &err))
+                .map(|s| s.trim())?;
+            if got_text == want_text {
+                Ok(())
+            } else {
+                Err(ErrorList::new(
+                    Position::from(path),
+                    &format!("got output:\n{}\n\nwant:\n{}", got_text, want_text),
+                ))
+            }
+        }
+    }
+}
 
-    let want_re = Regex::new(r"(?m)// Output:\s*(.*)\s*$").unwrap();
-    let mut want = String::new();
+enum Want {
+    Output(String),
+    Error(String),
+}
+
+fn parse_want(path: &Path, data: &[u8]) -> Result<Want, ErrorList> {
+    let re = regex!(r"(?m)// (Output|Error):\s*(.*)$");
+    let data_str =
+        str::from_utf8(data).map_err(|err| ErrorList::wrap(Position::from(path), &err))?;
+    let mut first_label: Option<String> = None;
+    let mut text = String::new();
     let mut sep = "";
-    for m in want_re.captures_iter(data_str) {
-        want += sep;
+    for m in re.captures_iter(data_str) {
+        if let Some(first_label) = &first_label {
+            if first_label != m.get(1).unwrap().as_str() {
+                return Err(ErrorList::wrap(
+                    Position::from(path),
+                    &String::from("test may check 'Output' or 'Error', not both"),
+                ));
+            }
+        } else {
+            first_label = Some(String::from(m.get(1).unwrap().as_str()))
+        }
+        text.push_str(sep);
         sep = "\n";
-        want += m.get(1).unwrap().as_str();
+        text.push_str(m.get(2).unwrap().as_str());
     }
-    if got == want {
-        Ok(())
-    } else {
-        Err(Box::new(Error::with_message(
-            filename,
-            format!("got:\n{}\n\nwant:\n{}", got, want),
-        )))
+    match first_label {
+        Some(s) if s == "Error" => Ok(Want::Error(text)),
+        _ => Ok(Want::Output(text)),
     }
 }
-
-struct Error {
-    path: String,
-    message: String,
-}
-
-impl Error {
-    fn with_message(path: &str, message: String) -> Error {
-        Error {
-            path: String::from(path),
-            message: message,
-        }
-    }
-    fn wrap(path: &str, err: &dyn fmt::Display) -> Error {
-        Error {
-            path: String::from(path),
-            message: format!("{}", err),
-        }
-    }
-}
-
-impl Debug for Error {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Error{{ {} }}", self)
-    }
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let mut sep = "";
-        if !self.path.is_empty() {
-            f.write_str(&self.path)?;
-            sep = ": ";
-        }
-        write!(f, "{}{}", sep, self.message)
-    }
-}
-
-impl error::Error for Error {}

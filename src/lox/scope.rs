@@ -1,6 +1,6 @@
 use crate::lox::syntax::{Block, Decl, Expr, ForInit, LValue, Param, Program, Stmt};
 use crate::lox::token::Token;
-use crate::pos::{Error, LineMap, Pos};
+use crate::pos::{Error, ErrorList, LineMap, Pos};
 
 use std::collections::HashMap;
 
@@ -185,10 +185,14 @@ pub enum VarKind {
     Capture,
 }
 
-pub fn resolve<'a>(prog: &Program<'a>, lmap: &LineMap) -> Result<ScopeSet<'a>, Error> {
+pub fn resolve<'a>(prog: &Program<'a>, lmap: &LineMap) -> Result<ScopeSet<'a>, ErrorList> {
     let mut r = Resolver::new(lmap);
-    r.resolve_program(prog)?;
-    Ok(r.ss)
+    r.resolve_program(prog);
+    if r.errors.is_empty() {
+        Ok(r.ss)
+    } else {
+        Err(ErrorList(r.errors))
+    }
 }
 
 /// Resolver traverses a program's syntax tree and builds a ScopeSet containing
@@ -197,6 +201,7 @@ struct Resolver<'a, 'b> {
     lmap: &'b LineMap,
     ss: ScopeSet<'a>,
     scope_stack: Vec<usize>,
+    errors: Vec<Error>,
 }
 
 impl<'a, 'b> Resolver<'a, 'b> {
@@ -205,10 +210,11 @@ impl<'a, 'b> Resolver<'a, 'b> {
             lmap,
             ss: ScopeSet::new(),
             scope_stack: Vec::new(),
+            errors: Vec::new(),
         }
     }
 
-    fn resolve_program(&mut self, prog: &Program<'a>) -> Result<(), Error> {
+    fn resolve_program(&mut self, prog: &Program<'a>) {
         self.enter(prog.scope, ScopeKind::Global);
 
         // Declare global variables before resolving anything. As a special
@@ -218,27 +224,26 @@ impl<'a, 'b> Resolver<'a, 'b> {
             let pos = decl.pos();
             match decl {
                 Decl::Var { name, var, .. } => {
-                    self.declare(*var, name.text, VarKind::Global, pos)?;
+                    self.declare(*var, name.text, VarKind::Global, pos);
                 }
                 Decl::Function { name, var, .. } => {
-                    self.declare(*var, name.text, VarKind::Global, pos)?;
+                    self.declare(*var, name.text, VarKind::Global, pos);
                 }
                 Decl::Class { name, var, .. } => {
-                    self.declare(*var, name.text, VarKind::Global, pos)?;
+                    self.declare(*var, name.text, VarKind::Global, pos);
                 }
                 _ => (),
             };
         }
 
         for decl in &prog.decls {
-            self.resolve_decl(decl)?;
+            self.resolve_decl(decl);
         }
 
         self.leave();
-        Ok(())
     }
 
-    fn resolve_decl(&mut self, decl: &Decl<'a>) -> Result<(), Error> {
+    fn resolve_decl(&mut self, decl: &Decl<'a>) {
         let scope_kind = self.ss.scopes[*self.scope_stack.last().unwrap()].kind;
         match decl {
             Decl::Var {
@@ -249,16 +254,15 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 ..
             } => {
                 if let Some(init) = init {
-                    self.resolve_expr(init)?;
+                    self.resolve_expr(init);
                 }
                 match scope_kind {
                     ScopeKind::Global => (), // already declared
                     ScopeKind::Local => {
-                        self.declare(*var, name.text, VarKind::Local, *pos)?;
+                        self.declare(*var, name.text, VarKind::Local, *pos);
                     }
                     ScopeKind::Function | ScopeKind::Class => unreachable!(),
                 }
-                Ok(())
             }
             Decl::Function {
                 name,
@@ -282,7 +286,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                     }
                     ScopeKind::Local => {
                         // Function declared in the body of another function.
-                        self.declare(*var, name.text, VarKind::Local, *pos)?;
+                        self.declare(*var, name.text, VarKind::Local, *pos);
                     }
                     ScopeKind::Function => {
                         // ScopeKind::Function is for the parameter list.
@@ -292,7 +296,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 }
                 self.enter(*arg_scope, ScopeKind::Function);
                 if let Some(this_var) = this_var {
-                    self.declare(*this_var, "this", VarKind::Argument, *pos)?;
+                    self.declare(*this_var, "this", VarKind::Argument, *pos);
                 }
                 for param in params {
                     self.declare(
@@ -300,16 +304,15 @@ impl<'a, 'b> Resolver<'a, 'b> {
                         param.name.text,
                         VarKind::Argument,
                         param.name.pos,
-                    )?;
+                    );
                 }
                 self.enter(*body_scope, ScopeKind::Local);
                 for decl in &body.decls {
-                    self.resolve_decl(decl)?;
+                    self.resolve_decl(decl);
                 }
                 self.leave();
                 self.leave();
                 self.shift_captured_params_in_function(params, body, *body_scope);
-                Ok(())
             }
             Decl::Class {
                 name,
@@ -323,36 +326,34 @@ impl<'a, 'b> Resolver<'a, 'b> {
             } => {
                 if let Some(base) = base {
                     let base_var_use = base_var_use.unwrap();
-                    self.resolve(*base, base_var_use)?;
+                    self.resolve(*base, base_var_use);
                 }
                 match scope_kind {
                     ScopeKind::Global => (), // already declared
                     ScopeKind::Function | ScopeKind::Class => unreachable!(),
                     ScopeKind::Local => {
-                        self.declare(*var, name.text, VarKind::Local, *pos)?;
+                        self.declare(*var, name.text, VarKind::Local, *pos);
                     }
                 }
                 self.enter(*scope, ScopeKind::Class);
                 for method in methods {
-                    self.resolve_decl(method)?;
+                    self.resolve_decl(method);
                 }
                 self.leave();
-                Ok(())
             }
             Decl::Stmt(stmt) => self.resolve_stmt(stmt),
         }
     }
 
-    fn resolve_stmt(&mut self, stmt: &Stmt<'a>) -> Result<(), Error> {
+    fn resolve_stmt(&mut self, stmt: &Stmt<'a>) {
         match stmt {
             Stmt::Expr(expr) => self.resolve_expr(expr),
             Stmt::Block(b) => {
                 self.enter(b.scope, ScopeKind::Local);
                 for decl in &b.decls {
-                    self.resolve_decl(decl)?;
+                    self.resolve_decl(decl);
                 }
                 self.leave();
-                Ok(())
             }
             Stmt::Print { expr, .. } => self.resolve_expr(expr),
             Stmt::If {
@@ -361,16 +362,15 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 false_stmt,
                 ..
             } => {
-                self.resolve_expr(cond)?;
-                self.resolve_stmt(true_stmt)?;
+                self.resolve_expr(cond);
+                self.resolve_stmt(true_stmt);
                 if let Some(false_stmt) = false_stmt {
-                    self.resolve_stmt(false_stmt)?;
+                    self.resolve_stmt(false_stmt);
                 }
-                Ok(())
             }
             Stmt::While { cond, body, .. } => {
-                self.resolve_expr(cond)?;
-                self.resolve_stmt(body)
+                self.resolve_expr(cond);
+                self.resolve_stmt(body);
             }
             Stmt::For {
                 init,
@@ -383,33 +383,31 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 self.enter(*scope, ScopeKind::Local);
                 match init {
                     ForInit::Var(decl) => {
-                        self.resolve_decl(decl)?;
+                        self.resolve_decl(decl);
                     }
                     ForInit::Expr(expr) => {
-                        self.resolve_expr(expr)?;
+                        self.resolve_expr(expr);
                     }
                     _ => (),
                 };
                 if let Some(cond) = cond {
-                    self.resolve_expr(cond)?;
+                    self.resolve_expr(cond);
                 }
                 if let Some(incr) = incr {
-                    self.resolve_expr(incr)?;
+                    self.resolve_expr(incr);
                 }
-                self.resolve_stmt(body)?;
+                self.resolve_stmt(body);
                 self.leave();
-                Ok(())
             }
             Stmt::Return { expr, .. } => {
                 if let Some(expr) = expr {
-                    self.resolve_expr(expr)?;
+                    self.resolve_expr(expr);
                 }
-                Ok(())
             }
         }
     }
 
-    fn resolve_expr(&mut self, expr: &Expr<'a>) -> Result<(), Error> {
+    fn resolve_expr(&mut self, expr: &Expr<'a>) {
         match expr {
             Expr::Var { name, var_use, .. } => self.resolve(*name, *var_use),
             Expr::This { token, var_use, .. } => self.resolve(*token, *var_use),
@@ -417,13 +415,15 @@ impl<'a, 'b> Resolver<'a, 'b> {
             Expr::Call {
                 callee, arguments, ..
             } => {
-                self.resolve_expr(callee)?;
-                arguments.iter().try_for_each(|arg| self.resolve_expr(arg))
+                self.resolve_expr(callee);
+                for arg in arguments {
+                    self.resolve_expr(arg);
+                }
             }
             Expr::Unary(_, expr) => self.resolve_expr(expr),
             Expr::Binary(l, _, r) => {
-                self.resolve_expr(l)?;
-                self.resolve_expr(r)
+                self.resolve_expr(l);
+                self.resolve_expr(r);
             }
             Expr::Property { receiver, .. } => self.resolve_expr(receiver),
             Expr::Super { token, var_use, .. } => {
@@ -434,14 +434,14 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 self.resolve(t, *var_use)
             }
             Expr::Assign(l, r) => {
-                self.resolve_lvalue(l)?;
-                self.resolve_expr(r)
+                self.resolve_lvalue(l);
+                self.resolve_expr(r);
             }
-            _ => Ok(()),
+            _ => (),
         }
     }
 
-    fn resolve_lvalue(&mut self, lvalue: &LValue<'a>) -> Result<(), Error> {
+    fn resolve_lvalue(&mut self, lvalue: &LValue<'a>) {
         match lvalue {
             LValue::Var { name, var_use, .. } => self.resolve(*name, *var_use),
             LValue::Property { receiver, .. } => self.resolve_expr(receiver),
@@ -473,17 +473,11 @@ impl<'a, 'b> Resolver<'a, 'b> {
     /// declare creates a new variable within the scope on top of the
     /// scope stack. declare returns an error if something is already defined
     /// in this scope with the same name.
-    fn declare(
-        &mut self,
-        var_id: usize,
-        name: &'a str,
-        kind: VarKind,
-        pos: Pos,
-    ) -> Result<(), Error> {
+    fn declare(&mut self, var_id: usize, name: &'a str, kind: VarKind, pos: Pos) {
         let scope = &mut self.ss.scopes[*self.scope_stack.last().unwrap()];
         if let Some(prev) = scope.vars.get(name) {
             let prev_var = &self.ss.vars[*prev];
-            return Err(Error {
+            self.errors.push(Error {
                 position: self.lmap.position(pos),
                 message: format!(
                     "duplicate definition of {}; previous definition at {}",
@@ -491,6 +485,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                     self.lmap.position(prev_var.pos),
                 ),
             });
+            return;
         }
         let slot = scope.next_slot();
         let too_many_err = match kind {
@@ -500,10 +495,11 @@ impl<'a, 'b> Resolver<'a, 'b> {
             _ => None,
         };
         if let Some(msg) = too_many_err {
-            return Err(Error {
+            self.errors.push(Error {
                 position: self.lmap.position(pos),
                 message: String::from(msg),
             });
+            return;
         }
 
         scope.vars.insert(name, var_id);
@@ -514,7 +510,6 @@ impl<'a, 'b> Resolver<'a, 'b> {
             pos,
         };
         *self.ss.ensure_var(var_id) = var;
-        Ok(())
     }
 
     /// resolve looks up the variable with the given name in the scopes on the
@@ -522,7 +517,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
     /// variable is not available within the referenced scope, it is captured
     /// (see capture). resolve/ returns an error if there's no such variable or
     /// if it can't be used.
-    fn resolve(&mut self, name: Token<'a>, var_use: usize) -> Result<(), Error> {
+    fn resolve(&mut self, name: Token<'a>, var_use: usize) {
         let mut may_need_capture = false;
         let mut stack_def_index = self.scope_stack.len() - 1;
         loop {
@@ -535,7 +530,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 if may_need_capture {
                     self.capture(var, var_use, stack_def_index);
                 }
-                return Ok(());
+                return;
             }
             if stack_def_index == 0 {
                 break;
@@ -545,10 +540,10 @@ impl<'a, 'b> Resolver<'a, 'b> {
             }
             stack_def_index -= 1;
         }
-        Err(Error {
+        self.errors.push(Error {
             position: self.lmap.position(name.pos),
             message: format!("undefined symbol: {}", name.text),
-        })
+        });
     }
 
     fn capture(&mut self, var: usize, var_use: usize, stack_def_index: usize) {

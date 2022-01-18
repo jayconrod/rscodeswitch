@@ -1,0 +1,7 @@
+// missing semicolon
+var x = 12 // Error: expected ;, found 'nil'
+nil;
+
+// unclosed paren
+(x // Error: expected ), found 'nil'
+nil;

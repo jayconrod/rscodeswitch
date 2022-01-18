@@ -1,8 +1,9 @@
 use crate::lox::token::{Kind, Token};
-use crate::pos::{Error, LineMap, Pos};
+use crate::pos::{Error, ErrorList, LineMap, Pos};
 use std::boxed::Box;
 use std::fmt;
 use std::fmt::{Display, Formatter};
+use std::mem;
 
 // TODO: recover from syntax errors and report multiple errors when they occur.
 // Actually every stage of the compiler should do this.
@@ -425,15 +426,8 @@ impl<'a> Display for LValue<'a> {
     }
 }
 
-pub fn parse<'a>(tokens: &[Token<'a>], lmap: &LineMap) -> Result<Program<'a>, Error> {
-    let mut p = Parser {
-        tokens,
-        lmap,
-        next: 0,
-        next_scope: 0,
-        next_var: 0,
-        next_var_use: 0,
-    };
+pub fn parse<'a>(tokens: &[Token<'a>], lmap: &LineMap) -> Result<Program<'a>, ErrorList> {
+    let mut p = Parser::new(tokens, lmap);
     p.parse_file()
 }
 
@@ -444,19 +438,50 @@ struct Parser<'a, 'b, 'c> {
     next_scope: usize,
     next_var: usize,
     next_var_use: usize,
+    errors: Vec<Error>,
 }
 
 impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
-    fn parse_file(&mut self) -> Result<Program<'a>, Error> {
+    fn new(tokens: &'b [Token<'a>], lmap: &'c LineMap) -> Parser<'a, 'b, 'c> {
+        Parser {
+            tokens,
+            lmap,
+            next: 0,
+            next_scope: 0,
+            next_var: 0,
+            next_var_use: 0,
+            errors: Vec::new(),
+        }
+    }
+
+    fn parse_file(&mut self) -> Result<Program<'a>, ErrorList> {
         let scope = self.next_scope();
+        let decls = self.parse_decls(Kind::EOF);
+        if self.errors.is_empty() {
+            Ok(Program { decls, scope })
+        } else {
+            let mut errors = Vec::new();
+            mem::swap(&mut self.errors, &mut errors);
+            Err(ErrorList(errors))
+        }
+    }
+
+    fn parse_decls(&mut self, until: Kind) -> Vec<Decl<'a>> {
         let mut decls = Vec::new();
-        loop {
-            match self.peek() {
-                Kind::EOF => break,
-                _ => decls.push(self.parse_decl()?),
+        while self.peek() != until {
+            match self.parse_decl() {
+                Ok(decl) => {
+                    decls.push(decl);
+                }
+                Err(err) => {
+                    self.errors.push(err);
+                    if !self.synchronize() {
+                        return decls;
+                    }
+                }
             }
         }
-        Ok(Program { decls, scope })
+        decls
     }
 
     fn parse_decl(&mut self) -> Result<Decl<'a>, Error> {
@@ -593,10 +618,7 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
     fn parse_block(&mut self) -> Result<Block<'a>, Error> {
         let scope = self.next_scope();
         let begin_pos = self.expect(Kind::LBrace)?.pos;
-        let mut decls = Vec::new();
-        while self.peek() != Kind::RBrace {
-            decls.push(self.parse_decl()?);
-        }
+        let decls = self.parse_decls(Kind::RBrace);
         let end_pos = self.expect(Kind::RBrace)?.pos;
         let pos = begin_pos.combine(end_pos);
         Ok(Block { decls, scope, pos })
@@ -1002,6 +1024,35 @@ impl<'a, 'b, 'c> Parser<'a, 'b, 'c> {
         let t = &self.tokens[self.next];
         let position = self.lmap.position(t.pos);
         Error { position, message }
+    }
+
+    /// Attempts to advance the parser past a syntax error, hopefully
+    /// returning to a state in which the rest of the syntax tree
+    /// can be parsed. synchronize reads and discards tokens until it
+    /// passes a semicolon or finds a token that could begin a Decl.
+    /// synchronize returns true if it succeeds, or false if it reaches
+    /// the end of the file.
+    fn synchronize(&mut self) -> bool {
+        while self.peek() != Kind::EOF {
+            let t = self.take();
+            if t.type_ == Kind::Semi {
+                return true;
+            }
+            match self.peek() {
+                Kind::Class
+                | Kind::Fun
+                | Kind::Var
+                | Kind::For
+                | Kind::If
+                | Kind::While
+                | Kind::Print
+                | Kind::Return => {
+                    return true;
+                }
+                _ => (),
+            }
+        }
+        return false;
     }
 }
 

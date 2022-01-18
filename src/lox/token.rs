@@ -1,5 +1,6 @@
-use crate::pos::{Error, LineMap, Pos};
-use std::fmt;
+use crate::pos::{Error, ErrorList, LineMap, Pos};
+use std::fmt::{self, Display, Formatter};
+use std::path::Path;
 use std::str::from_utf8_unchecked;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,8 +45,8 @@ pub enum Kind {
     Ident,
 }
 
-impl fmt::Display for Kind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Kind {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let s = match self {
             Kind::EOF => "end of file",
             Kind::LParen => "(",
@@ -98,13 +99,17 @@ pub struct Token<'a> {
 }
 
 pub fn lex<'a>(
-    filename: &str,
+    path: &Path,
     data: &'a [u8],
     lmap: &mut LineMap,
-) -> Result<Vec<Token<'a>>, Error> {
-    let mut l = Lexer::new(filename, data, lmap);
-    l.lex()?;
-    Ok(l.tokens)
+) -> Result<Vec<Token<'a>>, ErrorList> {
+    let mut l = Lexer::new(path, data, lmap);
+    l.lex();
+    if l.errors.is_empty() {
+        Ok(l.tokens)
+    } else {
+        Err(ErrorList(l.errors))
+    }
 }
 
 struct Lexer<'a, 'b> {
@@ -112,22 +117,24 @@ struct Lexer<'a, 'b> {
     tset: &'b mut LineMap,
     base: usize,
     tokens: Vec<Token<'a>>,
+    errors: Vec<Error>,
     p: usize,
 }
 
 impl<'a, 'b> Lexer<'a, 'b> {
-    fn new(filename: &str, data: &'a [u8], tset: &'b mut LineMap) -> Lexer<'a, 'b> {
-        let base = tset.add_file(filename, data.len());
+    fn new(path: &Path, data: &'a [u8], tset: &'b mut LineMap) -> Lexer<'a, 'b> {
+        let base = tset.add_file(path, data.len());
         Lexer {
             data: data,
             tset: tset,
             base: base,
             tokens: Vec::new(),
+            errors: Vec::new(),
             p: 0,
         }
     }
 
-    fn lex(&mut self) -> Result<(), Error> {
+    fn lex(&mut self) {
         while self.p < self.data.len() {
             let b = self.data[self.p];
             let bnext = if self.p + 1 < self.data.len() {
@@ -229,7 +236,7 @@ impl<'a, 'b> Lexer<'a, 'b> {
                 }
                 let text = unsafe { from_utf8_unchecked(&self.data[self.p..end]) };
                 if text.parse::<f64>().is_err() {
-                    return self.error_end(end, format!("could not parse number: {}", text));
+                    self.error_end(end, format!("could not parse number: {}", text));
                 }
                 self.add_token(end, Kind::Number);
                 continue;
@@ -242,7 +249,8 @@ impl<'a, 'b> Lexer<'a, 'b> {
                     end += 1;
                 }
                 if end == self.data.len() {
-                    return self.error_end(end, format!("unterminated string literal"));
+                    self.error_end(end, format!("unterminated string literal"));
+                    break;
                 }
                 end += 1;
                 self.add_token(end, Kind::String);
@@ -251,14 +259,19 @@ impl<'a, 'b> Lexer<'a, 'b> {
 
             // Unrecognized character or non-UTF-8 byte.
             if b.is_ascii() {
-                return self.error(format!("unexpected character '{}'", b as char));
+                self.error(format!("unexpected character '{}'", b as char));
+                self.p += 1;
             } else {
-                return self.error(format!("unexpected non-ascii byte {}", b));
+                let mut end = self.p + 1;
+                while end < self.data.len() && !self.data[end].is_ascii() {
+                    end += 1;
+                }
+                self.error_end(end, String::from("unexpected non-ASCII bytes"));
+                self.p = end;
             }
         }
 
         self.add_token(self.p, Kind::EOF);
-        Ok(())
     }
 
     fn add_token(&mut self, end: usize, type_: Kind) {
@@ -281,16 +294,16 @@ impl<'a, 'b> Lexer<'a, 'b> {
         b.is_ascii_alphanumeric() || b == b'_'
     }
 
-    fn error(&self, message: String) -> Result<(), Error> {
-        self.error_end(self.p + 1, message)
+    fn error(&mut self, message: String) {
+        self.error_end(self.p + 1, message);
     }
 
-    fn error_end(&self, end: usize, message: String) -> Result<(), Error> {
+    fn error_end(&mut self, end: usize, message: String) {
         let pos = Pos {
             begin: self.base + self.p,
             end: self.base + end,
         };
         let position = self.tset.position(pos);
-        Err(Error { position, message })
+        self.errors.push(Error { position, message });
     }
 }
