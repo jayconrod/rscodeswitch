@@ -213,7 +213,7 @@ pub enum Stmt<'a> {
 }
 
 impl<'a> Stmt<'a> {
-    fn pos(&self) -> Pos {
+    pub fn pos(&self) -> Pos {
         match self {
             Stmt::Expr(e) => e.pos(),
             Stmt::Block(b) => b.pos,

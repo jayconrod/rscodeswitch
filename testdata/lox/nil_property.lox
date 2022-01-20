@@ -1,0 +1,2 @@
+var x = nil;
+print x.y; // Error: value is not an object: nil

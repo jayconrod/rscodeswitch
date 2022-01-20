@@ -56,12 +56,8 @@ impl LineMap {
     /// human-readable Position. Position takes more space, so this should only
     /// be done when needed.
     pub fn position(&self, p: Pos) -> Position {
-        let find_file = |offset: usize| {
-            let i = self.files.partition_point(|f| f.offset <= offset);
-            &self.files[i - 1]
-        };
-        let from_file = find_file(p.begin);
-        let to_file = find_file(p.end);
+        let from_file = &self.files[self.find_file_index(p.begin)];
+        let to_file = &self.files[self.find_file_index(p.end)];
         assert!(from_file.offset == to_file.offset);
 
         let find_line_and_col = |offset: usize| {
@@ -93,6 +89,29 @@ impl LineMap {
             end_col: 0,
         }
     }
+
+    /// Encodes the file and line number for a given position. Encoded lines
+    /// are saved in compiled functions for use in error messages and
+    /// stack traces.
+    pub fn encode_line(&self, pos: Pos) -> EncodedLine {
+        // TODO: handle overflow when the number of lines doesn't fit into u32.
+        // For now, panic.
+        let offset = pos.begin;
+        let i = self.find_file_index(offset);
+        let base: usize = self.files[..i].iter().map(|f| f.lines.len()).sum();
+        let offset_in_file = offset - self.files[i].offset;
+        let line: usize = self.files[i]
+            .lines
+            .partition_point(|&l| l <= offset_in_file)
+            - 1;
+        let enc: u32 = (base + line).try_into().unwrap();
+        EncodedLine(enc)
+    }
+
+    fn find_file_index(&self, offset: usize) -> usize {
+        let i = self.files.partition_point(|f| f.offset <= offset);
+        i - 1
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -116,6 +135,179 @@ impl Default for Pos {
     }
 }
 
+/// An encoded file and line number, used with PackageLineMap and
+/// FunctionLineMap. The value is the sum of lines in the files before
+/// the indicated file in PackageLineMap, plus the 0-based line number.
+///
+/// For example, if PackageLineMap contains three files:
+///
+/// - foo.rs: 100 lines
+/// - bar.rs: 200 lines
+/// - baz.rs: 300 lines
+///
+/// Then the encoded value 150 would be bar.rs, line 50.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EncodedLine(u32);
+
+const INVALID_ENCODED_LINE: EncodedLine = EncodedLine(!0);
+
+/// PackageLineMap is a list of the source file names used to build the
+/// package, and the number of lines in each file. PackageLineMap is used
+/// to transform an instruction offset within a function into a file name
+/// and line number, for use in error messages and stack traces.
+pub struct PackageLineMap {
+    pub files: Vec<FileLineCount>,
+}
+
+impl PackageLineMap {
+    /// Transforms an instruction offset within a function into a Position
+    /// with the file name and line number, using the function's line map.
+    /// If the position can't be found, for example, because the function
+    /// has no line number information, Position::unknown() is returned.
+    pub fn position(&self, offset: u32, flmap: &FunctionLineMap) -> Position {
+        let encoded_line = flmap.lookup(offset);
+        if encoded_line == INVALID_ENCODED_LINE {
+            return Position::unknown();
+        }
+        let mut enc = encoded_line.0;
+        for f in &self.files {
+            if enc < f.line_count {
+                return Position {
+                    path: f.path.clone(),
+                    begin_line: enc as usize + 1,
+                    begin_col: 0,
+                    end_line: enc as usize + 1,
+                    end_col: 0,
+                };
+            }
+            enc -= f.line_count;
+        }
+        Position::unknown()
+    }
+}
+
+impl From<&LineMap> for PackageLineMap {
+    /// Builds a PackageLineMap from the LineMap used when parsing the package's
+    /// sources. This is convenient since a bytecode compiler may use
+    /// LineMap::encode_line while building FunctionLineMaps.
+    fn from(lmap: &LineMap) -> PackageLineMap {
+        PackageLineMap {
+            files: lmap
+                .files
+                .iter()
+                .map(|f| FileLineCount {
+                    path: f.path.clone(),
+                    line_count: f.lines.len().try_into().unwrap_or(u32::MAX),
+                })
+                .collect(),
+        }
+    }
+}
+
+pub struct FileLineCount {
+    pub path: PathBuf,
+    pub line_count: u32,
+}
+
+/// Contains a table of (instruction offset, encoded line) pairs. The
+/// representation is encoded to limit its size. This makes finding a particular
+/// entry slower, but it saves quite a bit of space.
+///
+/// Use FunctionLineMapBuilder to construct a new map.
+pub struct FunctionLineMap {
+    data: Vec<u8>,
+}
+
+impl FunctionLineMap {
+    pub fn new() -> FunctionLineMap {
+        FunctionLineMap { data: Vec::new() }
+    }
+
+    /// Given an instruction offset, lookup finds the entry with the highest
+    /// instruction offset less than or equal to the given offset, then returns
+    /// the encoded line from that entry. If there is no such entry, for
+    /// example because the table is empty, lookup returns INVALID_ENCODED_LINE.
+    pub fn lookup(&self, offset: u32) -> EncodedLine {
+        // data consists of a list of "commands" that create entries.
+        //
+        // The low seven bits of the first byte of a command are an offset
+        // added to the previous entry's instruction offset (or 0 if there was
+        // no previous entry).
+        //
+        // If the high bit of the command's first byte is clear, that's the
+        // complete offset. Otherwise, there is at least one more offset byte
+        // encoded the same way.
+        //
+        // The next four bytes are an encoded line in little-endian order.
+
+        let mut p = 0;
+        let mut prev_offset = 0;
+        let mut cmd_offset = 0;
+        let mut prev_line = INVALID_ENCODED_LINE;
+        while p < self.data.len() {
+            let c = self.data[p];
+            if c & 0x80 != 0 {
+                cmd_offset += (c & 0x7f) as u32;
+                continue;
+            }
+            cmd_offset += c as u32;
+            if prev_offset <= offset && offset < cmd_offset {
+                return prev_line;
+            }
+            prev_offset = cmd_offset;
+            if p + 5 > self.data.len() {
+                // Reached the end of the data, even though we expect to find
+                // a line after each command. This indicates the data is
+                // corrupted or incomplete. This isn't a hard failure though.
+                return INVALID_ENCODED_LINE;
+            }
+            prev_line = EncodedLine(u32::from_le_bytes(
+                self.data[p + 1..p + 5].try_into().unwrap(),
+            ));
+            p += 5;
+        }
+        prev_line
+    }
+}
+
+pub struct FunctionLineMapBuilder {
+    data: Vec<u8>,
+    prev_inst_offset: u32,
+    prev_encoded_line: EncodedLine,
+}
+
+impl FunctionLineMapBuilder {
+    pub fn new() -> FunctionLineMapBuilder {
+        FunctionLineMapBuilder {
+            data: Vec::new(),
+            prev_inst_offset: 0,
+            prev_encoded_line: INVALID_ENCODED_LINE,
+        }
+    }
+
+    pub fn build(self) -> FunctionLineMap {
+        FunctionLineMap { data: self.data }
+    }
+
+    pub fn add_line(&mut self, inst_offset: usize, encoded_line: EncodedLine) {
+        if !self.data.is_empty() && self.prev_encoded_line == encoded_line {
+            // Previous entry points to the same line.
+            // No need to add a new entry.
+            return;
+        }
+        let inst_offset: u32 = inst_offset.try_into().unwrap();
+        let mut delta = inst_offset - self.prev_inst_offset;
+        while delta > 0x7f {
+            self.data.push(0xff);
+            delta -= 0x7f;
+        }
+        self.data.push(delta as u8);
+        self.data.extend_from_slice(&encoded_line.0.to_le_bytes());
+        self.prev_inst_offset = inst_offset;
+        self.prev_encoded_line = encoded_line;
+    }
+}
+
 #[derive(Debug)]
 pub struct Position {
     pub path: PathBuf,
@@ -123,6 +315,18 @@ pub struct Position {
     pub begin_col: usize,
     pub end_line: usize,
     pub end_col: usize,
+}
+
+impl Position {
+    pub fn unknown() -> Position {
+        Position {
+            path: PathBuf::from("<unknown>"),
+            begin_line: 0,
+            begin_col: 0,
+            end_line: 0,
+            end_col: 0,
+        }
+    }
 }
 
 impl From<&str> for Position {

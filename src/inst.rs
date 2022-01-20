@@ -1,5 +1,6 @@
+use crate::pos::{EncodedLine, FunctionLineMap, FunctionLineMapBuilder};
+
 use std::fmt;
-use std::mem::swap;
 
 // List of instructions.
 // Keep sorted by name.
@@ -133,22 +134,28 @@ pub fn sys_mnemonic(sys: u8) -> &'static str {
 
 pub struct Assembler {
     insts: Vec<u8>,
+    flmap: FunctionLineMapBuilder,
 }
 
 impl Assembler {
     pub fn new() -> Assembler {
-        Assembler { insts: Vec::new() }
+        Assembler {
+            insts: Vec::new(),
+            flmap: FunctionLineMapBuilder::new(),
+        }
     }
 
-    pub fn finish(&mut self) -> Result<Vec<u8>, impl std::error::Error> {
+    pub fn finish(self) -> Result<(Vec<u8>, FunctionLineMap), impl std::error::Error> {
         if i32::try_from(self.insts.len()).is_err() {
             return Err(Error {
                 message: String::from("function is too large (maximum size is 2 GiB)"),
             });
         }
-        let mut insts = Vec::new();
-        swap(&mut self.insts, &mut insts);
-        Ok(insts)
+        Ok((self.insts, self.flmap.build()))
+    }
+
+    pub fn line(&mut self, el: EncodedLine) {
+        self.flmap.add_line(self.insts.len(), el);
     }
 
     pub fn bind(&mut self, label: &mut Label) {

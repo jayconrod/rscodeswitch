@@ -5,10 +5,9 @@ use crate::lox::scope::{self, CaptureFrom, ScopeSet, Var, VarKind, VarUse};
 use crate::lox::syntax::{self, Block, Decl, Expr, ForInit, LValue, Param, Program, Stmt};
 use crate::lox::token::{self, Kind, Token};
 use crate::package::{Function, Global, Package, Type};
-use crate::pos::{Error, ErrorList, LineMap, Pos, Position};
+use crate::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
 use std::collections::HashMap;
 use std::fs;
-use std::mem;
 use std::path::Path;
 
 pub fn compile_file<'a>(path: &Path) -> Result<Box<Package>, ErrorList> {
@@ -63,18 +62,20 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
     }
 
-    fn finish(&mut self) -> Result<Box<Package>, ErrorList> {
-        self.asm().nil();
-        self.asm().nanbox();
-        self.asm().ret();
-        match self.asm().finish() {
-            Ok(init_insts) => {
+    fn finish(mut self) -> Result<Box<Package>, ErrorList> {
+        let mut asm = self.asm_stack.pop().unwrap();
+        asm.nil();
+        asm.nanbox();
+        asm.ret();
+        match asm.finish() {
+            Ok((init_insts, line_map)) => {
                 self.functions.push(Function {
                     name: String::from("·init"),
                     insts: init_insts,
                     package: 0 as *mut Package,
                     param_types: Vec::new(),
                     cell_types: Vec::new(),
+                    line_map,
                 });
             }
             Err(err) => {
@@ -83,29 +84,27 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
 
         if !self.errors.is_empty() {
-            let mut errors = Vec::new();
-            mem::swap(&mut errors, &mut self.errors);
-            return Err(ErrorList(errors));
+            return Err(ErrorList(self.errors));
         }
 
         let mut package = Box::new(Package {
-            globals: Vec::new(),
+            globals: self.globals,
             functions: Vec::new(),
             strings: Handle::empty(),
-            types: Vec::new(),
+            types: self.types,
+            line_map: PackageLineMap::from(self.lmap),
         });
         for f in &mut self.functions {
             f.package = &*package;
         }
-        mem::swap(&mut package.globals, &mut self.globals);
-        mem::swap(&mut package.functions, &mut self.functions);
+        package.functions = self.functions;
         package.strings = Handle::new(Slice::alloc());
         package.strings.init_from_list(&self.strings);
-        mem::swap(&mut package.types, &mut self.types);
         Ok(package)
     }
 
     fn compile_decl(&mut self, decl: &Decl<'a>) {
+        self.line(decl.pos());
         match decl {
             Decl::Var {
                 name,
@@ -127,6 +126,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 }
 
                 // Write the initializer value to the variable.
+                self.line(*pos);
                 self.compile_define(v);
             }
             Decl::Function {
@@ -142,6 +142,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 // Create a closure in the enclosing function.
                 // The closure has pointers to cells of variables captured from
                 // this function and enclosing functions.
+                self.line(*pos);
                 self.compile_define_prepare(&self.scopes.vars[*var], name.text, *pos);
                 self.compile_closure(fn_index, *arg_scope, *pos);
 
@@ -172,25 +173,26 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     }
                     _ => None,
                 });
-                let mut ctor_asm = Assembler::new();
+                self.asm_stack.push(Assembler::new());
+                self.line(*pos);
                 let object_type_index = self.ensure_type(Type::Object, *pos);
-                ctor_asm.alloc(object_type_index);
-                ctor_asm.dup();
-                ctor_asm.prototype();
-                ctor_asm.storeprototype();
-                ctor_asm.nanbox();
+                self.asm().alloc(object_type_index);
+                self.asm().dup();
+                self.asm().prototype();
+                self.asm().storeprototype();
+                self.asm().nanbox();
                 if let Some(arg_count) = init_param_count {
-                    ctor_asm.dup();
+                    self.asm().dup();
                     for i in 0..arg_count {
-                        ctor_asm.loadarg(i);
+                        self.asm().loadarg(i);
                     }
                     let si = self.ensure_string(b"init", *pos);
-                    ctor_asm.callnamedprop(si, arg_count);
-                    ctor_asm.pop();
+                    self.asm().callnamedprop(si, arg_count);
+                    self.asm().pop();
                 }
-                ctor_asm.ret();
-                let ctor_insts = match ctor_asm.finish() {
-                    Ok(insts) => insts,
+                self.asm().ret();
+                let (ctor_insts, line_map) = match self.asm_stack.pop().unwrap().finish() {
+                    Ok(res) => res,
                     Err(err) => {
                         self.errors
                             .push(Error::wrap(self.lmap.position(*pos), &err));
@@ -203,6 +205,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     package: 0 as *mut Package,
                     param_types: vec![Type::Nanbox; init_param_count.unwrap_or(0) as usize],
                     cell_types: Vec::new(),
+                    line_map,
                 };
                 let ctor_index = match self.functions.len().try_into() {
                     Ok(i) => i,
@@ -295,6 +298,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         // Start compiling the function.
         // Before anything else, move captured parameters into cells.
         self.asm_stack.push(Assembler::new());
+        self.line(pos);
         let mut cell_slot = 0;
         for param in params {
             if self.scopes.vars[param.var].kind == VarKind::Capture {
@@ -327,9 +331,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
 
         // Finish building the function and add it to the package.
-        let mut asm = self.asm_stack.pop().unwrap();
-        let insts = match asm.finish() {
-            Ok(insts) => insts,
+        let (insts, line_map) = match self.asm_stack.pop().unwrap().finish() {
+            Ok(res) => res,
             Err(err) => {
                 self.errors.push(Error::wrap(self.lmap.position(pos), &err));
                 return !0;
@@ -348,6 +351,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             package: 0 as *mut Package,
             param_types,
             cell_types,
+            line_map,
         };
         let fn_index: u32 = match self.functions.len().try_into() {
             Ok(i) => i,
@@ -385,6 +389,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
     }
 
     fn compile_stmt(&mut self, stmt: &Stmt<'a>) {
+        self.line(stmt.pos());
         match stmt {
             Stmt::Expr(e) => {
                 self.compile_expr(e);
@@ -494,6 +499,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
     }
 
     fn compile_expr(&mut self, expr: &Expr<'a>) {
+        self.line(expr.pos());
         match expr {
             Expr::Nil(_) => {
                 self.asm().nil();
@@ -791,6 +797,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
 
     fn asm(&mut self) -> &mut Assembler {
         self.asm_stack.last_mut().unwrap()
+    }
+
+    fn line(&mut self, pos: Pos) {
+        let e = self.lmap.encode_line(pos);
+        self.asm().line(e);
     }
 
     fn error(&mut self, pos: Pos, message: String) {

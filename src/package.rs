@@ -1,6 +1,7 @@
 use crate::data::{self, Slice};
 use crate::heap::{self, Handle, Ptr, Set, HEAP};
 use crate::inst;
+use crate::pos::{FunctionLineMap, PackageLineMap};
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -11,6 +12,7 @@ pub struct Package {
     pub functions: Vec<Function>,
     pub types: Vec<Type>,
     pub strings: Handle<Slice<data::String>>,
+    pub line_map: PackageLineMap,
 }
 
 impl Package {
@@ -80,6 +82,7 @@ pub struct Function {
     pub package: *const Package,
     pub param_types: Vec<Type>,
     pub cell_types: Vec<Type>,
+    pub line_map: FunctionLineMap,
 }
 
 impl fmt::Display for Function {

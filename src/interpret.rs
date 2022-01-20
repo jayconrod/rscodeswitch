@@ -72,7 +72,8 @@ impl<'a> Interpreter<'a> {
             // return_errorf! stops execution, formats an error, and returns it.
             macro_rules! return_errorf {
                 ($($x:expr),*) => {{
-                    let position = Position::from("<unknown>");
+                    let inst_offset = (ip as usize - &func.insts[0] as *const u8 as usize).try_into().unwrap();
+                    let position = pp.line_map.position(inst_offset, &func.line_map);
                     let message = format!($($x,)*);
                     return Err(Error{position, message})
                 }};
