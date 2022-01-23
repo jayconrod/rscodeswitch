@@ -7,6 +7,7 @@ pub mod heap;
 pub mod inst;
 pub mod interpret;
 pub mod lox;
+pub mod lua;
 pub mod math;
 pub mod nanbox;
 pub mod package;
