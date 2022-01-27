@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 49.
+// Next opcode: 51.
 pub const ADD: u8 = 20;
 pub const ALLOC: u8 = 35;
 pub const B: u8 = 27;
@@ -21,12 +21,14 @@ pub const FLOAT64: u8 = 2;
 pub const FUNCTION: u8 = 31;
 pub const GE: u8 = 18;
 pub const GT: u8 = 19;
+pub const INT64: u8 = 49;
 pub const LE: u8 = 16;
 pub const LOAD: u8 = 36;
 pub const LOADARG: u8 = 29;
 pub const LOADGLOBAL: u8 = 9;
 pub const LOADLOCAL: u8 = 11;
 pub const LOADNAMEDPROP: u8 = 42;
+pub const LOADNAMEDPROPORNIL: u8 = 50;
 pub const LOADPROTOTYPE: u8 = 40;
 pub const LT: u8 = 17;
 pub const MUL: u8 = 22;
@@ -63,10 +65,10 @@ pub fn size(op: u8) -> usize {
         | SWAP | TRUE => 1,
         SWAPN | SYS => 2,
         CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
-        ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STOREMETHOD
-        | STORENAMEDPROP | STRING => 5,
+        ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | LOADNAMEDPROPORNIL
+        | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP | STRING => 5,
         CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE => 7,
-        FLOAT64 | NEWCLOSURE => 9,
+        FLOAT64 | INT64 | NEWCLOSURE => 9,
         _ => panic!("unknown opcode"),
     }
 }
@@ -89,12 +91,14 @@ pub fn mnemonic(op: u8) -> &'static str {
         FUNCTION => "function",
         GE => "ge",
         GT => "gt",
+        INT64 => "int64",
         LE => "le",
         LOAD => "load",
         LOADARG => "loadarg",
         LOADGLOBAL => "loadglobal",
         LOADLOCAL => "loadlocal",
         LOADNAMEDPROP => "loadnamedprop",
+        LOADNAMEDPROPORNIL => "loadnamedpropornil",
         LOADPROTOTYPE => "loadprototype",
         LT => "lt",
         MUL => "mul",
@@ -262,6 +266,11 @@ impl Assembler {
         self.write_u8(GT);
     }
 
+    pub fn int64(&mut self, n: i64) {
+        self.write_u8(INT64);
+        self.write_i64(n);
+    }
+
     pub fn le(&mut self) {
         self.write_u8(LE);
     }
@@ -287,6 +296,11 @@ impl Assembler {
 
     pub fn loadnamedprop(&mut self, name: u32) {
         self.write_u8(LOADNAMEDPROP);
+        self.write_u32(name);
+    }
+
+    pub fn loadnamedpropornil(&mut self, name: u32) {
+        self.write_u8(LOADNAMEDPROPORNIL);
         self.write_u32(name);
     }
 
@@ -410,21 +424,19 @@ impl Assembler {
     }
 
     fn write_u16(&mut self, n: u16) {
-        for b in n.to_le_bytes() {
-            self.insts.push(b)
-        }
+        self.insts.extend_from_slice(&n.to_le_bytes());
     }
 
     fn write_u32(&mut self, n: u32) {
-        for b in n.to_le_bytes() {
-            self.insts.push(b)
-        }
+        self.insts.extend_from_slice(&n.to_le_bytes());
+    }
+
+    fn write_i64(&mut self, n: i64) {
+        self.insts.extend_from_slice(&n.to_le_bytes());
     }
 
     fn write_f64(&mut self, n: f64) {
-        for b in n.to_le_bytes() {
-            self.insts.push(b)
-        }
+        self.insts.extend_from_slice(&n.to_le_bytes());
     }
 
     fn write_label(&mut self, label: &mut Label) {
@@ -542,8 +554,8 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let n = u16::from_le_bytes(insts[p + 1..p + 3].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
-            ALLOC | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | STOREGLOBAL | STOREMETHOD
-            | STORENAMEDPROP | STRING => {
+            ALLOC | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | LOADNAMEDPROPORNIL | STOREGLOBAL
+            | STOREMETHOD | STORENAMEDPROP | STRING => {
                 if p + 5 > insts.len() {
                     return Err(fmt::Error);
                 }
@@ -555,6 +567,13 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                     return Err(fmt::Error);
                 }
                 let n = f64::from_le_bytes(insts[p + 1..p + 9].try_into().unwrap());
+                write!(f, " {}\n", n)?;
+            }
+            INT64 => {
+                if p + 9 > insts.len() {
+                    return Err(fmt::Error);
+                }
+                let n = i64::from_le_bytes(insts[p + 1..p + 9].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
             NEWCLOSURE => {

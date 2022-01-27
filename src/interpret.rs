@@ -538,6 +538,9 @@ impl<'a> Interpreter<'a> {
                         let n = f64::from_le_bytes(*((ip as usize + 1) as *const [u8; 8]));
                         push!(n.to_bits(), Type::Float64);
                     }
+                    inst::INT64 => {
+                        unimplemented!();
+                    }
                     inst::LOAD => {
                         let (p, pty) = pop!();
                         let ty = match pty {
@@ -623,6 +626,9 @@ impl<'a> Interpreter<'a> {
                                 return_errorf!("value is not an object: {}", ty);
                             }
                         }
+                    }
+                    inst::LOADNAMEDPROPORNIL => {
+                        unimplemented!();
                     }
                     inst::LOADPROTOTYPE => {
                         let (v, ty) = pop!();

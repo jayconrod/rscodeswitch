@@ -328,7 +328,7 @@ impl<'src, 'lm> Lexer<'src, 'lm> {
             if b == b'0' && (bnext == b'x' || bnext == b'X') {
                 let mut end = self.p + 2;
                 let mut have_int = false;
-                while end < self.data.len() && is_hex_digit(self.data[end]) {
+                while end < self.data.len() && self.data[end].is_ascii_hexdigit() {
                     end += 1;
                     have_int = true;
                 }
@@ -345,7 +345,7 @@ impl<'src, 'lm> Lexer<'src, 'lm> {
                 if end < self.data.len() && self.data[end] == b'.' {
                     end += 1;
                     let mut have_fract = false;
-                    while end < self.data.len() && is_hex_digit(self.data[end]) {
+                    while end < self.data.len() && self.data[end].is_ascii_hexdigit() {
                         end += 1;
                         have_fract = true;
                     }
@@ -364,7 +364,7 @@ impl<'src, 'lm> Lexer<'src, 'lm> {
                     if end < self.data.len() && self.data[end] == b'+' || self.data[end] == b'-' {
                         end += 1;
                     }
-                    while end < self.data.len() && is_hex_digit(self.data[end]) {
+                    while end < self.data.len() && self.data[end].is_ascii_hexdigit() {
                         end += 1;
                         have_exp = true;
                     }
@@ -380,15 +380,15 @@ impl<'src, 'lm> Lexer<'src, 'lm> {
                 continue;
             }
 
-            if is_digit(b) {
+            if b.is_ascii_digit() {
                 let mut end = self.p + 1;
-                while end < self.data.len() && is_digit(self.data[end]) {
+                while end < self.data.len() && self.data[end].is_ascii_digit() {
                     end += 1;
                 }
                 if end < self.data.len() && self.data[end] == b'.' {
                     end += 1;
                     let mut have_fract = false;
-                    while end < self.data.len() && is_digit(self.data[end]) {
+                    while end < self.data.len() && self.data[end].is_ascii_digit() {
                         end += 1;
                         have_fract = true;
                     }
@@ -403,7 +403,7 @@ impl<'src, 'lm> Lexer<'src, 'lm> {
                         end += 1;
                     }
                     let mut have_exp = false;
-                    while end < self.data.len() && is_digit(self.data[end]) {
+                    while end < self.data.len() && self.data[end].is_ascii_digit() {
                         end += 1;
                         have_exp = true;
                     }
@@ -535,13 +535,350 @@ fn is_ident_first(b: u8) -> bool {
 }
 
 fn is_ident(b: u8) -> bool {
-    is_ident_first(b) || is_digit(b)
+    is_ident_first(b) || b.is_ascii_digit()
 }
 
-fn is_digit(b: u8) -> bool {
-    b'0' <= b && b <= b'9'
+fn decode_hex_digit(b: u8) -> u8 {
+    if b'0' <= b && b <= b'9' {
+        b - b'0'
+    } else if b'A' <= b && b <= b'F' {
+        b - b'A' + 10
+    } else if b'a' <= b && b <= b'f' {
+        b - b'a' + 10
+    } else {
+        panic!("not a hex digit")
+    }
 }
 
-fn is_hex_digit(b: u8) -> bool {
-    is_digit(b) || b'A' <= b && b <= b'F' || b'a' <= b && b <= b'f'
+/// Decodes a Lua string into a sequence of bytes, translating any escape
+/// sequences and applying other lexical rules. The string may be a short
+/// string (delimited by quotes) or a long string (delimited by brackets and
+/// equal signs). Returns None if the string is malformed.
+pub fn unquote_string(s: &str) -> Option<Vec<u8>> {
+    if s.starts_with('[') {
+        unquote_long_string(s)
+    } else {
+        unquote_short_string(s)
+    }
+}
+
+fn unquote_short_string(s: &str) -> Option<Vec<u8>> {
+    let sb = s.as_bytes();
+    let mut buf = Vec::new();
+    buf.reserve(sb.len());
+
+    // Check quotes: short strings must begin and end with the same character,
+    // either ' or ".
+    if sb.len() < 2 || sb[0] != sb[sb.len() - 1] {
+        return None;
+    }
+    let q = sb[0];
+    if q != b'\'' && q != b'"' {
+        return None;
+    }
+
+    let mut p = 1;
+    while p < sb.len() - 1 {
+        if sb[p] == b'\\' {
+            // Escape
+            p += 1;
+            if p == sb.len() - 1 {
+                return None;
+            }
+
+            // Single-character escapes
+            let c = match sb[p] {
+                b'a' => b'\x07', // BEL
+                b'b' => b'\x08', // backspace
+                b'f' => b'\x0c', // formfeed
+                b'n' => b'\n',   // newline
+                b'r' => b'\r',   // carriage return
+                b't' => b'\t',   // tab
+                b'v' => b'\x0b', // vertical tab
+                b'\\' => b'\\',
+                b'\'' => b'\'',
+                b'"' => b'"',
+                b'\n' => b'\n',
+                _ => 0,
+            };
+            if c != 0 {
+                buf.push(c);
+                p += 1;
+                continue;
+            }
+
+            // Skip whitespace
+            if sb[p] == b'z' {
+                p += 1;
+                while p < sb.len() - 1 && is_space(sb[p]) {
+                    p += 1;
+                }
+                continue;
+            }
+
+            // Hexadecimal byte: exactly two digits.
+            if sb[p] == b'x' {
+                p += 1;
+                if p + 1 >= sb.len() - 1
+                    || !sb[p].is_ascii_hexdigit()
+                    || !sb[p + 1].is_ascii_hexdigit()
+                {
+                    return None;
+                }
+                let h = (decode_hex_digit(sb[p]) << 4) | decode_hex_digit(sb[p] + 1);
+                buf.push(h);
+                p += 2;
+                continue;
+            }
+
+            // Decimal byte: up to three digits.
+            if b'0' <= sb[p] && sb[p] <= b'9' {
+                let mut end = p + 1;
+                let mut n = (sb[p] - b'0') as u16;
+                while end < sb.len() - 1 && end < p + 3 && sb[end].is_ascii_digit() {
+                    n *= 10 + (sb[end] - b'0') as u16;
+                    end += 1;
+                }
+                if n >= 256 {
+                    return None;
+                }
+                buf.push(n as u8);
+                p = end;
+                continue;
+            }
+
+            // Unicode character: Lua uses an older UTF-8 encoding that allows
+            // code points up to 2^31. Rust doesn't support code points beyond
+            // U+10FFFF, so we need to encode them here manually.
+            if sb[p] == b'u' {
+                if p + 3 >= sb.len() - 1 || sb[p + 1] != b'{' {
+                    return None;
+                }
+                let mut end = p + 2;
+                let mut n: u32 = 0;
+                while end < sb.len() - 2 && end < p + 10 && sb[end].is_ascii_hexdigit() {
+                    n = (n << 4) | decode_hex_digit(sb[end]) as u32;
+                    end += 1;
+                }
+                if end == p + 2 || sb[end] != b'}' || n >= (2 << 31) {
+                    return None;
+                }
+                p = end + 1;
+
+                let (first, count) = if n < 0x80 {
+                    (n as u8, 0)
+                } else if n < 0x800 {
+                    (0xC0 | ((n >> 6) & 0x1F) as u8, 1)
+                } else if n < 0x10000 {
+                    (0xE0 | ((n >> 12) & 0xF) as u8, 2)
+                } else if n < 0x200000 {
+                    (0xF0 | ((n >> 18) & 0x7) as u8, 3)
+                } else if n < 0x4000000 {
+                    (0xF8 | ((n >> 24) & 0x3) as u8, 4)
+                } else {
+                    (0xFC | ((n >> 30) & 0x1) as u8, 5)
+                };
+                buf.push(first);
+                for _ in 0..count {
+                    let b = 0x80 | ((n >> (6 * (5 - count))) & 0x3F) as u8;
+                    buf.push(b);
+                }
+                continue;
+            }
+        }
+    }
+    Some(buf)
+}
+
+fn unquote_long_string(s: &str) -> Option<Vec<u8>> {
+    let sb = s.as_bytes();
+    let mut buf = Vec::new();
+
+    // Check delimiters. A long string begins with "[[", "[=[", "[==[", or so on
+    // (with any number of equal signs) and ends with "]]", "]=]", "]==]" or so
+    // on, with a matching number of equal signs.
+    if sb.len() < 4 || sb[0] != b'[' {
+        return None;
+    }
+    let mut level = 0;
+    while 1 + level < sb.len() && sb[1 + level] == b'=' {
+        level += 1;
+    }
+    if sb.len() < 4 + 2 * level
+        || sb[1 + level] != b'['
+        || sb[sb.len() - 1] != b']'
+        || sb[sb.len() - level - 2] != b']'
+    {
+        return None;
+    }
+    for p in sb.len() - level - 1..sb.len() - 1 {
+        if sb[p] != b'=' {
+            return None;
+        }
+    }
+
+    // Process characters inside the string.
+    // A newline immediately after the opening delimiter is ignored.
+    // The sequences CR, CR LF, and LF CR are translated to LF.
+    // All other characters are interpreted literally.
+    let mut p = 2 + level;
+    let delim = sb.len() - 2 - level;
+    let mut ignore_newline = true;
+    while p < delim {
+        let b = sb[p];
+        if b == b'\n' || b == b'\r' {
+            if !ignore_newline {
+                buf.push(b);
+                ignore_newline = true;
+            } else {
+                ignore_newline = false;
+            }
+        } else {
+            buf.push(b);
+        }
+        p += 1;
+    }
+    Some(buf)
+}
+
+pub enum Number {
+    Malformed,
+    Int(i64),
+    Float(f64),
+}
+
+/// Converts a string representing an integer or floating-point number to a
+/// Lua number. Lua supports 64-bit signed integers and 64-bit floating point
+/// numbers. If an integer literal can't be represented in 64 bits, it's
+/// interpreted as a floating point number instead.
+pub fn convert_number(s: &str) -> Number {
+    let sb = s.as_bytes();
+    let mut p = 0;
+    let whole: &[u8];
+    let mut frac = &sb[0..0];
+    let mut is_float = false;
+    let mut exp_neg = false;
+    let mut exp = &sb[0..0];
+    let mut radix = 10;
+
+    if sb.starts_with(b"0x") || sb.starts_with(b"0X") {
+        radix = 16;
+        p += 2;
+
+        let mut end = p;
+        while end < sb.len() && sb[end].is_ascii_hexdigit() {
+            end += 1;
+        }
+        whole = &sb[p..end];
+        p = end;
+
+        if p < sb.len() && sb[p] == b'.' {
+            is_float = true;
+            end = p + 1;
+            while end < sb.len() && sb[end].is_ascii_hexdigit() {
+                end += 1;
+            }
+            frac = &sb[p + 1..end];
+            p = end;
+        }
+
+        if p < sb.len() && (sb[p] == b'P' || sb[p] == b'p') {
+            is_float = true;
+            p += 1;
+            if p == sb.len() {
+                return Number::Malformed;
+            }
+            if sb[p] == b'-' {
+                exp_neg = true;
+                p += 1;
+            } else if sb[p] == b'+' {
+                p += 1;
+            }
+            if p == sb.len() {
+                return Number::Malformed;
+            }
+            for b in &sb[p..] {
+                if !b.is_ascii_hexdigit() {
+                    return Number::Malformed;
+                }
+            }
+            exp = &sb[p..];
+            p = sb.len();
+        }
+    } else {
+        let mut end = p;
+        while end < sb.len() && sb[end].is_ascii_digit() {
+            end += 1;
+        }
+        whole = &sb[p..end];
+        p = end;
+
+        if p < sb.len() && sb[p] == b'.' {
+            is_float = true;
+            end = p + 1;
+            while end < sb.len() && sb[end].is_ascii_digit() {
+                end += 1;
+            }
+            frac = &sb[p + 1..end];
+            p = end;
+        }
+
+        if p < sb.len() && (sb[p] == b'E' || sb[p] == b'e') {
+            is_float = true;
+            p += 1;
+            if p == sb.len() {
+                return Number::Malformed;
+            }
+            if sb[p] == b'-' {
+                exp_neg = true;
+                p += 1;
+            } else if sb[p] == b'+' {
+                p += 1;
+            }
+            if p == sb.len() {
+                return Number::Malformed;
+            }
+            for b in &sb[p..] {
+                if !b.is_ascii_digit() {
+                    return Number::Malformed;
+                }
+            }
+            exp = &sb[p..];
+            p = sb.len();
+        }
+    }
+
+    if p < sb.len() {
+        return Number::Malformed;
+    }
+
+    let whole = unsafe { str::from_utf8_unchecked(whole) };
+    let frac = unsafe { str::from_utf8_unchecked(frac) };
+    let exp = unsafe { str::from_utf8_unchecked(exp) };
+    if !is_float {
+        if let Ok(n) = i64::from_str_radix(whole, radix) {
+            return Number::Int(n);
+        }
+        // If the number doesn't fit in i64, fall through and treat it as
+        // a floating point number.
+    }
+
+    // Ideally, we'd build the bits for f64 here, but that's really
+    // complicated, and I don't want to. "How to Read Floating Point Numbers
+    // Accurately" by Clinger seems to be the correct reference.
+    let fs = if exp.is_empty() {
+        format!("{}.{}", whole, frac)
+    } else {
+        format!(
+            "{}.{}e{}{}",
+            whole,
+            frac,
+            if exp_neg { "-" } else { "" },
+            exp
+        )
+    };
+    match fs.parse::<f64>() {
+        Ok(n) => Number::Float(n),
+        _ => Number::Malformed,
+    }
 }
