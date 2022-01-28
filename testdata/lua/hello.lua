@@ -1,0 +1,1 @@
+print("hello") -- Output: hello
