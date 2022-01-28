@@ -203,6 +203,9 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                     self.resolve_lvalue(l);
                 }
             }
+            Stmt::Print { expr, .. } => {
+                self.resolve_expr(expr);
+            }
         }
     }
 

@@ -53,6 +53,11 @@ pub enum Stmt<'src> {
         left: Vec<LValue<'src>>,
         right: Vec<Expr<'src>>,
     },
+    // TODO: Remove this construct after standard library calls are supported.
+    // This is a hack to enable debugging and testing.
+    Print {
+        expr: Expr<'src>,
+    },
 }
 
 impl<'src> Stmt<'src> {
@@ -64,6 +69,7 @@ impl<'src> Stmt<'src> {
                 let end = right.last().unwrap().pos();
                 begin.combine(end)
             }
+            Stmt::Print { expr, .. } => expr.pos(),
         }
     }
 }
@@ -87,6 +93,7 @@ impl<'src> DisplayIndent for Stmt<'src> {
                 }
                 Ok(())
             }
+            Stmt::Print { expr, .. } => write!(f, "print({})", expr),
         }
     }
 }
@@ -218,6 +225,14 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         match self.peek() {
             Kind::Semi => self.parse_empty_stmt(),
             Kind::Ident => {
+                if self.tokens[self.next].text == "print" {
+                    self.take();
+                    self.expect(Kind::LParen)?;
+                    let expr = self.parse_expr()?;
+                    self.expect(Kind::RParen)?;
+                    return Ok(Stmt::Print { expr });
+                }
+
                 let e = self.parse_expr()?;
                 match self.peek() {
                     Kind::Comma | Kind::Eq => {

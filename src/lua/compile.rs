@@ -1,6 +1,6 @@
 use crate::data::{self, List, SetValue, Slice};
 use crate::heap::Handle;
-use crate::inst::Assembler;
+use crate::inst::{self, Assembler};
 use crate::lua::scope::{self, ScopeSet, VarKind, VarUse};
 use crate::lua::syntax::{self, Chunk, Expr, LValue, Stmt};
 use crate::lua::token::{self, Number, Token};
@@ -156,6 +156,10 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
                 for l in left.iter().rev() {
                     self.compile_assign(l);
                 }
+            }
+            Stmt::Print { expr, .. } => {
+                self.compile_expr(expr);
+                self.asm().sys(inst::SYS_PRINT);
             }
         }
     }

@@ -210,13 +210,13 @@ impl<'src, 'lm> Lexer<'src, 'lm> {
             };
 
             // Skip whitespace and comments.
-            if is_space(b) {
-                self.p += 1;
-                continue;
-            }
             if b == b'\n' {
                 self.p += 1;
                 self.lmap.add_line(self.base + self.p);
+                continue;
+            }
+            if is_space(b) {
+                self.p += 1;
                 continue;
             }
             if b == b'-' && bnext == b'-' {
@@ -494,6 +494,8 @@ impl<'src, 'lm> Lexer<'src, 'lm> {
 
             self.error(format!("unrecognized character: '{}'", b as char));
         }
+
+        self.token(Kind::EOF, self.p);
     }
 
     fn token(&mut self, kind: Kind, end: usize) {
@@ -527,7 +529,7 @@ impl<'src, 'lm> Lexer<'src, 'lm> {
 fn is_space(b: u8) -> bool {
     const VTAB: u8 = 11;
     const FORMFEED: u8 = 12;
-    b == b' ' || b == VTAB || b == FORMFEED || b == b'\r' || b == b'\t'
+    b == b' ' || b == VTAB || b == FORMFEED || b == b'\r' || b == b'\t' || b == b'\n'
 }
 
 fn is_ident_first(b: u8) -> bool {
@@ -577,115 +579,133 @@ fn unquote_short_string(s: &str) -> Option<Vec<u8>> {
         return None;
     }
 
+    let eos = sb.len() - 1;
     let mut p = 1;
-    while p < sb.len() - 1 {
-        if sb[p] == b'\\' {
-            // Escape
-            p += 1;
-            if p == sb.len() - 1 {
+    while p < eos {
+        let mut bs = p;
+        while bs < eos {
+            if sb[bs] == b'\n' || sb[bs] == b'\r' {
+                // Unescaped newline.
                 return None;
             }
-
-            // Single-character escapes
-            let c = match sb[p] {
-                b'a' => b'\x07', // BEL
-                b'b' => b'\x08', // backspace
-                b'f' => b'\x0c', // formfeed
-                b'n' => b'\n',   // newline
-                b'r' => b'\r',   // carriage return
-                b't' => b'\t',   // tab
-                b'v' => b'\x0b', // vertical tab
-                b'\\' => b'\\',
-                b'\'' => b'\'',
-                b'"' => b'"',
-                b'\n' => b'\n',
-                _ => 0,
-            };
-            if c != 0 {
-                buf.push(c);
-                p += 1;
-                continue;
+            if sb[bs] == b'\\' {
+                break;
             }
-
-            // Skip whitespace
-            if sb[p] == b'z' {
-                p += 1;
-                while p < sb.len() - 1 && is_space(sb[p]) {
-                    p += 1;
-                }
-                continue;
-            }
-
-            // Hexadecimal byte: exactly two digits.
-            if sb[p] == b'x' {
-                p += 1;
-                if p + 1 >= sb.len() - 1
-                    || !sb[p].is_ascii_hexdigit()
-                    || !sb[p + 1].is_ascii_hexdigit()
-                {
-                    return None;
-                }
-                let h = (decode_hex_digit(sb[p]) << 4) | decode_hex_digit(sb[p] + 1);
-                buf.push(h);
-                p += 2;
-                continue;
-            }
-
-            // Decimal byte: up to three digits.
-            if b'0' <= sb[p] && sb[p] <= b'9' {
-                let mut end = p + 1;
-                let mut n = (sb[p] - b'0') as u16;
-                while end < sb.len() - 1 && end < p + 3 && sb[end].is_ascii_digit() {
-                    n *= 10 + (sb[end] - b'0') as u16;
-                    end += 1;
-                }
-                if n >= 256 {
-                    return None;
-                }
-                buf.push(n as u8);
-                p = end;
-                continue;
-            }
-
-            // Unicode character: Lua uses an older UTF-8 encoding that allows
-            // code points up to 2^31. Rust doesn't support code points beyond
-            // U+10FFFF, so we need to encode them here manually.
-            if sb[p] == b'u' {
-                if p + 3 >= sb.len() - 1 || sb[p + 1] != b'{' {
-                    return None;
-                }
-                let mut end = p + 2;
-                let mut n: u32 = 0;
-                while end < sb.len() - 2 && end < p + 10 && sb[end].is_ascii_hexdigit() {
-                    n = (n << 4) | decode_hex_digit(sb[end]) as u32;
-                    end += 1;
-                }
-                if end == p + 2 || sb[end] != b'}' || n >= (2 << 31) {
-                    return None;
-                }
-                p = end + 1;
-
-                let (first, count) = if n < 0x80 {
-                    (n as u8, 0)
-                } else if n < 0x800 {
-                    (0xC0 | ((n >> 6) & 0x1F) as u8, 1)
-                } else if n < 0x10000 {
-                    (0xE0 | ((n >> 12) & 0xF) as u8, 2)
-                } else if n < 0x200000 {
-                    (0xF0 | ((n >> 18) & 0x7) as u8, 3)
-                } else if n < 0x4000000 {
-                    (0xF8 | ((n >> 24) & 0x3) as u8, 4)
-                } else {
-                    (0xFC | ((n >> 30) & 0x1) as u8, 5)
-                };
-                buf.push(first);
-                for _ in 0..count {
-                    let b = 0x80 | ((n >> (6 * (5 - count))) & 0x3F) as u8;
-                    buf.push(b);
-                }
-                continue;
-            }
+            bs += 1;
         }
+        buf.extend_from_slice(&sb[p..bs]);
+        p = bs;
+        if bs == eos {
+            break;
+        }
+
+        // Escape
+        p += 1;
+        if p == eos {
+            return None;
+        }
+
+        // Single-character escapes
+        let c = match sb[p] {
+            b'a' => b'\x07', // BEL
+            b'b' => b'\x08', // backspace
+            b'f' => b'\x0c', // formfeed
+            b'n' => b'\n',   // newline
+            b'r' => b'\r',   // carriage return
+            b't' => b'\t',   // tab
+            b'v' => b'\x0b', // vertical tab
+            b'\\' => b'\\',
+            b'\'' => b'\'',
+            b'"' => b'"',
+            b'\n' => b'\n',
+            _ => 0,
+        };
+        if c != 0 {
+            buf.push(c);
+            p += 1;
+            continue;
+        }
+
+        // Skip whitespace
+        if sb[p] == b'z' {
+            p += 1;
+            while p < eos && is_space(sb[p]) {
+                p += 1;
+            }
+            continue;
+        }
+
+        // Hexadecimal byte: exactly two digits.
+        if sb[p] == b'x' {
+            p += 1;
+            if p + 1 >= eos || !sb[p].is_ascii_hexdigit() || !sb[p + 1].is_ascii_hexdigit() {
+                return None;
+            }
+            let h = (decode_hex_digit(sb[p]) << 4) | decode_hex_digit(sb[p + 1]);
+            buf.push(h);
+            p += 2;
+            continue;
+        }
+
+        // Decimal byte: up to three digits.
+        if b'0' <= sb[p] && sb[p] <= b'9' {
+            let mut end = p + 1;
+            let mut n = (sb[p] - b'0') as u16;
+            while end < eos && end < p + 3 && sb[end].is_ascii_digit() {
+                n = n * 10 + (sb[end] - b'0') as u16;
+                end += 1;
+            }
+            if n >= 256 {
+                return None;
+            }
+            buf.push(n as u8);
+            p = end;
+            continue;
+        }
+
+        // Unicode character: Lua uses an older UTF-8 encoding that allows
+        // code points up to 2^31. Rust doesn't support code points beyond
+        // U+10FFFF, so we need to encode them here manually.
+        if sb[p] == b'u' {
+            if p + 3 >= eos || sb[p + 1] != b'{' {
+                return None;
+            }
+            let mut end = p + 2;
+            let mut n: u32 = 0;
+            while end < sb.len() - 2 && end < p + 10 && sb[end].is_ascii_hexdigit() {
+                n = (n << 4) | decode_hex_digit(sb[end]) as u32;
+                end += 1;
+            }
+            if end == p + 2 || sb[end] != b'}' || n >= (1 << 31) {
+                return None;
+            }
+            p = end + 1;
+
+            let (first, count) = if n < 0x80 {
+                (n as u8, 1)
+            } else if n < 0x800 {
+                (0xC0 | ((n >> 6) & 0x1F) as u8, 2)
+            } else if n < 0x10000 {
+                (0xE0 | ((n >> 12) & 0xF) as u8, 3)
+            } else if n < 0x200000 {
+                (0xF0 | ((n >> 18) & 0x7) as u8, 4)
+            } else if n < 0x4000000 {
+                (0xF8 | ((n >> 24) & 0x3) as u8, 5)
+            } else {
+                (0xFC | ((n >> 30) & 0x1) as u8, 6)
+            };
+            buf.push(first);
+            for i in 1..count {
+                let shift = 6 * (count - i - 1);
+                let mask = (1 << 6) - 1;
+                let b = 0x80 | ((n >> shift) & mask) as u8;
+                buf.push(b);
+            }
+            continue;
+        }
+
+        // Invalid escape.
+        return None;
     }
     Some(buf)
 }
@@ -721,26 +741,30 @@ fn unquote_long_string(s: &str) -> Option<Vec<u8>> {
     // A newline immediately after the opening delimiter is ignored.
     // The sequences CR, CR LF, and LF CR are translated to LF.
     // All other characters are interpreted literally.
-    let mut p = 2 + level;
     let delim = sb.len() - 2 - level;
-    let mut ignore_newline = true;
-    while p < delim {
-        let b = sb[p];
-        if b == b'\n' || b == b'\r' {
-            if !ignore_newline {
-                buf.push(b);
-                ignore_newline = true;
-            } else {
-                ignore_newline = false;
-            }
-        } else {
-            buf.push(b);
-        }
+    let mut p = 2 + level;
+    if sb[p] == b'\n' {
         p += 1;
+    } else if sb[p] == b'\r' && sb[p + 1] == b'\n' {
+        p += 2;
+    }
+    while p < delim {
+        let (b1, b2) = (sb[p], sb[p + 1]);
+        if (b1 == b'\r' && b2 == b'\n') || (b1 == b'\n' && b2 == b'\r') {
+            buf.push(b'\n');
+            p += 2;
+        } else if b1 == b'\r' {
+            buf.push(b'\n');
+            p += 1;
+        } else {
+            buf.push(b1);
+            p += 1;
+        }
     }
     Some(buf)
 }
 
+#[derive(Debug, PartialEq)]
 pub enum Number {
     Malformed,
     Int(i64),
@@ -866,6 +890,11 @@ pub fn convert_number(s: &str) -> Number {
     // Ideally, we'd build the bits for f64 here, but that's really
     // complicated, and I don't want to. "How to Read Floating Point Numbers
     // Accurately" by Clinger seems to be the correct reference.
+    if radix == 16 {
+        // TODO: parse this properly. The hack below does not work for
+        // hexadecimal numbers.
+        return Number::Malformed;
+    }
     let fs = if exp.is_empty() {
         format!("{}.{}", whole, frac)
     } else {
