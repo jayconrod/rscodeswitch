@@ -1,5 +1,5 @@
 use crate::data;
-use crate::heap::{Set, HEAP};
+use crate::heap::HEAP;
 use crate::inst;
 use crate::nanbox;
 use crate::package::{Closure, Function, Object, PropertyKind, Type};
@@ -227,7 +227,7 @@ impl<'a> Interpreter<'a> {
                         Type::Nil => {
                             return_errorf!("binary operator used with nil operand");
                         }
-                        Type::Bool | Type::Function | Type::Closure | Type::Object | Type::Pointer(_) => {
+                        Type::Bool | Type::Int64 | Type::Function | Type::Closure | Type::Object | Type::Pointer(_) => {
                             push!((l $op r) as u64, Type::Bool);
                         }
                         Type::Float64 => {
@@ -247,6 +247,8 @@ impl<'a> Interpreter<'a> {
                                 true $op true
                             } else if let (Some(lb), Some(rb)) = (nanbox::to_bool(l), nanbox::to_bool(r)) {
                                 lb $op rb
+                            } else if let (Some(ln), Some(rn)) = (nanbox::to_int(l), nanbox::to_int(r)) {
+                                ln $op rn
                             } else if let (Some(ln), Some(rn)) = (nanbox::to_f64(l), nanbox::to_f64(r)) {
                                 ln $op rn
                             } else if let (Some(ls), Some(rs)) = (nanbox::to_string(l), nanbox::to_string(r)) {
@@ -270,6 +272,11 @@ impl<'a> Interpreter<'a> {
                     let (r, ty) = pop!();
                     let l = pop!(ty);
                     match ty {
+                        Type::Int64 => {
+                            let l = r as i64;
+                            let r = l as i64;
+                            push!((l $op r) as u64, Type::Bool);
+                        }
                         Type::Float64 => {
                             let l = f64::from_bits(l);
                             let r = f64::from_bits(r);
@@ -282,6 +289,8 @@ impl<'a> Interpreter<'a> {
                         }
                         Type::Nanbox => {
                             let v = if let (Some(ln), Some(rn)) = (nanbox::to_f64(l), nanbox::to_f64(r)) {
+                                ln $op rn
+                            } else if let (Some(ln), Some(rn)) = (nanbox::to_int(l), nanbox::to_int(r)) {
                                 ln $op rn
                             } else if let (Some(ls), Some(rs)) = (nanbox::to_string(l), nanbox::to_string(r)) {
                                 ls $op rs
@@ -301,6 +310,11 @@ impl<'a> Interpreter<'a> {
                     let (r, ty) = pop!();
                     let l = pop!(ty);
                     match ty {
+                        Type::Int64 => {
+                            let l = l as i64;
+                            let r = r as i64;
+                            push!((l $op r) as u64, Type::Int64);
+                        }
                         Type::Float64 => {
                             let l = f64::from_bits(l);
                             let r = f64::from_bits(r);
@@ -309,6 +323,11 @@ impl<'a> Interpreter<'a> {
                         Type::Nanbox => {
                             let v = if let (Some(ln), Some(rn)) = (nanbox::to_f64(l), nanbox::to_f64(r)) {
                                 nanbox::from_f64(ln $op rn)
+                            } else if let (Some(_), Some(_)) = (nanbox::to_int(l), nanbox::to_int(r)) {
+                                // TODO: implement. We need a flag that says
+                                // what to do on overflow. Also, how we should
+                                // handle mixed operations.
+                                unimplemented!();
                             } else {
                                 return_errorf!("arithmetic operands must both be numbers (got {}, {})", nanbox::debug_type(l), nanbox::debug_type(r));
                             };
@@ -340,6 +359,13 @@ impl<'a> Interpreter<'a> {
                                     (nanbox::to_f64(l), nanbox::to_f64(r))
                                 {
                                     nanbox::from_f64(ln + rn)
+                                } else if let (Some(_), Some(_)) =
+                                    (nanbox::to_int(l), nanbox::to_int(r))
+                                {
+                                    // TODO: implement. We need a flag that says
+                                    // what to do on overflow. Also, how we should
+                                    // handle mixed operations.
+                                    unimplemented!();
                                 } else if let (Some(ls), Some(rs)) =
                                     (nanbox::to_string(l), nanbox::to_string(r))
                                 {
@@ -539,7 +565,8 @@ impl<'a> Interpreter<'a> {
                         push!(n.to_bits(), Type::Float64);
                     }
                     inst::INT64 => {
-                        unimplemented!();
+                        let n = u64::from_le_bytes(*((ip as usize + 1) as *const [u8; 8]));
+                        push!(n, Type::Int64);
                     }
                     inst::LOAD => {
                         let (p, pty) = pop!();
@@ -597,29 +624,7 @@ impl<'a> Interpreter<'a> {
                                 } else {
                                     return_errorf!("object does not have property '{}'", &name);
                                 };
-                                let value = if prop.kind == PropertyKind::Method {
-                                    // Method loaded as value without call.
-                                    // Allocate a new closure to bind the
-                                    // receiver, and return the bound method.
-                                    let method =
-                                        nanbox::to_closure(prop.value).unwrap().as_ref().unwrap();
-                                    let raw = Closure::alloc(
-                                        method.capture_count,
-                                        method.bound_arg_count + 1,
-                                    );
-                                    let bm = raw.as_mut().unwrap();
-                                    bm.function.set(&method.function);
-                                    for i in 0..method.capture_count {
-                                        bm.set_capture(i, method.capture(i));
-                                    }
-                                    for i in 0..method.bound_arg_count {
-                                        bm.set_bound_arg(i, method.bound_arg(i));
-                                    }
-                                    bm.set_bound_arg(method.bound_arg_count, r);
-                                    nanbox::from_closure(bm)
-                                } else {
-                                    prop.value
-                                };
+                                let value = o.property_value(prop);
                                 push!(value, Type::Nanbox);
                             }
                             _ => {
@@ -628,7 +633,35 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     inst::LOADNAMEDPROPORNIL => {
-                        unimplemented!();
+                        let i = *((ip as usize + 1) as *const u32) as usize;
+                        let name = &pp.strings[i];
+                        let (r, ty) = pop!();
+                        match ty {
+                            Type::Object => {
+                                // TODO: figure out where the property is based
+                                // on its static type. We need to know the
+                                // type of the property itself, too.
+                                unimplemented!();
+                            }
+                            Type::Nanbox => {
+                                let o = if let Some(o) = nanbox::to_object(r) {
+                                    o.as_ref().unwrap()
+                                } else {
+                                    return_errorf!(
+                                        "value is not an object: {}",
+                                        nanbox::debug_type(r)
+                                    )
+                                };
+                                let value = match o.property(name) {
+                                    Some(prop) => o.property_value(prop),
+                                    None => nanbox::from_nil(),
+                                };
+                                push!(value, Type::Nanbox);
+                            }
+                            _ => {
+                                return_errorf!("value is not an object: {}", ty);
+                            }
+                        }
                     }
                     inst::LOADPROTOTYPE => {
                         let (v, ty) = pop!();
@@ -667,6 +700,16 @@ impl<'a> Interpreter<'a> {
                         let b = match ty {
                             Type::Nil => nanbox::from_nil(),
                             Type::Bool => nanbox::from_bool(v != 0),
+                            Type::Int64 => {
+                                let n = v as i64;
+                                if nanbox::fits_in_small_int(n) {
+                                    nanbox::from_small_int(n)
+                                } else {
+                                    let p = HEAP.allocate(8) as *mut i64;
+                                    *p = n;
+                                    nanbox::from_big_int(p)
+                                }
+                            }
                             Type::String => {
                                 let s = v as *const data::String;
                                 nanbox::from_string(s)
@@ -962,6 +1005,9 @@ impl<'a> Interpreter<'a> {
             }
             Type::Bool => {
                 write!(self.w, "{}\n", v != 0)
+            }
+            Type::Int64 => {
+                write!(self.w, "{}\n", v as i64)
             }
             Type::Float64 => {
                 write!(self.w, "{}\n", f64::from_bits(v))

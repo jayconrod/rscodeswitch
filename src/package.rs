@@ -1,6 +1,7 @@
 use crate::data::{self, Slice};
 use crate::heap::{self, Handle, Ptr, Set, HEAP};
 use crate::inst;
+use crate::nanbox;
 use crate::pos::{FunctionLineMap, PackageLineMap};
 
 use std::error::Error;
@@ -116,6 +117,7 @@ impl fmt::Display for Class {
 pub enum Type {
     Nil,
     Bool,
+    Int64,
     Float64,
     String,
     Function,
@@ -130,6 +132,7 @@ impl Type {
         match self {
             Type::Nil => 0,
             Type::Bool => 1,
+            Type::Int64 => 8,
             Type::Float64 => 8,
             Type::Nanbox => 8,
             Type::Object => mem::size_of::<Object>(),
@@ -158,6 +161,7 @@ impl fmt::Display for Type {
                 let s = match self {
                     Type::Nil => "nil",
                     Type::Bool => "bool",
+                    Type::Int64 => "i64",
                     Type::Float64 => "f64",
                     Type::String => "string",
                     Type::Function => "function",
@@ -243,12 +247,21 @@ impl Closure {
     }
 }
 
+/// A run-time value that stores a prototype (a parent object) and a list of
+/// "own" properties.
 pub struct Object {
+    /// An optional parent object. In JavaScript, this is the object's
+    /// prototype, unique to each constructor. In Lua, this is the metatable.
+    /// Prototypes provide a form of inheritance.
     pub prototype: Ptr<Object>,
+
+    /// A set of "own" properties belonging to this object.
     pub properties: data::HashMap<data::String, Property>,
 }
 
 impl Object {
+    /// Looks up and returns a property, which may be in this object or the
+    /// prototype chain.
     pub fn property(&self, name: &data::String) -> Option<&Property> {
         unsafe {
             let mut o = self;
@@ -269,6 +282,9 @@ impl Object {
         }
     }
 
+    /// Sets a property. If the property exists in this object or in the
+    /// prototype chain, the existing property is written. Otherwise, a new
+    /// property is added to this object.
     pub fn set_property(&mut self, name: &data::String, kind: PropertyKind, value: u64) {
         unsafe {
             let mut o = (self as *mut Object).as_mut().unwrap();
@@ -292,6 +308,10 @@ impl Object {
         }
     }
 
+    /// Sets a property in this object. If the property exists in this object,
+    /// the existing property is written. Otherwise, a new property is added
+    /// to this object, even if a property of the same name exists in the
+    /// prototype chain.
     pub fn set_own_property(&mut self, name: &data::String, kind: PropertyKind, value: u64) {
         let prop = Property { kind, value };
         if let Some(existing) = self.properties.get_mut(name) {
@@ -300,8 +320,32 @@ impl Object {
             self.properties.insert(name, &prop);
         }
     }
+
+    /// Loads the value of a property. For methods, this allocates a
+    /// bound method closure.
+    pub unsafe fn property_value(&self, prop: &Property) -> u64 {
+        match prop.kind {
+            PropertyKind::Field => prop.value,
+            PropertyKind::Method => {
+                let method = nanbox::to_closure(prop.value).unwrap().as_ref().unwrap();
+                let raw = Closure::alloc(method.capture_count, method.bound_arg_count + 1);
+                let bm = raw.as_mut().unwrap();
+                bm.function.set(&method.function);
+                for i in 0..method.capture_count {
+                    bm.set_capture(i, method.capture(i));
+                }
+                for i in 0..method.bound_arg_count {
+                    bm.set_bound_arg(i, method.bound_arg(i));
+                }
+                let r = nanbox::from_object(self as *const Object);
+                bm.set_bound_arg(method.bound_arg_count, r);
+                nanbox::from_closure(bm)
+            }
+        }
+    }
 }
 
+/// A value held by an object.
 pub struct Property {
     pub kind: PropertyKind,
     pub value: u64,
@@ -321,9 +365,15 @@ impl Set for Property {
     }
 }
 
+/// Describes what kind of value is stored in a property.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum PropertyKind {
+    /// A regular value. Nothing special.
     Field,
+
+    /// A function which accepts the object that holds it as a receiver.
+    /// When a method is loaded without being called, the interpreter
+    /// allocates a "bound method" closure that captures the receiver.
     Method,
 }
 

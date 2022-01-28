@@ -109,6 +109,7 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
         });
         let ti = self.ensure_type(Type::Object, chunk.pos());
         self.asm().alloc(ti);
+        self.asm().nanbox();
         self.asm().storeglobal(env_var.slot as u32);
 
         // Compile statements.

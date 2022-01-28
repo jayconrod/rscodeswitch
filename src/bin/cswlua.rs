@@ -1,28 +1,39 @@
 use codeswitch::interpret::Interpreter;
 use codeswitch::lua::compile;
 
-use std::env;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::stdout;
 use std::path::PathBuf;
 use std::process;
 
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+struct Args {
+    #[clap(short, long, help = "Disassemble and print the compiled package")]
+    disassemble: bool,
+
+    path: String,
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if let Err(err) = run(&args[1..]) {
+    let args = Args::parse();
+    if let Err(err) = run(&args) {
         eprintln!("{}", err);
         process::exit(1);
     }
 }
 
-fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
-    if args.len() != 1 {
-        return Err(Box::new(StringError("expected exactly one argument")));
-    }
-
-    let path = PathBuf::from(&args[0]);
+fn run(args: &Args) -> Result<(), Box<dyn Error>> {
+    let path = PathBuf::from(&args.path);
     let package = compile::compile_file(&path)?;
+    if args.disassemble {
+        print!(
+            "-- begin disassembly --\n{}\n-- end disassembly --\n",
+            package
+        );
+    }
 
     let mut w = stdout();
     let mut interp = Interpreter::new(&mut w);
