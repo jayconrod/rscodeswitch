@@ -4,10 +4,11 @@ use crate::inst::{self, Assembler, Label};
 use crate::lox::scope::{self, CaptureFrom, ScopeSet, Var, VarKind, VarUse};
 use crate::lox::syntax::{self, Block, Decl, Expr, ForInit, LValue, Param, Program, Stmt};
 use crate::lox::token::{self, Kind, Token};
-use crate::package::{Function, Global, Package, Type};
+use crate::package::{Function, Global, Object, Package, Type};
 use crate::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
 use std::collections::HashMap;
 use std::fs;
+use std::mem;
 use std::path::Path;
 
 pub fn compile_file<'a>(path: &Path) -> Result<Box<Package>, ErrorList> {
@@ -42,7 +43,6 @@ struct Compiler<'a, 'b> {
     functions: Vec<Function>,
     strings: Handle<List<data::String>>,
     string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
-    types: Vec<Type>,
     asm_stack: Vec<Assembler>,
     errors: Vec<Error>,
 }
@@ -56,7 +56,6 @@ impl<'a, 'b> Compiler<'a, 'b> {
             functions: Vec::new(),
             strings: Handle::new(List::alloc()),
             string_index: Handle::new(data::HashMap::alloc()),
-            types: Vec::new(),
             asm_stack: vec![Assembler::new()],
             errors: Vec::new(),
         }
@@ -64,7 +63,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
 
     fn finish(mut self) -> Result<Box<Package>, ErrorList> {
         let mut asm = self.asm_stack.pop().unwrap();
-        asm.nil();
+        asm.constzero();
+        asm.mode(inst::MODE_PTR);
         asm.nanbox();
         asm.ret();
         match asm.finish() {
@@ -91,7 +91,6 @@ impl<'a, 'b> Compiler<'a, 'b> {
             globals: self.globals,
             functions: Vec::new(),
             strings: Handle::empty(),
-            types: self.types,
             line_map: PackageLineMap::from(self.lmap),
         });
         for f in &mut self.functions {
@@ -115,13 +114,14 @@ impl<'a, 'b> Compiler<'a, 'b> {
             } => {
                 // Ensure storage for the varaible.
                 let v = &self.scopes.vars[*var];
-                self.compile_define_prepare(v, name.text, *pos);
+                self.compile_define_prepare(v, name.text);
 
                 // Compile the initializer, if any.
                 if let Some(e) = init {
                     self.compile_expr(e);
                 } else {
-                    self.asm().nil();
+                    self.asm().constzero();
+                    self.asm().mode(inst::MODE_PTR);
                     self.asm().nanbox();
                 }
 
@@ -143,7 +143,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 // The closure has pointers to cells of variables captured from
                 // this function and enclosing functions.
                 self.line(*pos);
-                self.compile_define_prepare(&self.scopes.vars[*var], name.text, *pos);
+                self.compile_define_prepare(&self.scopes.vars[*var], name.text);
                 self.compile_closure(fn_index, *arg_scope, *pos);
 
                 // Store the closure in a variable.
@@ -158,7 +158,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 ..
             } => {
                 // Prepare storage for the class.
-                self.compile_define_prepare(&self.scopes.vars[*var], name.text, *pos);
+                self.compile_define_prepare(&self.scopes.vars[*var], name.text);
 
                 // Create a constructor closure which serves as the class value.
                 // The constructor allocates a new objects, sets its prototype,
@@ -175,11 +175,12 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 });
                 self.asm_stack.push(Assembler::new());
                 self.line(*pos);
-                let object_type_index = self.ensure_type(Type::Object, *pos);
-                self.asm().alloc(object_type_index);
+                let object_size = mem::size_of::<Object>() as u32;
+                self.asm().alloc(object_size);
                 self.asm().dup();
                 self.asm().prototype();
                 self.asm().storeprototype();
+                self.asm().mode(inst::MODE_OBJECT);
                 self.asm().nanbox();
                 if let Some(arg_count) = init_param_count {
                     self.asm().dup();
@@ -187,6 +188,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.asm().loadarg(i);
                     }
                     let si = self.ensure_string(b"init", *pos);
+                    self.asm().mode(inst::MODE_LUA);
                     self.asm().callnamedprop(si, arg_count);
                     self.asm().pop();
                 }
@@ -219,14 +221,15 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.asm().dup();
 
                 // Create a prototype object. Don't box it yet.
-                let prototype_type_index = self.ensure_type(Type::Object, *pos);
-                self.asm().alloc(prototype_type_index);
+                let object_size = mem::size_of::<Object>() as u32;
+                self.asm().alloc(object_size);
 
                 // If there's a base class, load its prototype, and use it as
                 // our prototype's prototype.
                 if let Some(base_var_use) = base_var_use {
                     self.asm().dup();
                     self.compile_var_use(&self.scopes.var_uses[*base_var_use]);
+                    self.asm().mode(inst::MODE_LUA);
                     self.asm().loadprototype();
                     self.asm().storeprototype();
                 }
@@ -237,6 +240,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     // instructions below expect both receiver and value
                     // to be boxed or neither.
                     self.asm().dup();
+                    self.asm().mode(inst::MODE_OBJECT);
                     self.asm().nanbox();
                 }
                 let mut method_names = HashMap::<&'a str, Pos>::new();
@@ -266,6 +270,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                                 self.compile_function(*name, params, body, *arg_scope, true, *pos);
                             self.compile_closure(fn_index, *arg_scope, *pos);
                             let name_index = self.ensure_string(name.text.as_bytes(), name.pos);
+                            self.asm().mode(inst::MODE_LUA);
                             self.asm().storemethod(name_index);
                             method_names.insert(name.text, *pos);
                         }
@@ -278,7 +283,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
 
                 // Store the prototype in the constructor closure,
                 // box the constructor closure, and store it in a variable.
+                self.asm().mode(inst::MODE_CLOSURE);
                 self.asm().storeprototype();
+                self.asm().mode(inst::MODE_CLOSURE);
                 self.asm().nanbox();
                 self.compile_define(&self.scopes.vars[*var]);
             }
@@ -302,12 +309,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let mut cell_slot = 0;
         for param in params {
             if self.scopes.vars[param.var].kind == VarKind::Capture {
-                let ty_index =
-                    self.ensure_type(Type::Pointer(Box::new(Type::Nanbox)), param.name.pos);
-                self.asm().alloc(ty_index);
+                self.asm().alloc(mem::size_of::<usize>() as u32); // pointer to nanbox
                 self.asm().dup();
                 let arg_slot = self.scopes.vars[param.var].slot as u16;
                 self.asm().loadarg(arg_slot);
+                self.asm().mode(inst::MODE_LUA);
                 self.asm().store();
                 assert_eq!(self.scopes.vars[param.var].cell_slot, cell_slot);
                 cell_slot += 1;
@@ -324,7 +330,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
         match body.decls.last() {
             Some(Decl::Stmt(Stmt::Return { .. })) => {}
             _ => {
-                self.asm().nil();
+                self.asm().constzero();
+                self.asm().mode(inst::MODE_PTR);
                 self.asm().nanbox();
                 self.asm().ret();
             }
@@ -385,6 +392,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
         };
         self.asm().newclosure(fn_index, capture_count, 0);
+        self.asm().mode(inst::MODE_CLOSURE);
         self.asm().nanbox();
     }
 
@@ -403,6 +411,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Stmt::Print { expr, .. } => {
                 self.compile_expr(expr);
+                self.asm().mode(inst::MODE_LUA);
                 self.asm().sys(inst::SYS_PRINT);
             }
             Stmt::If {
@@ -414,8 +423,10 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.compile_expr(cond);
                 match false_stmt {
                     None => {
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().not();
                         let mut after_label = Label::new();
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().bif(&mut after_label);
                         self.compile_stmt(true_stmt);
                         self.asm().bind(&mut after_label);
@@ -423,6 +434,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     Some(false_stmt) => {
                         let mut true_label = Label::new();
                         let mut after_label = Label::new();
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().bif(&mut true_label);
                         self.compile_stmt(false_stmt);
                         self.asm().b(&mut after_label);
@@ -440,6 +452,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.compile_stmt(body);
                 self.asm().bind(&mut cond_label);
                 self.compile_expr(cond);
+                self.asm().mode(inst::MODE_LUA);
                 self.asm().bif(&mut body_label);
             }
             Stmt::For {
@@ -474,6 +487,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     Some(cond) => {
                         self.asm().bind(&mut cond_label);
                         self.compile_expr(cond);
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().bif(&mut body_label);
                     }
                     None => {
@@ -489,7 +503,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.compile_expr(expr);
                     }
                     None => {
-                        self.asm().nil();
+                        self.asm().constzero();
+                        self.asm().mode(inst::MODE_PTR);
                         self.asm().nanbox();
                     }
                 }
@@ -502,25 +517,29 @@ impl<'a, 'b> Compiler<'a, 'b> {
         self.line(expr.pos());
         match expr {
             Expr::Nil(_) => {
-                self.asm().nil();
+                self.asm().constzero();
+                self.asm().mode(inst::MODE_PTR);
                 self.asm().nanbox();
             }
             Expr::Bool(t) => {
                 match t.text {
                     "true" => {
-                        self.asm().true_();
+                        self.asm().const_(1);
+                        self.asm().mode(inst::MODE_BOOL);
                         self.asm().nanbox();
                     }
                     "false" => {
-                        self.asm().false_();
+                        self.asm().constzero();
+                        self.asm().mode(inst::MODE_BOOL);
                         self.asm().nanbox();
                     }
                     _ => unreachable!(),
                 };
             }
             Expr::Number(t) => {
-                let n = t.text.parse().unwrap();
-                self.asm().float64(n);
+                let n: f64 = t.text.parse().unwrap();
+                self.asm().const_(n.to_bits());
+                self.asm().mode(inst::MODE_F64);
                 self.asm().nanbox();
             }
             Expr::String(t) => {
@@ -530,6 +549,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 }
                 let index = self.ensure_string(&raw[1..raw.len() - 1], t.pos);
                 self.asm().string(index);
+                self.asm().mode(inst::MODE_STRING);
                 self.asm().nanbox();
             }
             Expr::Var { var_use, .. } | Expr::This { var_use, .. } => {
@@ -555,17 +575,23 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             self.compile_expr(arg);
                         }
                         let si = self.ensure_string(name.text.as_bytes(), name.pos);
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().callnamedprop(si, arg_count);
                     }
                     Expr::Super { name, var_use, .. } => {
                         self.compile_var_use(&self.scopes.var_uses[*var_use]);
                         self.asm().dup();
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().loadprototype();
+                        self.asm().mode(inst::MODE_OBJECT);
                         self.asm().loadprototype();
+                        self.asm().mode(inst::MODE_OBJECT);
+                        self.asm().nanbox();
                         for arg in arguments {
                             self.compile_expr(arg);
                         }
                         let si = self.ensure_string(name.text.as_bytes(), name.pos);
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().callnamedpropwithprototype(si, arg_count);
                     }
                     _ => {
@@ -573,6 +599,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         for arg in arguments {
                             self.compile_expr(arg);
                         }
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().callvalue(arg_count);
                     }
                 }
@@ -581,7 +608,10 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.compile_expr(e);
                 match op.type_ {
                     Kind::Minus => self.asm().neg(),
-                    Kind::Bang => self.asm().not(),
+                    Kind::Bang => {
+                        self.asm().mode(inst::MODE_LUA);
+                        self.asm().not();
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -591,26 +621,34 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     Kind::And => {
                         let mut after_label = Label::new();
                         self.asm().dup();
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().not();
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().bif(&mut after_label);
                         self.asm().pop();
                         self.compile_expr(r);
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().not(); // ensure r produces a bool
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().not();
                         self.asm().bind(&mut after_label);
                     }
                     Kind::Or => {
                         let mut after_label = Label::new();
                         self.asm().dup();
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().bif(&mut after_label);
                         self.asm().pop();
                         self.compile_expr(r);
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().not(); // ensure r produces a bool
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().not();
                         self.asm().bind(&mut after_label);
                     }
                     _ => {
                         self.compile_expr(r);
+                        self.asm().mode(inst::MODE_LUA);
                         match op.type_ {
                             Kind::Eq => self.asm().eq(),
                             Kind::Ne => self.asm().ne(),
@@ -630,12 +668,15 @@ impl<'a, 'b> Compiler<'a, 'b> {
             Expr::Property { receiver, name, .. } => {
                 self.compile_expr(receiver);
                 let si = self.ensure_string(name.text.as_bytes(), name.pos);
+                self.asm().mode(inst::MODE_LUA);
                 self.asm().loadnamedprop(si);
             }
             Expr::Super { name, var_use, .. } => {
                 self.compile_var_use(&self.scopes.var_uses[*var_use]);
+                self.asm().mode(inst::MODE_LUA);
                 self.asm().loadprototype();
                 let si = self.ensure_string(name.text.as_bytes(), name.pos);
+                self.asm().mode(inst::MODE_LUA);
                 self.asm().loadnamedprop(si);
             }
             Expr::Assign(l, r) => {
@@ -653,6 +694,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.asm().swapn(1);
                         self.asm().swap();
                         let si = self.ensure_string(name.text.as_bytes(), name.pos);
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().storenamedprop(si);
                     }
                 }
@@ -660,7 +702,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
     }
 
-    fn compile_define_prepare(&mut self, var: &Var, name: &str, pos: Pos) {
+    fn compile_define_prepare(&mut self, var: &Var, name: &str) {
         match var.kind {
             VarKind::Global => {
                 *self.ensure_global(var.slot) = Global {
@@ -669,8 +711,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             VarKind::Local => {}
             VarKind::Capture => {
-                let tyi = self.ensure_type(Type::Pointer(Box::new(Type::Nanbox)), pos);
-                self.asm().alloc(tyi);
+                self.asm().alloc(mem::size_of::<usize>() as u32);
                 self.asm().dup();
             }
             VarKind::Argument => unreachable!(),
@@ -686,6 +727,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 // is already there, we don't need to emit an instruction.
             }
             VarKind::Capture => {
+                self.asm().mode(inst::MODE_LUA);
                 self.asm().store();
             }
             VarKind::Argument => unreachable!(),
@@ -717,6 +759,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     }
                 }
                 self.asm().swap();
+                self.asm().mode(inst::MODE_LUA);
                 self.asm().store();
             }
         }
@@ -780,19 +823,6 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 i
             }
         }
-    }
-
-    fn ensure_type(&mut self, type_: Type, pos: Pos) -> u32 {
-        // TODO: deduplicate types.
-        let i: u32 = match self.types.len().try_into() {
-            Ok(i) => i,
-            _ => {
-                self.error(pos, String::from("too many types"));
-                return !0;
-            }
-        };
-        self.types.push(type_);
-        i
     }
 
     fn asm(&mut self) -> &mut Assembler {

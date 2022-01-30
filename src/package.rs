@@ -11,7 +11,6 @@ use std::mem;
 pub struct Package {
     pub globals: Vec<Global>,
     pub functions: Vec<Function>,
-    pub types: Vec<Type>,
     pub strings: Handle<Slice<data::String>>,
     pub line_map: PackageLineMap,
 }
@@ -53,10 +52,6 @@ impl fmt::Display for Package {
         for func in &self.functions {
             write!(f, "{}{}", sep, func)?;
             sep = "\n\n";
-        }
-        for (i, ty) in self.types.iter().enumerate() {
-            write!(f, "{}type {} {}", sep, i, ty)?;
-            sep = "\n";
         }
         sep = "\n\n";
         for (i, s) in self.strings.iter().enumerate() {

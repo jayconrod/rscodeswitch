@@ -4,10 +4,11 @@ use crate::inst::{self, Assembler};
 use crate::lua::scope::{self, ScopeSet, VarKind, VarUse};
 use crate::lua::syntax::{self, Chunk, Expr, LValue, Stmt};
 use crate::lua::token::{self, Number, Token};
-use crate::package::{Function, Global, Package, Type};
+use crate::package::{Function, Global, Object, Package};
 use crate::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
 
 use std::fs;
+use std::mem;
 use std::path::Path;
 
 pub fn compile_file(path: &Path) -> Result<Box<Package>, ErrorList> {
@@ -40,7 +41,6 @@ struct Compiler<'src, 'ss, 'lm> {
     functions: Vec<Function>,
     strings: Handle<List<data::String>>,
     string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
-    types: Vec<Type>,
     asm_stack: Vec<Assembler>,
     errors: Vec<Error>,
 }
@@ -54,14 +54,14 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
             functions: Vec::new(),
             strings: Handle::new(List::alloc()),
             string_index: Handle::new(data::HashMap::alloc()),
-            types: Vec::new(),
             asm_stack: vec![Assembler::new()],
             errors: Vec::new(),
         }
     }
 
     fn finish(mut self) -> Result<Box<Package>, ErrorList> {
-        self.asm().nil();
+        self.asm().constzero();
+        self.asm().mode(inst::MODE_PTR);
         self.asm().nanbox();
         self.asm().ret();
         match self.asm_stack.pop().unwrap().finish() {
@@ -88,7 +88,6 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
             globals: self.globals,
             functions: Vec::new(),
             strings: Handle::empty(),
-            types: self.types,
             line_map: PackageLineMap::from(self.lmap),
         });
         for f in &mut self.functions {
@@ -107,8 +106,9 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
         self.globals.push(Global {
             name: String::from("_ENV"),
         });
-        let ti = self.ensure_type(Type::Object, chunk.pos());
-        self.asm().alloc(ti);
+        let object_size = mem::size_of::<Object>() as u32;
+        self.asm().alloc(object_size);
+        self.asm().mode(inst::MODE_OBJECT);
         self.asm().nanbox();
         self.asm().storeglobal(env_var.slot as u32);
 
@@ -145,7 +145,8 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
                     }
                 } else {
                     for _ in 0..left.len() - right.len() {
-                        self.asm().nil();
+                        self.asm().constzero();
+                        self.asm().mode(inst::MODE_PTR);
                         self.asm().nanbox();
                     }
                 }
@@ -160,6 +161,7 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
             }
             Stmt::Print { expr, .. } => {
                 self.compile_expr(expr);
+                self.asm().mode(inst::MODE_LUA);
                 self.asm().sys(inst::SYS_PRINT);
             }
         }
@@ -171,19 +173,43 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
             Expr::Literal(t) => {
                 match t.kind {
                     token::Kind::Nil => {
-                        self.asm().nil();
+                        self.asm().constzero();
+                        self.asm().mode(inst::MODE_PTR);
                     }
                     token::Kind::True => {
-                        self.asm().true_();
+                        self.asm().const_(1);
+                        self.asm().mode(inst::MODE_BOOL);
                     }
                     token::Kind::False => {
-                        self.asm().false_();
+                        self.asm().constzero();
+                        self.asm().mode(inst::MODE_BOOL);
                     }
-                    token::Kind::Number => {
-                        self.compile_number(t);
-                    }
+                    token::Kind::Number => match token::convert_number(t.text) {
+                        Number::Int(n) if n == 0 => {
+                            self.asm().constzero();
+                        }
+                        Number::Int(n) => {
+                            self.asm().const_(n as u64);
+                        }
+                        Number::Float(n) => {
+                            self.asm().const_(n.to_bits());
+                            self.asm().mode(inst::MODE_F64);
+                        }
+                        Number::Malformed => {
+                            self.error(t.pos(), format!("malformed number"));
+                        }
+                    },
                     token::Kind::String => {
-                        self.compile_string(t);
+                        let s = match token::unquote_string(t.text) {
+                            Some(s) => s,
+                            None => {
+                                self.error(t.pos(), format!("malformed string"));
+                                return;
+                            }
+                        };
+                        let si = self.ensure_string(&s, t.pos());
+                        self.asm().string(si);
+                        self.asm().mode(inst::MODE_STRING);
                     }
                     _ => unreachable!(),
                 }
@@ -238,6 +264,7 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
                         self.asm().loadglobal(0); // _ENV
                         self.asm().swap();
                         let si = self.ensure_string(name.text.as_bytes(), name.pos());
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().storenamedprop(si);
                     }
                 }
@@ -260,37 +287,9 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
         } else {
             self.asm().loadglobal(0); // _ENV
             let si = self.ensure_string(name.text.as_bytes(), name.pos());
+            self.asm().mode(inst::MODE_LUA);
             self.asm().loadnamedpropornil(si);
         }
-    }
-
-    fn compile_number(&mut self, t: &Token<'src>) {
-        match token::convert_number(t.text) {
-            Number::Int(n) => {
-                self.asm().int64(n);
-                self.asm().nanbox();
-            }
-            Number::Float(n) => {
-                self.asm().float64(n);
-                self.asm().nanbox();
-            }
-            Number::Malformed => {
-                self.error(t.pos(), format!("malformed number"));
-            }
-        }
-    }
-
-    fn compile_string(&mut self, t: &Token<'src>) {
-        let s = match token::unquote_string(t.text) {
-            Some(s) => s,
-            None => {
-                self.error(t.pos(), format!("malformed string"));
-                return;
-            }
-        };
-        let si = self.ensure_string(&s, t.pos());
-        self.asm().string(si);
-        self.asm().nanbox();
     }
 
     fn ensure_string(&mut self, s: &[u8], pos: Pos) -> u32 {
@@ -310,19 +309,6 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
                 i
             }
         }
-    }
-
-    fn ensure_type(&mut self, type_: Type, pos: Pos) -> u32 {
-        // TODO: deduplicate types.
-        let i: u32 = match self.types.len().try_into() {
-            Ok(i) => i,
-            _ => {
-                self.error(pos, String::from("too many types"));
-                return !0;
-            }
-        };
-        self.types.push(type_);
-        i
     }
 
     fn asm(&mut self) -> &mut Assembler {

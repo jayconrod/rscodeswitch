@@ -103,6 +103,7 @@ pub fn to_int(v: u64) -> Option<i64> {
 }
 
 pub fn from_string(s: *const data::String) -> u64 {
+    assert!(!s.is_null());
     QNAN | TAG_STRING | s as u64
 }
 
@@ -115,6 +116,7 @@ pub fn to_string(v: u64) -> Option<*const data::String> {
 }
 
 pub fn from_closure(f: *const Closure) -> u64 {
+    assert!(!f.is_null());
     QNAN | TAG_CLOSURE | f as u64
 }
 
@@ -127,6 +129,7 @@ pub fn to_closure(v: u64) -> Option<*const Closure> {
 }
 
 pub fn from_object(f: *const Object) -> u64 {
+    assert!(!f.is_null());
     QNAN | TAG_OBJECT | f as u64
 }
 

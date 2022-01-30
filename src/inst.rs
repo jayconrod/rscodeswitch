@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 51.
+// Next opcode: 54.
 pub const ADD: u8 = 20;
 pub const ALLOC: u8 = 35;
 pub const B: u8 = 27;
@@ -13,15 +13,17 @@ pub const CALLNAMEDPROP: u8 = 45;
 pub const CALLNAMEDPROPWITHPROTOTYPE: u8 = 47;
 pub const CALLVALUE: u8 = 32;
 pub const CAPTURE: u8 = 38;
+pub const CONST: u8 = 51;
+pub const CONSTZERO: u8 = 52;
 pub const DIV: u8 = 23;
 pub const DUP: u8 = 13;
 pub const EQ: u8 = 14;
-pub const FALSE: u8 = 8;
-pub const FLOAT64: u8 = 2;
+// pub const FALSE: u8 = 8;
+// pub const FLOAT64: u8 = 2;
 pub const FUNCTION: u8 = 31;
 pub const GE: u8 = 18;
 pub const GT: u8 = 19;
-pub const INT64: u8 = 49;
+// pub const INT64: u8 = 49;
 pub const LE: u8 = 16;
 pub const LOAD: u8 = 36;
 pub const LOADARG: u8 = 29;
@@ -36,9 +38,10 @@ pub const NANBOX: u8 = 6;
 pub const NE: u8 = 15;
 pub const NEG: u8 = 25;
 pub const NEWCLOSURE: u8 = 39;
-pub const NIL: u8 = 33;
+// pub const NIL: u8 = 33;
 pub const NOP: u8 = 1;
 pub const NOT: u8 = 24;
+pub const NOTB: u8 = 53;
 pub const POP: u8 = 3;
 pub const PROTOTYPE: u8 = 48;
 pub const RET: u8 = 4;
@@ -54,22 +57,52 @@ pub const SUB: u8 = 21;
 pub const SWAP: u8 = 34;
 pub const SWAPN: u8 = 44;
 pub const SYS: u8 = 5;
-pub const TRUE: u8 = 7;
+// pub const TRUE: u8 = 7;
 
 pub const SYS_PRINT: u8 = 1;
 
-pub fn size(op: u8) -> usize {
+pub const MODE_I64: u8 = 255;
+pub const MODE_I32: u8 = 254;
+pub const MODE_I16: u8 = 253;
+pub const MODE_I8: u8 = 252;
+pub const MODE_U64: u8 = 251;
+pub const MODE_U32: u8 = 250;
+pub const MODE_U16: u8 = 249;
+pub const MODE_U8: u8 = 248;
+pub const MODE_F64: u8 = 247;
+pub const MODE_F32: u8 = 246;
+pub const MODE_BOOL: u8 = 245;
+pub const MODE_PTR: u8 = 244;
+pub const MODE_STRING: u8 = 243;
+pub const MODE_CLOSURE: u8 = 242;
+pub const MODE_OBJECT: u8 = 241;
+pub const MODE_LUA: u8 = 224;
+pub const MODE_MIN: u8 = 224;
+
+const INVALID_SIZE: usize = 255;
+
+pub fn size_at(insts: &[u8]) -> usize {
+    let (mode_size, inst_size) = if insts[0] >= MODE_MIN {
+        (1, size(insts[1]))
+    } else {
+        (0, size(insts[0]))
+    };
+    assert_ne!(inst_size, INVALID_SIZE);
+    mode_size + inst_size
+}
+
+pub const fn size(op: u8) -> usize {
     match op {
-        ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL | NANBOX
-        | NE | NEG | NIL | NOP | NOT | POP | PROTOTYPE | RET | STORE | STOREPROTOTYPE | SUB
-        | SWAP | TRUE => 1,
+        ADD | CONSTZERO | DIV | DUP | EQ | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL
+        | NANBOX | NE | NEG | NOP | NOT | NOTB | POP | PROTOTYPE | RET | STORE | STOREPROTOTYPE
+        | SUB | SWAP => 1,
         SWAPN | SYS => 2,
         CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
         ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | LOADNAMEDPROPORNIL
         | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP | STRING => 5,
         CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE => 7,
-        FLOAT64 | INT64 | NEWCLOSURE => 9,
-        _ => panic!("unknown opcode"),
+        CONST | NEWCLOSURE => 9,
+        _ => 255,
     }
 }
 
@@ -83,15 +116,14 @@ pub fn mnemonic(op: u8) -> &'static str {
         CALLNAMEDPROPWITHPROTOTYPE => "callnamedpropwithprototype",
         CALLVALUE => "callvalue",
         CAPTURE => "capture",
+        CONST => "const",
+        CONSTZERO => "constzero",
         DIV => "div",
         DUP => "dup",
         EQ => "eq",
-        FALSE => "false",
-        FLOAT64 => "float64",
         FUNCTION => "function",
         GE => "ge",
         GT => "gt",
-        INT64 => "int64",
         LE => "le",
         LOAD => "load",
         LOADARG => "loadarg",
@@ -106,9 +138,9 @@ pub fn mnemonic(op: u8) -> &'static str {
         NE => "ne",
         NEG => "neg",
         NEWCLOSURE => "newclosure",
-        NIL => "nil",
         NOP => "nop",
         NOT => "not",
+        NOTB => "notb",
         POP => "pop",
         PROTOTYPE => "prototype",
         RET => "ret",
@@ -124,7 +156,6 @@ pub fn mnemonic(op: u8) -> &'static str {
         SWAP => "swap",
         SWAPN => "swapn",
         SYS => "sys",
-        TRUE => "true",
         _ => panic!("unknown opcode"),
     }
 }
@@ -191,13 +222,17 @@ impl Assembler {
         }
     }
 
+    pub fn mode(&mut self, mode: u8) {
+        self.write_u8(mode);
+    }
+
     pub fn add(&mut self) {
         self.write_u8(ADD);
     }
 
-    pub fn alloc(&mut self, index: u32) {
+    pub fn alloc(&mut self, size: u32) {
         self.write_u8(ALLOC);
-        self.write_u32(index);
+        self.write_u32(size);
     }
 
     pub fn b(&mut self, label: &mut Label) {
@@ -232,6 +267,15 @@ impl Assembler {
         self.write_u16(i);
     }
 
+    pub fn const_(&mut self, v: u64) {
+        self.write_u8(CONST);
+        self.write_u64(v);
+    }
+
+    pub fn constzero(&mut self) {
+        self.write_u8(CONSTZERO);
+    }
+
     pub fn div(&mut self) {
         self.write_u8(DIV);
     }
@@ -242,15 +286,6 @@ impl Assembler {
 
     pub fn eq(&mut self) {
         self.write_u8(EQ);
-    }
-
-    pub fn false_(&mut self) {
-        self.write_u8(FALSE);
-    }
-
-    pub fn float64(&mut self, n: f64) {
-        self.write_u8(FLOAT64);
-        self.write_f64(n);
     }
 
     pub fn function(&mut self, index: u32) {
@@ -264,11 +299,6 @@ impl Assembler {
 
     pub fn gt(&mut self) {
         self.write_u8(GT);
-    }
-
-    pub fn int64(&mut self, n: i64) {
-        self.write_u8(INT64);
-        self.write_i64(n);
     }
 
     pub fn le(&mut self) {
@@ -335,16 +365,16 @@ impl Assembler {
         self.write_u16(bound_arg_count);
     }
 
-    pub fn nil(&mut self) {
-        self.write_u8(NIL);
-    }
-
     pub fn nop(&mut self) {
         self.write_u8(NOP);
     }
 
     pub fn not(&mut self) {
         self.write_u8(NOT);
+    }
+
+    pub fn notb(&mut self) {
+        self.write_u8(NOTB);
     }
 
     pub fn pop(&mut self) {
@@ -415,10 +445,6 @@ impl Assembler {
         self.write_u8(sys);
     }
 
-    pub fn true_(&mut self) {
-        self.write_u8(TRUE);
-    }
-
     fn write_u8(&mut self, n: u8) {
         self.insts.push(n)
     }
@@ -431,11 +457,7 @@ impl Assembler {
         self.insts.extend_from_slice(&n.to_le_bytes());
     }
 
-    fn write_i64(&mut self, n: i64) {
-        self.insts.extend_from_slice(&n.to_le_bytes());
-    }
-
-    fn write_f64(&mut self, n: f64) {
+    fn write_u64(&mut self, n: u64) {
         self.insts.extend_from_slice(&n.to_le_bytes());
     }
 
@@ -492,18 +514,19 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
     let mut label_offsets = Vec::new();
     let mut p = 0;
     while p < insts.len() {
-        match insts[p] {
-            B | BIF => {
-                if p + 5 > insts.len() {
-                    return Err(fmt::Error);
-                }
-                let delta = i32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
-                let offset = (p as i32 + 1 + delta) as usize;
-                label_offsets.push(offset);
-            }
-            _ => (),
+        if insts[p] >= MODE_MIN {
+            p += 1;
+            continue;
         }
-        p += size(insts[p]);
+        if insts[p] == B || insts[p] == BIF {
+            if p + 5 > insts.len() {
+                return Err(fmt::Error);
+            }
+            let delta = i32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
+            let offset = (p as i32 + 1 + delta) as usize;
+            label_offsets.push(offset);
+        }
+        p += size_at(&insts[p..]);
     }
     label_offsets.sort();
     label_offsets.dedup();
@@ -516,12 +539,35 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
             write!(f, "L{}:\n", li)?;
             li += 1;
         }
-        f.write_str("  ")?;
-        f.write_str(mnemonic(insts[p]))?;
+        let mode = if insts[p] < MODE_MIN {
+            ""
+        } else {
+            let m = insts[p];
+            p += 1;
+            match m {
+                MODE_I32 => ".i32",
+                MODE_I16 => ".i16",
+                MODE_I8 => ".i8",
+                MODE_U64 => ".u64",
+                MODE_U32 => ".u32",
+                MODE_U16 => ".u16",
+                MODE_U8 => ".u8",
+                MODE_F64 => ".f64",
+                MODE_F32 => ".f32",
+                MODE_BOOL => ".bool",
+                MODE_PTR => ".ptr",
+                MODE_STRING => ".string",
+                MODE_CLOSURE => ".closure",
+                MODE_OBJECT => ".object",
+                MODE_LUA => ".lua",
+                _ => return Err(fmt::Error),
+            }
+        };
+        write!(f, "  {}{}", mnemonic(insts[p]), mode)?;
         match insts[p] {
-            ADD | DIV | DUP | EQ | FALSE | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL
-            | NANBOX | NE | NEG | NIL | NOP | NOT | POP | PROTOTYPE | RET | STORE
-            | STOREPROTOTYPE | SUB | SWAP | TRUE => {
+            ADD | CONSTZERO | DIV | DUP | EQ | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL
+            | NANBOX | NE | NEG | NOP | NOT | NOTB | POP | PROTOTYPE | RET | STORE
+            | STOREPROTOTYPE | SUB | SWAP => {
                 f.write_str("\n")?;
             }
             B | BIF => {
@@ -562,18 +608,11 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let n = u32::from_le_bytes(insts[p + 1..p + 5].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
-            FLOAT64 => {
+            CONST => {
                 if p + 9 > insts.len() {
                     return Err(fmt::Error);
                 }
-                let n = f64::from_le_bytes(insts[p + 1..p + 9].try_into().unwrap());
-                write!(f, " {}\n", n)?;
-            }
-            INT64 => {
-                if p + 9 > insts.len() {
-                    return Err(fmt::Error);
-                }
-                let n = i64::from_le_bytes(insts[p + 1..p + 9].try_into().unwrap());
+                let n = u64::from_le_bytes(insts[p + 1..p + 9].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
             NEWCLOSURE => {
