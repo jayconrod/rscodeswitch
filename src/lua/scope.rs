@@ -1,6 +1,6 @@
 use crate::lua::syntax::{Chunk, Expr, LValue, ScopeID, Stmt, VarID, VarUseID};
 use crate::lua::token::Token;
-use crate::pos::{Error, ErrorList, LineMap, Pos};
+use crate::pos::{Error, LineMap, Pos};
 
 use std::collections::HashMap;
 
@@ -43,6 +43,7 @@ impl<'src> ScopeSet<'src> {
         if self.vars.len() <= id.0 {
             self.vars.resize_with(id.0 + 1, || Var {
                 kind: VarKind::Local,
+                attr: Attr::None,
                 slot: 0,
                 cell_slot: 0,
                 pos: Pos { begin: 0, end: 0 },
@@ -99,6 +100,9 @@ pub struct Var {
     /// indicates the parameter that is moved into the cell.
     pub kind: VarKind,
 
+    /// The attribute the variable was declared with, if any.
+    pub attr: Attr,
+
     /// The index of the variable within its storage.
     pub slot: usize,
 
@@ -107,6 +111,26 @@ pub struct Var {
     pub cell_slot: usize,
 
     pub pos: Pos,
+}
+
+/// Variable attributes, declared in a local statement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Attr {
+    None,
+
+    /// The variable may not be assigned after its declaration.
+    Const,
+
+    /// The variable's __close metamethod will be called when it goes out of
+    /// scope. Like Const, Close variables may not be assigned.
+    /// TODO: implement Close
+    Close,
+}
+
+impl Attr {
+    pub fn is_const(self) -> bool {
+        self == Attr::Const || self == Attr::Close
+    }
 }
 
 /// Describes a reference to a variable.
@@ -143,12 +167,13 @@ pub enum CaptureFrom {
     Closure(usize),
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ScopeKind {
     Function,
     Local,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum VarKind {
     Global,
     Parameter,
@@ -156,14 +181,15 @@ pub enum VarKind {
     Capture,
 }
 
-pub fn resolve<'src>(chunk: &Chunk<'src>, lmap: &LineMap) -> Result<ScopeSet<'src>, ErrorList> {
+pub fn resolve<'src>(
+    chunk: &Chunk<'src>,
+    lmap: &LineMap,
+    errors: &mut Vec<Error>,
+) -> ScopeSet<'src> {
     let mut r = Resolver::new(lmap);
     r.resolve_chunk(chunk);
-    if r.errors.is_empty() {
-        Ok(r.scope_set)
-    } else {
-        Err(ErrorList(r.errors))
-    }
+    errors.extend(r.errors);
+    r.scope_set
 }
 
 struct Resolver<'src, 'lm> {
@@ -185,7 +211,13 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
 
     fn resolve_chunk(&mut self, chunk: &Chunk<'src>) {
         self.enter(chunk.scope, ScopeKind::Local);
-        self.declare(chunk.env_var, "_ENV", VarKind::Global, chunk.pos());
+        self.declare(
+            chunk.env_var,
+            "_ENV",
+            VarKind::Global,
+            Attr::None,
+            chunk.pos(),
+        );
         for stmt in &chunk.stmts {
             self.resolve_stmt(stmt);
         }
@@ -201,6 +233,35 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 }
                 for l in left {
                     self.resolve_lvalue(l);
+                }
+            }
+            Stmt::Local { left, right, .. } => {
+                for r in right {
+                    self.resolve_expr(r);
+                }
+                let mut close_count = 0;
+                for l in left {
+                    let attr = match l.attr {
+                        None => Attr::None,
+                        Some(t) if t.text == "const" => Attr::Const,
+                        Some(t) if t.text == "close" => {
+                            // TODO: implement close
+                            close_count += 1;
+                            self.error(t.pos(), format!("close is not implemented yet"));
+                            Attr::None
+                        }
+                        Some(t) => {
+                            self.error(t.pos(), format!("unknown attribute: '{}'", t.text));
+                            Attr::None
+                        }
+                    };
+                    self.declare(l.var, l.name.text, VarKind::Local, attr, l.pos);
+                }
+                if close_count > 1 {
+                    self.error(
+                        stmt.pos(),
+                        format!("multiple variables have 'close' attribute"),
+                    );
                 }
             }
             Stmt::Print { expr, .. } => {
@@ -220,15 +281,34 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
 
     fn resolve_lvalue(&mut self, lvalue: &LValue<'src>) {
         match lvalue {
-            LValue::Var { name, var_use, .. } => {
-                self.resolve(*name, *var_use);
+            LValue::Var {
+                name,
+                var_use: vuid,
+                ..
+            } => {
+                self.resolve(*name, *vuid);
+                let var_use = &self.scope_set.var_uses[vuid.0];
+                if let Some(vid) = var_use.var {
+                    let var = &self.scope_set.vars[vid.0];
+                    if var.attr.is_const() {
+                        self.error(
+                            lvalue.pos(),
+                            format!("attempt to assign to const variable '{}'", name.text),
+                        );
+                    }
+                }
             }
         }
     }
 
-    fn declare(&mut self, vid: VarID, name: &'src str, kind: VarKind, pos: Pos) {
+    fn declare(&mut self, vid: VarID, name: &'src str, kind: VarKind, attr: Attr, pos: Pos) {
         let scope = &mut self.scope_set.scopes[self.scope_stack.last().unwrap().0];
-        let slot = scope.next_slot();
+        let slot = if kind == VarKind::Global {
+            debug_assert_eq!(name, "_ENV");
+            0
+        } else {
+            scope.next_slot()
+        };
         let too_many_err = match kind {
             VarKind::Global if slot > u32::MAX as usize => Some("too many global variables"),
             VarKind::Parameter if slot > u16::MAX as usize => Some("too many parameters"),
@@ -246,6 +326,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
         scope.vars.insert(name, vid);
         let var = Var {
             kind,
+            attr,
             slot,
             cell_slot: 0,
             pos,
@@ -301,5 +382,11 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
 
     fn leave(&mut self) {
         self.scope_stack.pop();
+    }
+    fn error(&mut self, pos: Pos, message: String) {
+        self.errors.push(Error {
+            position: self.lmap.position(pos),
+            message,
+        })
     }
 }

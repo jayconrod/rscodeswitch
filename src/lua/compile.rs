@@ -1,7 +1,7 @@
 use crate::data::{self, List, SetValue, Slice};
 use crate::heap::Handle;
 use crate::inst::{self, Assembler};
-use crate::lua::scope::{self, ScopeSet, VarKind, VarUse};
+use crate::lua::scope::{self, ScopeSet, Var, VarKind, VarUse};
 use crate::lua::syntax::{self, Chunk, Expr, LValue, Stmt};
 use crate::lua::token::{self, Number, Token};
 use crate::package::{Function, Global, Object, Package};
@@ -18,23 +18,30 @@ pub fn compile_file(path: &Path) -> Result<Box<Package>, ErrorList> {
         ErrorList(vec![wrapped])
     })?;
     let mut lmap = LineMap::new();
-    let tokens = token::lex(path, &data, &mut lmap)?;
-    let chunk = syntax::parse(&tokens, &lmap)?;
-    let scope_set = scope::resolve(&chunk, &lmap)?;
-    compile_chunk(&chunk, &scope_set, &lmap)
+    let mut errors = Vec::new();
+    let tokens = token::lex(path, &data, &mut lmap, &mut errors);
+    let chunk = syntax::parse(&tokens, &lmap, &mut errors);
+    let scope_set = scope::resolve(&chunk, &lmap, &mut errors);
+    if let Some(package) = compile_chunk(&chunk, &scope_set, &lmap, &mut errors) {
+        Ok(package)
+    } else {
+        errors.sort_by(|l, r| l.position.cmp(&r.position));
+        Err(ErrorList(errors))
+    }
 }
 
 pub fn compile_chunk(
     chunk: &Chunk,
     scope_set: &ScopeSet,
     lmap: &LineMap,
-) -> Result<Box<Package>, ErrorList> {
-    let mut cmp = Compiler::new(scope_set, lmap);
+    errors: &mut Vec<Error>,
+) -> Option<Box<Package>> {
+    let mut cmp = Compiler::new(scope_set, lmap, errors);
     cmp.compile_chunk(chunk);
     cmp.finish()
 }
 
-struct Compiler<'src, 'ss, 'lm> {
+struct Compiler<'src, 'ss, 'lm, 'err> {
     scope_set: &'ss ScopeSet<'src>,
     lmap: &'lm LineMap,
     globals: Vec<Global>,
@@ -42,11 +49,15 @@ struct Compiler<'src, 'ss, 'lm> {
     strings: Handle<List<data::String>>,
     string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
     asm_stack: Vec<Assembler>,
-    errors: Vec<Error>,
+    errors: &'err mut Vec<Error>,
 }
 
-impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
-    fn new(scope_set: &'ss ScopeSet<'src>, lmap: &'lm LineMap) -> Compiler<'src, 'ss, 'lm> {
+impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
+    fn new(
+        scope_set: &'ss ScopeSet<'src>,
+        lmap: &'lm LineMap,
+        errors: &'err mut Vec<Error>,
+    ) -> Compiler<'src, 'ss, 'lm, 'err> {
         Compiler {
             scope_set,
             lmap,
@@ -55,11 +66,11 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
             strings: Handle::new(List::alloc()),
             string_index: Handle::new(data::HashMap::alloc()),
             asm_stack: vec![Assembler::new()],
-            errors: Vec::new(),
+            errors,
         }
     }
 
-    fn finish(mut self) -> Result<Box<Package>, ErrorList> {
+    fn finish(mut self) -> Option<Box<Package>> {
         self.asm().constzero();
         self.asm().mode(inst::MODE_PTR);
         self.asm().nanbox();
@@ -81,7 +92,7 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
         }
 
         if !self.errors.is_empty() {
-            return Err(ErrorList(self.errors));
+            return None;
         }
 
         let mut package = Box::new(Package {
@@ -96,7 +107,7 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
         package.functions = self.functions;
         package.strings = Handle::new(Slice::alloc());
         package.strings.init_from_list(&self.strings);
-        Ok(package)
+        Some(package)
     }
 
     fn compile_chunk(&mut self, chunk: &Chunk<'src>) {
@@ -157,6 +168,32 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
                 // the main Lua interpreter does.
                 for l in left.iter().rev() {
                     self.compile_assign(l);
+                }
+            }
+            Stmt::Local { left, right, .. } => {
+                // Compile and assign each expression that has a corresponding
+                // variable.
+                for (l, r) in left.iter().zip(right.iter()) {
+                    self.compile_expr(r);
+                    let var = &self.scope_set.vars[l.var.0];
+                    self.compile_define(var);
+                }
+
+                // If there are extra variables, assign nil.
+                // If there are extra expressions, compile and pop them.
+                if left.len() > right.len() {
+                    for l in left.iter().skip(right.len()) {
+                        self.asm().constzero();
+                        self.asm().mode(inst::MODE_PTR);
+                        self.asm().nanbox();
+                        let var = &self.scope_set.vars[l.var.0];
+                        self.compile_define(var);
+                    }
+                } else if left.len() < right.len() {
+                    for r in right.iter().skip(left.len()) {
+                        self.compile_expr(r);
+                        self.asm().pop();
+                    }
                 }
             }
             Stmt::Print { expr, .. } => {
@@ -231,6 +268,18 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
         // storing fields. For now, no expression does that.
     }
 
+    fn compile_define(&mut self, var: &Var) {
+        match var.kind {
+            VarKind::Global | VarKind::Parameter => unreachable!(),
+            VarKind::Local => {
+                // When a local variable is defined, it's always assigned
+                // to the top of the stack. Since the value being assigned
+                // is already there, we don't need to emit an instruction.
+            }
+            VarKind::Capture => unimplemented!(),
+        }
+    }
+
     fn compile_assign(&mut self, lval: &LValue<'src>) {
         self.line(lval.pos());
         match lval {
@@ -255,7 +304,7 @@ impl<'src, 'ss, 'lm> Compiler<'src, 'ss, 'lm> {
                                 self.asm().storelocal(var.slot.try_into().unwrap());
                             }
                             VarKind::Capture => {
-                                // TODO: implemnt assign to capture.
+                                // TODO: implement assign to capture.
                                 unimplemented!();
                             }
                         }

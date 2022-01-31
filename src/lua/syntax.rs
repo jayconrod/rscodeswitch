@@ -1,5 +1,5 @@
 use crate::lua::token::{Kind, Token};
-use crate::pos::{Error, ErrorList, LineMap, Pos};
+use crate::pos::{Error, LineMap, Pos};
 
 use std::fmt::{self, Display, Formatter};
 
@@ -53,6 +53,11 @@ pub enum Stmt<'src> {
         left: Vec<LValue<'src>>,
         right: Vec<Expr<'src>>,
     },
+    Local {
+        left: Vec<NameAttr<'src>>,
+        right: Vec<Expr<'src>>,
+        pos: Pos,
+    },
     // TODO: Remove this construct after standard library calls are supported.
     // This is a hack to enable debugging and testing.
     Print {
@@ -69,6 +74,7 @@ impl<'src> Stmt<'src> {
                 let end = right.last().unwrap().pos();
                 begin.combine(end)
             }
+            Stmt::Local { pos, .. } => *pos,
             Stmt::Print { expr, .. } => expr.pos(),
         }
     }
@@ -93,6 +99,21 @@ impl<'src> DisplayIndent for Stmt<'src> {
                 }
                 Ok(())
             }
+            Stmt::Local { left, right, .. } => {
+                write!(f, "local ")?;
+                let mut sep = "";
+                for l in left {
+                    write!(f, "{}{}", sep, l)?;
+                    sep = ", ";
+                }
+                write!(f, " = ")?;
+                sep = "";
+                for r in right {
+                    write!(f, "{}{}", sep, r)?;
+                    sep = ", ";
+                }
+                Ok(())
+            }
             Stmt::Print { expr, .. } => write!(f, "print({})", expr),
         }
     }
@@ -101,6 +122,23 @@ impl<'src> DisplayIndent for Stmt<'src> {
 impl<'src> Display for Stmt<'src> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         self.fmt_indent(f, 0)
+    }
+}
+
+pub struct NameAttr<'src> {
+    pub name: Token<'src>,
+    pub attr: Option<Token<'src>>,
+    pub var: VarID,
+    pub pos: Pos,
+}
+
+impl<'src> Display for NameAttr<'src> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{}", self.name.text)?;
+        if let Some(a) = self.attr {
+            write!(f, "<{}>", a.text)?;
+        }
+        Ok(())
     }
 }
 
@@ -162,9 +200,11 @@ pub struct VarID(pub usize);
 #[derive(Clone, Copy)]
 pub struct VarUseID(pub usize);
 
-pub fn parse<'src>(tokens: &[Token<'src>], lmap: &LineMap) -> Result<Chunk<'src>, ErrorList> {
-    let parser = Parser::new(tokens, lmap);
-    parser.parse_chunk()
+pub fn parse<'src>(tokens: &[Token<'src>], lmap: &LineMap, errors: &mut Vec<Error>) -> Chunk<'src> {
+    let mut parser = Parser::new(tokens, lmap);
+    let chunk = parser.parse_chunk();
+    errors.extend(parser.errors);
+    chunk
 }
 
 struct Parser<'src, 'tok, 'lm> {
@@ -190,18 +230,14 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         }
     }
 
-    fn parse_chunk(mut self) -> Result<Chunk<'src>, ErrorList> {
+    fn parse_chunk(&mut self) -> Chunk<'src> {
         let scope = self.next_scope();
         let env_var = self.next_var();
         let stmts = self.parse_block_stmts(Kind::EOF);
-        if self.errors.is_empty() {
-            Ok(Chunk {
-                stmts,
-                scope,
-                env_var,
-            })
-        } else {
-            Err(ErrorList(self.errors))
+        Chunk {
+            stmts,
+            scope,
+            env_var,
         }
     }
 
@@ -224,6 +260,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     fn parse_stmt(&mut self) -> Result<Stmt<'src>, Error> {
         match self.peek() {
             Kind::Semi => self.parse_empty_stmt(),
+            Kind::Local => self.parse_local_stmt(),
             Kind::Ident => {
                 if self.tokens[self.next].text == "print" {
                     self.take();
@@ -275,6 +312,49 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     fn parse_empty_stmt(&mut self) -> Result<Stmt<'src>, Error> {
         let t = self.expect(Kind::Semi)?;
         Ok(Stmt::Empty(t.pos()))
+    }
+
+    fn parse_local_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let begin = self.expect(Kind::Local)?.pos();
+        let mut left = Vec::new();
+        left.push(self.parse_name_attr()?);
+        while self.peek() == Kind::Comma {
+            self.take();
+            left.push(self.parse_name_attr()?);
+        }
+        let mut right = Vec::new();
+        let end = if self.peek() == Kind::Eq {
+            self.take();
+            right.push(self.parse_expr()?);
+            while self.peek() == Kind::Comma {
+                self.take();
+                right.push(self.parse_expr()?);
+            }
+            right.last().unwrap().pos()
+        } else {
+            left.last().unwrap().pos
+        };
+        let pos = begin.combine(end);
+        Ok(Stmt::Local { left, right, pos })
+    }
+
+    fn parse_name_attr(&mut self) -> Result<NameAttr<'src>, Error> {
+        let var = self.next_var();
+        let name = self.expect(Kind::Ident)?;
+        let (attr, pos) = if self.peek() == Kind::Lt {
+            self.take();
+            let a = self.expect(Kind::Ident)?;
+            let end = self.expect(Kind::Gt)?.pos();
+            (Some(a), name.pos().combine(end))
+        } else {
+            (None, name.pos())
+        };
+        Ok(NameAttr {
+            name,
+            attr,
+            var,
+            pos,
+        })
     }
 
     fn parse_expr(&mut self) -> Result<Expr<'src>, Error> {

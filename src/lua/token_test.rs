@@ -31,7 +31,9 @@ fn test_numbers() {
   ";
     let path = PathBuf::from("test");
     let mut lmap = LineMap::new();
-    token::lex(&path, src, &mut lmap).unwrap();
+    let mut errors = Vec::new();
+    token::lex(&path, src, &mut lmap, &mut errors);
+    assert!(errors.is_empty());
 }
 
 #[test]
@@ -40,10 +42,9 @@ fn test_bad_numbers() {
     let path = PathBuf::from("test");
     for src in srcs.split(|&b| b == b' ') {
         let mut lmap = LineMap::new();
-        match token::lex(&path, src, &mut lmap) {
-            Ok(tokens) => assert!(tokens.len() == 1 || tokens[0].kind != Kind::Number),
-            _ => (),
-        }
+        let mut errors = Vec::new();
+        let tokens = token::lex(&path, src, &mut lmap, &mut errors);
+        assert!(tokens.len() == 1 || tokens[0].kind != Kind::Number);
     }
 }
 
@@ -68,7 +69,9 @@ od'
   ";
     let path = PathBuf::from("test");
     let mut lmap = LineMap::new();
-    token::lex(&path, src, &mut lmap).unwrap();
+    let mut errors = Vec::new();
+    token::lex(&path, src, &mut lmap, &mut errors);
+    assert!(errors.is_empty());
 }
 
 #[test]
@@ -77,10 +80,9 @@ fn test_bad_strings() {
     let path = PathBuf::from("test");
     for src in srcs.split(|&b| b == b'|') {
         let mut lmap = LineMap::new();
-        match token::lex(&path, src, &mut lmap) {
-            Ok(tokens) => assert!(tokens.len() == 1 || tokens[0].kind != Kind::String),
-            _ => (),
-        }
+        let mut errors = Vec::new();
+        let tokens = token::lex(&path, src, &mut lmap, &mut errors);
+        assert!(tokens.len() == 1 || tokens[0].kind != Kind::String);
     }
 }
 

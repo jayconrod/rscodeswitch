@@ -1,4 +1,4 @@
-use crate::pos::{Error, ErrorList, LineMap, Pos};
+use crate::pos::{Error, LineMap, Pos};
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;
 use std::str;
@@ -161,21 +161,19 @@ impl<'src> Token<'src> {
 ///
 /// lex adds a file to lmap and adds a line for each newline character it finds.
 ///
-/// If the file contains errors, lex returns them instead of tokens. lex
-/// attempts to recover after an error by skipping characters until after
-/// whitespace.
+/// lex appends any errors it finds to the given list and returns the tokens it
+/// was able to read. lex attempts to recover after an error by skipping
+/// characters until after whitespace.
 pub fn lex<'src>(
     path: &Path,
     data: &'src [u8],
     lmap: &mut LineMap,
-) -> Result<Vec<Token<'src>>, ErrorList> {
+    errors: &mut Vec<Error>,
+) -> Vec<Token<'src>> {
     let mut l = Lexer::new(path, data, lmap);
     l.lex();
-    if l.errors.is_empty() {
-        Ok(l.tokens)
-    } else {
-        Err(ErrorList(l.errors))
-    }
+    errors.extend(l.errors);
+    l.tokens
 }
 
 struct Lexer<'src, 'lm> {

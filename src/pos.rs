@@ -1,3 +1,4 @@
+use std::cmp::PartialOrd;
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 
@@ -308,7 +309,7 @@ impl FunctionLineMapBuilder {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Position {
     pub path: PathBuf,
     pub begin_line: usize,
