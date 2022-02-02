@@ -4,9 +4,10 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 54.
+// Next opcode: 63.
 pub const ADD: u8 = 20;
 pub const ALLOC: u8 = 35;
+pub const AND: u8 = 60;
 pub const B: u8 = 27;
 pub const BIF: u8 = 28;
 pub const CALLNAMEDPROP: u8 = 45;
@@ -18,8 +19,10 @@ pub const CONSTZERO: u8 = 52;
 pub const DIV: u8 = 23;
 pub const DUP: u8 = 13;
 pub const EQ: u8 = 14;
+pub const EXP: u8 = 56;
 // pub const FALSE: u8 = 8;
 // pub const FLOAT64: u8 = 2;
+pub const FLOORDIV: u8 = 54;
 pub const FUNCTION: u8 = 31;
 pub const GE: u8 = 18;
 pub const GT: u8 = 19;
@@ -33,6 +36,7 @@ pub const LOADNAMEDPROP: u8 = 42;
 pub const LOADNAMEDPROPORNIL: u8 = 50;
 pub const LOADPROTOTYPE: u8 = 40;
 pub const LT: u8 = 17;
+pub const MOD: u8 = 55;
 pub const MUL: u8 = 22;
 pub const NANBOX: u8 = 6;
 pub const NE: u8 = 15;
@@ -42,9 +46,12 @@ pub const NEWCLOSURE: u8 = 39;
 pub const NOP: u8 = 1;
 pub const NOT: u8 = 24;
 pub const NOTB: u8 = 53;
+pub const OR: u8 = 61;
 pub const POP: u8 = 3;
 pub const PROTOTYPE: u8 = 48;
 pub const RET: u8 = 4;
+pub const SHL: u8 = 58;
+pub const SHR: u8 = 59;
 pub const STORE: u8 = 37;
 pub const STOREARG: u8 = 30;
 pub const STOREGLOBAL: u8 = 10;
@@ -52,12 +59,14 @@ pub const STORELOCAL: u8 = 12;
 pub const STOREMETHOD: u8 = 46;
 pub const STORENAMEDPROP: u8 = 43;
 pub const STOREPROTOTYPE: u8 = 41;
+pub const STRCAT: u8 = 57;
 pub const STRING: u8 = 26;
 pub const SUB: u8 = 21;
 pub const SWAP: u8 = 34;
 pub const SWAPN: u8 = 44;
 pub const SYS: u8 = 5;
 // pub const TRUE: u8 = 7;
+pub const XOR: u8 = 62;
 
 pub const SYS_PRINT: u8 = 1;
 
@@ -93,9 +102,9 @@ pub fn size_at(insts: &[u8]) -> usize {
 
 pub const fn size(op: u8) -> usize {
     match op {
-        ADD | CONSTZERO | DIV | DUP | EQ | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL
-        | NANBOX | NE | NEG | NOP | NOT | NOTB | POP | PROTOTYPE | RET | STORE | STOREPROTOTYPE
-        | SUB | SWAP => 1,
+        ADD | AND | CONSTZERO | DIV | DUP | EQ | EXP | FLOORDIV | GE | GT | LT | LE | LOAD
+        | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | POP
+        | PROTOTYPE | RET | SHL | SHR | STORE | STOREPROTOTYPE | STRCAT | SUB | SWAP | XOR => 1,
         SWAPN | SYS => 2,
         CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
         ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | LOADNAMEDPROPORNIL
@@ -110,6 +119,7 @@ pub fn mnemonic(op: u8) -> &'static str {
     match op {
         ADD => "add",
         ALLOC => "alloc",
+        AND => "and",
         B => "b",
         BIF => "bif",
         CALLNAMEDPROP => "callnamedprop",
@@ -121,7 +131,9 @@ pub fn mnemonic(op: u8) -> &'static str {
         DIV => "div",
         DUP => "dup",
         EQ => "eq",
+        EXP => "exp",
         FUNCTION => "function",
+        FLOORDIV => "floordiv",
         GE => "ge",
         GT => "gt",
         LE => "le",
@@ -133,6 +145,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         LOADNAMEDPROPORNIL => "loadnamedpropornil",
         LOADPROTOTYPE => "loadprototype",
         LT => "lt",
+        MOD => "mod",
         MUL => "mul",
         NANBOX => "nanbox",
         NE => "ne",
@@ -141,9 +154,12 @@ pub fn mnemonic(op: u8) -> &'static str {
         NOP => "nop",
         NOT => "not",
         NOTB => "notb",
+        OR => "or",
         POP => "pop",
         PROTOTYPE => "prototype",
         RET => "ret",
+        SHL => "shl",
+        SHR => "shr",
         STORE => "store",
         STOREARG => "storearg",
         STOREGLOBAL => "storeglobal",
@@ -151,11 +167,13 @@ pub fn mnemonic(op: u8) -> &'static str {
         STOREMETHOD => "storemethod",
         STORENAMEDPROP => "storenamedprop",
         STOREPROTOTYPE => "storeprototype",
+        STRCAT => "strcat",
         STRING => "string",
         SUB => "sub",
         SWAP => "swap",
         SWAPN => "swapn",
         SYS => "sys",
+        XOR => "xor",
         _ => panic!("unknown opcode"),
     }
 }
@@ -235,6 +253,10 @@ impl Assembler {
         self.write_u32(size);
     }
 
+    pub fn and(&mut self) {
+        self.write_u8(AND);
+    }
+
     pub fn b(&mut self, label: &mut Label) {
         self.write_u8(B);
         self.write_label(label);
@@ -286,6 +308,14 @@ impl Assembler {
 
     pub fn eq(&mut self) {
         self.write_u8(EQ);
+    }
+
+    pub fn exp(&mut self) {
+        self.write_u8(EXP);
+    }
+
+    pub fn floordiv(&mut self) {
+        self.write_u8(FLOORDIV);
     }
 
     pub fn function(&mut self, index: u32) {
@@ -342,6 +372,10 @@ impl Assembler {
         self.write_u8(LT);
     }
 
+    pub fn mod_(&mut self) {
+        self.write_u8(MOD);
+    }
+
     pub fn mul(&mut self) {
         self.write_u8(MUL);
     }
@@ -377,6 +411,10 @@ impl Assembler {
         self.write_u8(NOTB);
     }
 
+    pub fn or(&mut self) {
+        self.write_u8(OR);
+    }
+
     pub fn pop(&mut self) {
         self.write_u8(POP);
     }
@@ -387,6 +425,14 @@ impl Assembler {
 
     pub fn ret(&mut self) {
         self.write_u8(RET);
+    }
+
+    pub fn shl(&mut self) {
+        self.write_u8(SHL);
+    }
+
+    pub fn shr(&mut self) {
+        self.write_u8(SHR);
     }
 
     pub fn store(&mut self) {
@@ -422,6 +468,10 @@ impl Assembler {
         self.write_u8(STOREPROTOTYPE);
     }
 
+    pub fn strcat(&mut self) {
+        self.write_u8(STRCAT);
+    }
+
     pub fn string(&mut self, i: u32) {
         self.write_u8(STRING);
         self.write_u32(i);
@@ -443,6 +493,10 @@ impl Assembler {
     pub fn sys(&mut self, sys: u8) {
         self.write_u8(SYS);
         self.write_u8(sys);
+    }
+
+    pub fn xor(&mut self) {
+        self.write_u8(XOR);
     }
 
     fn write_u8(&mut self, n: u8) {
@@ -565,9 +619,9 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         };
         write!(f, "  {}{}", mnemonic(insts[p]), mode)?;
         match insts[p] {
-            ADD | CONSTZERO | DIV | DUP | EQ | GE | GT | LT | LE | LOAD | LOADPROTOTYPE | MUL
-            | NANBOX | NE | NEG | NOP | NOT | NOTB | POP | PROTOTYPE | RET | STORE
-            | STOREPROTOTYPE | SUB | SWAP => {
+            ADD | AND | CONSTZERO | DIV | DUP | EXP | EQ | FLOORDIV | GE | GT | LT | LE | LOAD
+            | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | POP
+            | PROTOTYPE | RET | SHL | SHR | STORE | STOREPROTOTYPE | STRCAT | SUB | SWAP | XOR => {
                 f.write_str("\n")?;
             }
             B | BIF => {

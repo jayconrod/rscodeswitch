@@ -148,6 +148,12 @@ pub enum Expr<'src> {
         name: Token<'src>,
         var_use: VarUseID,
     },
+    Unary(Token<'src>, Box<Expr<'src>>),
+    Binary(Box<Expr<'src>>, Token<'src>, Box<Expr<'src>>),
+    Group {
+        expr: Box<Expr<'src>>,
+        pos: Pos,
+    },
 }
 
 impl<'src> Expr<'src> {
@@ -155,6 +161,9 @@ impl<'src> Expr<'src> {
         match self {
             Expr::Literal(t) => t.pos(),
             Expr::Var { name, .. } => name.pos(),
+            Expr::Unary(op, expr) => op.pos().combine(expr.pos()),
+            Expr::Binary(l, _, r) => l.pos().combine(r.pos()),
+            Expr::Group { pos, .. } => *pos,
         }
     }
 }
@@ -164,6 +173,9 @@ impl<'src> Display for Expr<'src> {
         match self {
             Expr::Literal(t) => write!(f, "{}", t.text),
             Expr::Var { name, .. } => write!(f, "{}", name.text),
+            Expr::Unary(op, expr) => write!(f, "{}{}", op.text, expr),
+            Expr::Binary(l, op, r) => write!(f, "{} {} {}", l, op.text, r),
+            Expr::Group { expr, .. } => write!(f, "({})", expr),
         }
     }
 }
@@ -358,16 +370,32 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr<'src>, Error> {
-        self.parse_precedence(Precedence::Primary)
+        self.parse_precedence(PREC_OR)
     }
 
     fn parse_precedence(&mut self, prec: Precedence) -> Result<Expr<'src>, Error> {
+        // Use the next token to look up a prefix rule. A prefix rule is defined
+        // for every token that can begin an expression, like identifiers,
+        // literals, and unary operators.
         let rule = self.get_rule(self.peek());
         let mut e = match rule.prefix {
             Some(prefix) => prefix(self),
             None => Err(self.expect_error("expression")),
         }?;
 
+        // Use the following token to look up an infix rule in order to parse
+        // left-associative expressions. An infix rule is defined for every
+        // token that can join expressions, like '(', '[', '.', and binary
+        // operators.
+        //
+        // If the infix rule for the next token has lower precedence, return so
+        // that a parse_precedence lower in the stack can parse the rest.
+        // For example, in '2 * 3 + 4', with PREC_MUL, parse_precedence should
+        // return '2 * 3', not reading past '+'.
+        //
+        // If there is no infix rule for the next token, get_rule returns a
+        // dummy rule with PREC_NONE, which is the lowest precedence, so
+        // we always stop there.
         loop {
             let rule = self.get_rule(self.peek());
             if prec > rule.precedence {
@@ -376,6 +404,46 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             e = rule.infix.unwrap()(self, e)?;
         }
         Ok(e)
+    }
+
+    fn parse_group_expr(&mut self) -> Result<Expr<'src>, Error> {
+        let begin = self.expect(Kind::LParen)?.pos();
+        let expr = self.parse_expr()?;
+        let end = self.expect(Kind::RParen)?.pos();
+        Ok(Expr::Group {
+            expr: Box::new(expr),
+            pos: begin.combine(end),
+        })
+    }
+
+    fn parse_binop_expr(&mut self, left: Expr<'src>) -> Result<Expr<'src>, Error> {
+        let rule = self.get_rule(self.peek());
+        if rule.precedence == PREC_NONE {
+            return Err(self.expect_error("binary operator, '.', or '('"));
+        }
+        let op = self.take();
+        let next_prec = if associativity(rule.precedence) == Associativity::Right {
+            // If this is a right-associative operator, recurse at the same
+            // precedence level. For example, in 'a .. b .. c .. d', the first
+            // time parse_binop_expr is called on the left-most '..' operator,
+            // the recursive call will return 'b .. (c .. d)', not 'b.'.
+            rule.precedence
+        } else {
+            // If this is a left-associative operator, recurse at a higher
+            // precedence level. For example, in 'a + b + c + d', the first
+            // time parse_binop_expr is called on the left-most '+' operator,
+            // the recursive call with return 'b', not 'b + (c + d)'. The loop
+            // in parse_precedence takes care of the rest.
+            rule.precedence + 1
+        };
+        let right = Box::new(self.parse_precedence(next_prec)?);
+        Ok(Expr::Binary(Box::new(left), op, right))
+    }
+
+    fn parse_unop_expr(&mut self) -> Result<Expr<'src>, Error> {
+        let op = self.take();
+        let expr = Box::new(self.parse_precedence(PREC_UNARY)?);
+        Ok(Expr::Unary(op, expr))
     }
 
     fn parse_literal_expr(&mut self) -> Result<Expr<'src>, Error> {
@@ -408,17 +476,79 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             Kind::Nil | Kind::True | Kind::False | Kind::Number | Kind::String => ParseRule {
                 prefix: Some(&Parser::parse_literal_expr),
                 infix: None,
-                precedence: Precedence::None,
+                precedence: PREC_NONE,
             },
             Kind::Ident => ParseRule {
                 prefix: Some(&Parser::parse_var_expr),
                 infix: None,
-                precedence: Precedence::None,
+                precedence: PREC_NONE,
+            },
+            Kind::Lt | Kind::LtEq | Kind::Gt | Kind::GtEq | Kind::EqEq | Kind::TildeEq => {
+                ParseRule {
+                    prefix: None,
+                    infix: Some(&Parser::parse_binop_expr),
+                    precedence: PREC_COMPARE,
+                }
+            }
+            Kind::Pipe => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_BINOR,
+            },
+            Kind::Tilde => ParseRule {
+                prefix: Some(&Parser::parse_unop_expr),
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_BINXOR,
+            },
+            Kind::Amp => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_BINAND,
+            },
+            Kind::LtLt | Kind::GtGt => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_SHIFT,
+            },
+            Kind::DotDot => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_CONCAT,
+            },
+            Kind::Plus => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_ADD,
+            },
+            Kind::Minus => ParseRule {
+                prefix: Some(&Parser::parse_unop_expr),
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_ADD,
+            },
+            Kind::Star | Kind::Slash | Kind::SlashSlash | Kind::Percent => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_MUL,
+            },
+            Kind::Not | Kind::Hash => ParseRule {
+                prefix: Some(&Parser::parse_unop_expr),
+                infix: None,
+                precedence: PREC_NONE,
+            },
+            Kind::Caret => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_EXP,
+            },
+            Kind::LParen => ParseRule {
+                prefix: Some(&Parser::parse_group_expr),
+                infix: None,
+                precedence: PREC_NONE, // PREC_PRIMARY
             },
             _ => ParseRule {
                 prefix: None,
                 infix: None,
-                precedence: Precedence::None,
+                precedence: PREC_NONE,
             },
         }
     }
@@ -503,8 +633,32 @@ struct ParseRule<'src, 'tok, 'lm, 'p> {
     precedence: Precedence,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
-enum Precedence {
-    None,
-    Primary,
+type Precedence = u8;
+
+const PREC_NONE: Precedence = 0;
+const PREC_OR: Precedence = 1;
+const _PREC_AND: Precedence = 2;
+const PREC_COMPARE: Precedence = 3;
+const PREC_BINOR: Precedence = 4;
+const PREC_BINAND: Precedence = 5;
+const PREC_BINXOR: Precedence = 6;
+const PREC_SHIFT: Precedence = 7;
+const PREC_CONCAT: Precedence = 8;
+const PREC_ADD: Precedence = 9;
+const PREC_MUL: Precedence = 10;
+const PREC_UNARY: Precedence = 11;
+const PREC_EXP: Precedence = 12;
+const _PREC_PRIMARY: Precedence = 13;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Associativity {
+    Left,
+    Right,
+}
+
+fn associativity(prec: Precedence) -> Associativity {
+    match prec {
+        PREC_EXP | PREC_CONCAT => Associativity::Right,
+        _ => Associativity::Left,
+    }
 }

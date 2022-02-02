@@ -259,19 +259,10 @@ impl<'w> Interpreter<'w> {
                 let l = pop!();
                 let v = if let (Some(li), Some(ri)) = (nanbox::to_int(l), nanbox::to_int(r)) {
                     match li.$checked(ri) {
-                        Some(vi) if nanbox::fits_in_small_int(vi) => nanbox::from_small_int(vi),
-                        Some(vi) => {
-                            let bi = HEAP.allocate(8) as *mut i64;
-                            *bi = vi;
-                            nanbox::from_big_int(bi)
-                        }
+                        Some(vi) => maybe_box_int!(vi),
                         None => nanbox::from_f64((li as f64) $op (ri as f64))
                     }
-                } else if let (Some(li), Some(rf)) = (nanbox::to_int(l), nanbox::to_f64(r)) {
-                    nanbox::from_f64((li as f64) $op rf)
-                } else if let (Some(lf), Some(ri)) = (nanbox::to_f64(l), nanbox::to_int(r)) {
-                    nanbox::from_f64(lf $op (ri as f64))
-                } else if let (Some(lf), Some(rf)) = (nanbox::to_f64(l), nanbox::to_f64(r)) {
+                } else if let (Some(lf), Some(rf)) = (nanbox::num_as_f64(l), nanbox::num_as_f64(r)) {
                     nanbox::from_f64(lf $op rf)
                 } else {
                     return_errorf!("arithmetic operands must both be numbers: {} and {}", nanbox::debug_type(l), nanbox::debug_type(r))
@@ -303,13 +294,7 @@ impl<'w> Interpreter<'w> {
                 let o = pop!();
                 let v = if let Some(vi) = nanbox::to_int(o) {
                     let r = $op vi;
-                    if nanbox::fits_in_small_int(r) {
-                        nanbox::from_small_int(r)
-                    } else {
-                        let bi = HEAP.allocate(mem::size_of::<i64>()) as *mut i64;
-                        *bi = r;
-                        nanbox::from_big_int(bi)
-                    }
+                    maybe_box_int!(r)
                 } else if let Some(vf) = nanbox::to_f64(o) {
                     nanbox::from_f64($op vf)
                 } else {
@@ -396,6 +381,90 @@ impl<'w> Interpreter<'w> {
             }};
         }
 
+        // maybe_box_int converts an unboxed integer to a small or big boxed
+        // integer. If the integer doesn't fit in a small box, a big box is
+        // allocated.
+        macro_rules! maybe_box_int {
+            ($i:expr) => {{
+                let i = $i;
+                if nanbox::fits_in_small_int(i) {
+                    nanbox::from_small_int(i)
+                } else {
+                    let bi = HEAP.allocate(mem::size_of::<i64>()) as *mut i64;
+                    *bi = i;
+                    nanbox::from_big_int(bi)
+                }
+            }};
+        }
+
+        // lua_value_as_bool converts a nanboxed value to true or false
+        // (unboxed) according to Lua semantics. false and nil are false;
+        // all other values are true.
+        macro_rules! lua_value_as_bool {
+            ($v:expr) => {{
+                let v = $v;
+                v != nanbox::from_bool(false) && v != nanbox::from_nil()
+            }};
+        }
+
+        // lua_value_as_int converts a nanboxed value to an integer according
+        // to Lua semantics. Integers are converted to themselves; floats
+        // are converted if the conversion is exact. An error is reported for
+        // any other value.
+        macro_rules! lua_value_as_int {
+            ($v:expr) => {{
+                let v = $v;
+                if let Some(i) = nanbox::num_as_i64(v) {
+                    i
+                } else if nanbox::is_number(v) {
+                    return_errorf!("number has no integer representation")
+                } else {
+                    return_errorf!(
+                        "cannot perform numeric operation on {} value",
+                        nanbox::debug_type(v)
+                    )
+                }
+            }};
+        }
+
+        // lua_concat_op_as_string converts a nanboxed value to a string
+        // for concatenation. Strings and numbers are allowed. All other
+        // values cause errors.
+        macro_rules! lua_concat_op_as_string {
+            ($v:expr) => {{
+                let v = $v;
+                if let Some(s) = nanbox::to_string(v) {
+                    s
+                } else if let Some(n) = nanbox::to_int(v) {
+                    let s = n.to_string();
+                    data::String::from_bytes(s.as_bytes())
+                } else if let Some(n) = nanbox::to_f64(v) {
+                    let s = n.to_string();
+                    data::String::from_bytes(s.as_bytes())
+                } else {
+                    return_errorf!(
+                        "can't convert concatenation operand to string: {}",
+                        nanbox::debug_type(v)
+                    )
+                }
+            }};
+        }
+
+        // lua_binop_bit implements the &, |, and ~ binary operators for Lua.
+        // It unboxes its operands and converts them to integers, reporting an
+        // error if either is not a number. It then performs the operation,
+        // boxes, and pushes the result.
+        macro_rules! lua_binop_bit {
+            ($op:tt) => {{
+                let r = pop!();
+                let l = pop!();
+                let li = lua_value_as_int!(l);
+                let ri = lua_value_as_int!(r);
+                let v = li $op ri;
+                push!(maybe_box_int!(v));
+            }};
+        }
+
         // Main loop
         loop {
             let mut op = *ip;
@@ -454,12 +523,7 @@ impl<'w> Interpreter<'w> {
                     let l = pop!();
                     let v = if let (Some(li), Some(ri)) = (nanbox::to_int(l), nanbox::to_int(r)) {
                         match li.checked_add(ri) {
-                            Some(vi) if nanbox::fits_in_small_int(vi) => nanbox::from_small_int(vi),
-                            Some(vi) => {
-                                let bi = HEAP.allocate(8) as *mut i64;
-                                *bi = vi;
-                                nanbox::from_big_int(bi)
-                            }
+                            Some(vi) => maybe_box_int!(vi),
                             None => nanbox::from_f64((li as f64) + (ri as f64)),
                         }
                     } else if let (Some(li), Some(rf)) = (nanbox::to_int(l), nanbox::to_f64(r)) {
@@ -489,6 +553,10 @@ impl<'w> Interpreter<'w> {
                     push!(HEAP.allocate(size) as u64);
                     inst::size(inst::ALLOC)
                 }
+                (inst::AND, inst::MODE_LUA) => {
+                    lua_binop_bit!(&);
+                    inst::size(inst::AND)
+                }
                 (inst::B, inst::MODE_I64) => {
                     let delta = read_imm!(i32, 1) as usize;
                     ip = ((ip as isize) + (delta as isize) + 1) as *const u8;
@@ -505,14 +573,12 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::BIF, inst::MODE_LUA) => {
                     let delta = read_imm!(i32, 1) as usize;
-                    let v = pop!();
-                    if v == nanbox::from_bool(false) || nanbox::is_nil(v) {
-                        // fall through
-                        inst::size(inst::BIF)
-                    } else {
+                    if lua_value_as_bool!(pop!()) {
                         ip = ((ip as isize) + (delta as isize) + 1) as *const u8;
                         continue;
                     }
+                    // fall through
+                    inst::size(inst::BIF)
                 }
                 (inst::CALLNAMEDPROP, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
@@ -663,7 +729,20 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_LUA) => {
-                    binop_num!(/, checked_sub, lua);
+                    let r = pop!();
+                    let l = pop!();
+                    let v = if let (Some(lf), Some(rf)) =
+                        (nanbox::num_as_f64(l), nanbox::num_as_f64(r))
+                    {
+                        lf / rf
+                    } else {
+                        return_errorf!(
+                            "arithmetic operands must both be numbers: {} and {}",
+                            nanbox::debug_type(l),
+                            nanbox::debug_type(r)
+                        )
+                    };
+                    push!(nanbox::from_f64(v));
                     inst::size(inst::DIV)
                 }
                 (inst::DUP, inst::MODE_I64) => {
@@ -686,6 +765,39 @@ impl<'w> Interpreter<'w> {
                 (inst::EQ, inst::MODE_LUA) => {
                     binop_eq!(==, lua);
                     inst::size(inst::EQ)
+                }
+                (inst::EXP, inst::MODE_LUA) => {
+                    let r = pop!();
+                    let l = pop!();
+                    let v = match (nanbox::num_as_f64(l), nanbox::num_as_f64(r)) {
+                        (Some(lf), Some(rf)) => nanbox::from_f64(f64::powf(lf, rf)),
+                        _ => return_errorf!(
+                            "arithmetic operands must both be numbers: {} and {}",
+                            nanbox::debug_type(l),
+                            nanbox::debug_type(r)
+                        ),
+                    };
+                    push!(v);
+                    inst::size(inst::EXP)
+                }
+                (inst::FLOORDIV, inst::MODE_LUA) => {
+                    let r = pop!();
+                    let l = pop!();
+                    let v = if let (Some(li), Some(ri)) = (nanbox::to_int(l), nanbox::to_int(r)) {
+                        maybe_box_int!(li / ri)
+                    } else if let (Some(lf), Some(rf)) =
+                        (nanbox::num_as_f64(l), nanbox::num_as_f64(r))
+                    {
+                        nanbox::from_f64(lf.floor() / rf.floor())
+                    } else {
+                        return_errorf!(
+                            "arithmetic operands must both be numbers: {} and {}",
+                            nanbox::debug_type(l),
+                            nanbox::debug_type(r)
+                        )
+                    };
+                    push!(v);
+                    inst::size(inst::FLOORDIV)
                 }
                 (inst::FUNCTION, inst::MODE_I64) => {
                     let i = read_imm!(u32, 1) as usize;
@@ -976,6 +1088,69 @@ impl<'w> Interpreter<'w> {
                     binop_cmp!(<, lua);
                     inst::size(inst::LT)
                 }
+                (inst::MOD, inst::MODE_I64) => {
+                    binop_num!(wrapping_rem, i64);
+                    inst::size(inst::MOD)
+                }
+                (inst::MOD, inst::MODE_I32) => {
+                    binop_num!(wrapping_rem, i32);
+                    inst::size(inst::MOD)
+                }
+                (inst::MOD, inst::MODE_I16) => {
+                    binop_num!(wrapping_rem, i16);
+                    inst::size(inst::MOD)
+                }
+                (inst::MOD, inst::MODE_I8) => {
+                    binop_num!(wrapping_rem, i8);
+                    inst::size(inst::MOD)
+                }
+                (inst::MOD, inst::MODE_U64) => {
+                    binop_num!(wrapping_rem, u64);
+                    inst::size(inst::MOD)
+                }
+                (inst::MOD, inst::MODE_U32) => {
+                    binop_num!(wrapping_rem, u32);
+                    inst::size(inst::MOD)
+                }
+                (inst::MOD, inst::MODE_U16) => {
+                    binop_num!(wrapping_rem, u16);
+                    inst::size(inst::MOD)
+                }
+                (inst::MOD, inst::MODE_U8) => {
+                    binop_num!(wrapping_rem, u8);
+                    inst::size(inst::MOD)
+                }
+                (inst::MOD, inst::MODE_F64) => {
+                    binop_num!(%, f64);
+                    inst::size(inst::MOD)
+                }
+                (inst::MOD, inst::MODE_F32) => {
+                    binop_num!(%, f32);
+                    inst::size(inst::MOD)
+                }
+                (inst::MOD, inst::MODE_LUA) => {
+                    let r = pop!();
+                    let l = pop!();
+                    let v = if let (Some(li), Some(ri)) = (nanbox::to_int(l), nanbox::to_int(r)) {
+                        if ri == 0 {
+                            return_errorf!("attempt to perform n%0");
+                        }
+                        let vi = li.wrapping_rem(ri);
+                        maybe_box_int!(vi)
+                    } else if let (Some(lf), Some(rf)) =
+                        (nanbox::num_as_f64(l), nanbox::num_as_f64(r))
+                    {
+                        nanbox::from_f64(lf.floor() % rf.floor())
+                    } else {
+                        return_errorf!(
+                            "arithmetic operands must both be numbers: {} and {}",
+                            nanbox::debug_type(l),
+                            nanbox::debug_type(r)
+                        )
+                    };
+                    push!(v);
+                    inst::size(inst::MOD)
+                }
                 (inst::MUL, inst::MODE_I64) => {
                     binop_num!(wrapping_mul, i64);
                     inst::size(inst::MUL)
@@ -1017,18 +1192,12 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_LUA) => {
-                    binop_num!(*, checked_sub, lua);
+                    binop_num!(*, checked_mul, lua);
                     inst::size(inst::MUL)
                 }
                 (inst::NANBOX, inst::MODE_I64) | (inst::NANBOX, inst::MODE_U64) => {
                     let i = pop!() as i64;
-                    let v = if nanbox::fits_in_small_int(i) {
-                        nanbox::from_small_int(i)
-                    } else {
-                        let bi = HEAP.allocate(mem::size_of::<usize>()) as *mut i64;
-                        *bi = i;
-                        nanbox::from_big_int(bi)
-                    };
+                    let v = maybe_box_int!(i);
                     push!(v);
                     inst::size(inst::NANBOX)
                 }
@@ -1166,12 +1335,9 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::NOT, inst::MODE_LUA) => {
                     let o = pop!();
-                    let v = if o == nanbox::from_bool(false) || o == nanbox::from_nil() {
-                        nanbox::from_bool(true)
-                    } else {
-                        nanbox::from_bool(false)
-                    };
-                    push!(v);
+                    let b = lua_value_as_bool!(o);
+                    let n = nanbox::from_bool(!b);
+                    push!(n);
                     inst::size(inst::NOT)
                 }
                 (inst::NOTB, inst::MODE_I64) => {
@@ -1191,30 +1357,15 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::NOTB)
                 }
                 (inst::NOTB, inst::MODE_LUA) => {
-                    let o = pop!();
-                    let v = if let Some(i) = nanbox::to_int(o) {
-                        !i
-                    } else if let Some(f) = nanbox::to_f64(o) {
-                        let i = f as i64;
-                        if i as f64 != f {
-                            return_errorf!("number has no integer representation");
-                        }
-                        !i
-                    } else {
-                        return_errorf!(
-                            "arithmetic operand must be number: {}",
-                            nanbox::debug_type(o)
-                        )
-                    };
-                    let b = if nanbox::fits_in_small_int(v) {
-                        nanbox::from_small_int(v)
-                    } else {
-                        let bi = HEAP.allocate(mem::size_of::<i64>()) as *mut i64;
-                        *bi = v;
-                        nanbox::from_big_int(bi)
-                    };
-                    push!(b);
+                    let v = pop!();
+                    let vi = lua_value_as_int!(v);
+                    let b = !vi;
+                    push!(maybe_box_int!(b));
                     inst::size(inst::NOTB)
+                }
+                (inst::OR, inst::MODE_LUA) => {
+                    lua_binop_bit!(|);
+                    inst::size(inst::OR)
                 }
                 (inst::POP, inst::MODE_I64) => {
                     sp += 8;
@@ -1243,6 +1394,40 @@ impl<'w> Interpreter<'w> {
                     let v = *(ret_sp as *const u64);
                     *(sp as *mut u64) = v;
                     continue;
+                }
+                (inst::SHL, inst::MODE_LUA) => {
+                    let r = pop!();
+                    let l = pop!();
+                    let li = lua_value_as_int!(l) as u64;
+                    let ri = lua_value_as_int!(r);
+                    let vi = if ri >= 64 {
+                        0
+                    } else if ri >= 0 {
+                        li << ri
+                    } else if ri >= -63 {
+                        li >> -ri
+                    } else {
+                        0
+                    };
+                    push!(maybe_box_int!(vi as i64));
+                    inst::size(inst::SHL)
+                }
+                (inst::SHR, inst::MODE_LUA) => {
+                    let r = pop!();
+                    let l = pop!();
+                    let li = lua_value_as_int!(l) as u64;
+                    let ri = lua_value_as_int!(r);
+                    let vi = if ri >= 64 {
+                        0
+                    } else if ri >= 0 {
+                        li >> ri
+                    } else if ri >= -63 {
+                        li << -ri
+                    } else {
+                        0
+                    };
+                    push!(maybe_box_int!(vi as i64));
+                    inst::size(inst::SHR)
                 }
                 (inst::STORE, inst::MODE_I64) => {
                     let v = pop!() as i64;
@@ -1347,6 +1532,15 @@ impl<'w> Interpreter<'w> {
                     receiver.prototype.set_ptr(prototype);
                     inst::size(inst::STOREPROTOTYPE)
                 }
+                (inst::STRCAT, inst::MODE_LUA) => {
+                    let r = pop!();
+                    let l = pop!();
+                    let ls = lua_concat_op_as_string!(l).as_ref().unwrap();
+                    let rs = lua_concat_op_as_string!(r).as_ref().unwrap();
+                    let cs = ls + rs;
+                    push!(nanbox::from_string(cs));
+                    inst::size(inst::STRCAT)
+                }
                 (inst::STRING, inst::MODE_I64) => {
                     let si = read_imm!(u32, 1) as usize;
                     let s = &pp.strings[si] as *const data::String as u64;
@@ -1423,6 +1617,10 @@ impl<'w> Interpreter<'w> {
                         _ => panic!("unknown sys {}", sys),
                     }
                     inst::size(inst::SYS)
+                }
+                (inst::XOR, inst::MODE_LUA) => {
+                    lua_binop_bit!(^);
+                    inst::size(inst::XOR)
                 }
                 (_, inst::MODE_I64) => {
                     panic!(

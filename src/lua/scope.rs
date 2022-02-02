@@ -276,6 +276,16 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             Expr::Var { name, var_use, .. } => {
                 self.resolve(*name, *var_use);
             }
+            Expr::Unary(_, expr) => {
+                self.resolve_expr(expr);
+            }
+            Expr::Binary(left, _, right) => {
+                self.resolve_expr(left);
+                self.resolve_expr(right);
+            }
+            Expr::Group { expr, .. } => {
+                self.resolve_expr(expr);
+            }
         }
     }
 

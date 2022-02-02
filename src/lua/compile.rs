@@ -259,6 +259,47 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             } => {
                 self.compile_var_use(name, &self.scope_set.var_uses[vuid.0]);
             }
+            Expr::Unary(op, expr) => {
+                self.compile_expr(expr);
+                self.asm().mode(inst::MODE_LUA);
+                match op.kind {
+                    token::Kind::Not => self.asm().not(),
+                    token::Kind::Minus => self.asm().neg(),
+                    token::Kind::Tilde => self.asm().notb(),
+                    token::Kind::Hash => unimplemented!(),
+                    _ => panic!("unexpected operator: {:?}", op.kind),
+                }
+            }
+            Expr::Binary(left, op, right) => {
+                self.compile_expr(left);
+                self.compile_expr(right);
+                self.asm().mode(inst::MODE_LUA);
+                match op.kind {
+                    token::Kind::Lt => self.asm().lt(),
+                    token::Kind::LtEq => self.asm().le(),
+                    token::Kind::Gt => self.asm().gt(),
+                    token::Kind::GtEq => self.asm().ge(),
+                    token::Kind::EqEq => self.asm().eq(),
+                    token::Kind::TildeEq => self.asm().ne(),
+                    token::Kind::Pipe => self.asm().or(),
+                    token::Kind::Tilde => self.asm().xor(),
+                    token::Kind::Amp => self.asm().and(),
+                    token::Kind::LtLt => self.asm().shl(),
+                    token::Kind::GtGt => self.asm().shr(),
+                    token::Kind::DotDot => self.asm().strcat(),
+                    token::Kind::Plus => self.asm().add(),
+                    token::Kind::Minus => self.asm().sub(),
+                    token::Kind::Star => self.asm().mul(),
+                    token::Kind::Slash => self.asm().div(),
+                    token::Kind::SlashSlash => self.asm().floordiv(),
+                    token::Kind::Percent => self.asm().mod_(),
+                    token::Kind::Caret => self.asm().exp(),
+                    _ => panic!("unexpected operator: {:?}", op.kind),
+                }
+            }
+            Expr::Group { expr, .. } => {
+                self.compile_expr(expr);
+            }
         }
     }
 

@@ -56,8 +56,18 @@ pub fn to_f64(v: u64) -> Option<f64> {
     }
 }
 
+pub fn num_as_f64(v: u64) -> Option<f64> {
+    if let Some(i) = to_int(v) {
+        Some(i as f64)
+    } else if let Some(f) = to_f64(v) {
+        Some(f)
+    } else {
+        None
+    }
+}
+
 pub fn fits_in_small_int(n: i64) -> bool {
-    let mask = (1 << SMALL_INT_BITS) - 1;
+    let mask = !((1 << SMALL_INT_BITS) - 1);
     let high = (n as u64) & mask;
     high == mask || high == 0
 }
@@ -97,6 +107,25 @@ pub fn to_int(v: u64) -> Option<i64> {
         Some(n)
     } else if let Some(n) = to_big_int(v) {
         Some(unsafe { *n })
+    } else {
+        None
+    }
+}
+
+pub fn is_number(v: u64) -> bool {
+    (v & QNAN) != QNAN || v & TAG_MASK == TAG_SMALL_INT || v & TAG_MASK == TAG_BIG_INT
+}
+
+pub fn num_as_i64(v: u64) -> Option<i64> {
+    if let Some(i) = to_int(v) {
+        Some(i)
+    } else if let Some(f) = to_f64(v) {
+        let i = f as i64;
+        if i as f64 == f {
+            Some(i)
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -177,9 +206,9 @@ pub fn debug_type(v: u64) -> &'static str {
     } else if to_bool(v).is_some() {
         "bool"
     } else if to_small_int(v).is_some() || to_big_int(v).is_some() {
-        "i64"
+        "integer"
     } else if to_f64(v).is_some() {
-        "f64"
+        "float"
     } else if to_string(v).is_some() {
         "string"
     } else if to_closure(v).is_some() {
