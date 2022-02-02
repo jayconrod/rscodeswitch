@@ -284,6 +284,16 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                     self.resolve_stmt(false_stmt);
                 }
             }
+            Stmt::While {
+                cond, body, scope, ..
+            } => {
+                self.resolve_expr(cond);
+                self.enter(*scope, ScopeKind::Local);
+                for stmt in body {
+                    self.resolve_stmt(stmt);
+                }
+                self.leave();
+            }
             Stmt::Print { expr, .. } => {
                 self.resolve_expr(expr);
             }

@@ -68,6 +68,12 @@ pub enum Stmt<'src> {
         false_stmt: Option<Box<Stmt<'src>>>,
         pos: Pos,
     },
+    While {
+        cond: Expr<'src>,
+        body: Vec<Stmt<'src>>,
+        scope: ScopeID,
+        pos: Pos,
+    },
     // TODO: Remove this construct after standard library calls are supported.
     // This is a hack to enable debugging and testing.
     Print {
@@ -87,6 +93,7 @@ impl<'src> Stmt<'src> {
             Stmt::Local { pos, .. } => *pos,
             Stmt::Do { pos, .. } => *pos,
             Stmt::If { pos, .. } => *pos,
+            Stmt::While { pos, .. } => *pos,
             Stmt::Print { expr, .. } => expr.pos(),
         }
     }
@@ -151,6 +158,14 @@ impl<'src> DisplayIndent for Stmt<'src> {
                     false_stmt.fmt_indent(f, level)?;
                 }
                 Ok(())
+            }
+            Stmt::While { cond, body, .. } => {
+                write!(f, "while {} do\n", cond)?;
+                for stmt in body {
+                    stmt.fmt_indent(f, level + 1)?;
+                    write!(f, "\n")?;
+                }
+                write!(f, "end")
             }
             Stmt::Print { expr, .. } => write!(f, "print({})", expr),
         }
@@ -313,6 +328,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             Kind::Local => self.parse_local_stmt(),
             Kind::Do => self.parse_do_stmt(),
             Kind::If => self.parse_if_stmt(),
+            Kind::While => self.parse_while_stmt(),
             Kind::Ident => {
                 if self.tokens[self.next].text == "print" {
                     self.take();
@@ -443,6 +459,22 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         Ok(Stmt::If {
             cond_stmts,
             false_stmt,
+            pos,
+        })
+    }
+
+    fn parse_while_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let scope = self.next_scope();
+        let begin = self.expect(Kind::While)?.pos();
+        let cond = self.parse_expr()?;
+        self.expect(Kind::Do)?;
+        let body = self.parse_block_stmts(Kind::End);
+        let end = self.expect(Kind::End)?.pos();
+        let pos = begin.combine(end);
+        Ok(Stmt::While {
+            cond,
+            body,
+            scope,
             pos,
         })
     }

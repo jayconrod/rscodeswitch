@@ -224,6 +224,24 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 }
                 self.asm().bind(&mut end_label);
             }
+            Stmt::While {
+                cond, body, scope, ..
+            } => {
+                let mut cond_label = Label::new();
+                let mut body_label = Label::new();
+                let mut end_label = Label::new();
+                self.asm().b(&mut cond_label);
+                self.asm().bind(&mut body_label);
+                for stmt in body {
+                    self.compile_stmt(stmt);
+                }
+                self.pop_block(*scope);
+                self.asm().bind(&mut cond_label);
+                self.compile_expr(cond);
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().bif(&mut body_label);
+                self.asm().bind(&mut end_label);
+            }
             Stmt::Print { expr, .. } => {
                 self.compile_expr(expr);
                 self.asm().mode(inst::MODE_LUA);
