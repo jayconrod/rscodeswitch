@@ -1,4 +1,6 @@
-use crate::lua::syntax::{Chunk, Expr, LValue, ScopeID, Stmt, VarID, VarUseID};
+use crate::lua::syntax::{
+    Chunk, Expr, LValue, LabelID, LabelUseID, ScopeID, Stmt, VarID, VarUseID,
+};
 use crate::lua::token::Token;
 use crate::pos::{Error, LineMap, Pos};
 
@@ -16,6 +18,13 @@ pub struct ScopeSet<'src> {
     /// Complete list of variable references in a chunk. Indexed by
     /// syntax::VarUseID.
     pub var_uses: Vec<VarUse>,
+
+    /// Complete list of labels in a chunk. Indexed by syntax::LabelID.
+    pub labels: Vec<Label>,
+
+    /// Complete list of label references in a chunk. Indexed by
+    /// syntax::LabelUseID.
+    pub label_uses: Vec<LabelUse>,
 }
 
 impl<'src> ScopeSet<'src> {
@@ -24,6 +33,8 @@ impl<'src> ScopeSet<'src> {
             scopes: Vec::new(),
             vars: Vec::new(),
             var_uses: Vec::new(),
+            labels: Vec::new(),
+            label_uses: Vec::new(),
         }
     }
 
@@ -32,6 +43,7 @@ impl<'src> ScopeSet<'src> {
             self.scopes.resize_with(id.0 + 1, || Scope {
                 kind: ScopeKind::Function,
                 vars: HashMap::new(),
+                labels: HashMap::new(),
                 captures: Vec::new(),
                 next_slot: 0,
             });
@@ -61,6 +73,26 @@ impl<'src> ScopeSet<'src> {
         }
         &mut self.var_uses[id.0]
     }
+
+    fn ensure_label(&mut self, id: LabelID) -> &mut Label {
+        if self.labels.len() <= id.0 {
+            self.labels.resize_with(id.0 + 1, || Label {
+                slot_count: 0,
+                pos: Pos { begin: 0, end: 0 },
+            })
+        }
+        &mut self.labels[id.0]
+    }
+
+    fn ensure_label_use(&mut self, id: LabelUseID) -> &mut LabelUse {
+        if self.label_uses.len() <= id.0 {
+            self.label_uses.resize_with(id.0 + 1, || LabelUse {
+                label: None,
+                slot_count: 0,
+            });
+        }
+        &mut self.label_uses[id.0]
+    }
 }
 
 /// Describes the relationship between names and variables within a block.
@@ -69,8 +101,11 @@ pub struct Scope<'src> {
     /// storage and capturing.
     pub kind: ScopeKind,
 
-    /// Maps names to variable definitions.
+    /// Maps variable names to variable definitions.
     pub vars: HashMap<&'src str, VarID>,
+
+    /// Maps label names to labels.
+    pub labels: HashMap<&'src str, LabelID>,
 
     /// List of variables defined in an enclosing scope that are captured by
     /// this scope. Captured variables might be referenced in this scope or in
@@ -142,6 +177,27 @@ pub struct VarUse {
     /// Index of the cell in the closure containing the reference. Only set for
     /// captured variables defined outside the closure containing the reference.
     pub cell: Option<usize>,
+}
+
+/// Describes a declared label, which may be the target of a goto.
+pub struct Label {
+    // The number of local variables in scope where the label is declared.
+    // This count does not include variables in scopes outside the current
+    // function, nor does it include parameters.
+    pub slot_count: usize,
+
+    pub pos: Pos,
+}
+
+/// Describes a reference to a declared label.
+pub struct LabelUse {
+    /// The referenced label. None if no label with that name was visible.
+    pub label: Option<LabelID>,
+
+    /// The number of local variables in scope where the label was referenced.
+    /// If this is less than Label::slot_count, it indicates a branch across a
+    /// local variable definition, which is an error.
+    pub slot_count: usize,
 }
 
 /// Describes how a closure captures a variable from an enclosing scope.
@@ -218,10 +274,64 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             Attr::None,
             chunk.pos(),
         );
+        self.declare_labels(&chunk.stmts);
         for stmt in &chunk.stmts {
             self.resolve_stmt(stmt);
         }
         self.leave();
+    }
+
+    fn declare_labels(&mut self, stmts: &[Stmt<'src>]) {
+        let scope_stack_depth = self.scope_stack.len();
+        let mut slot_count = if scope_stack_depth >= 2 {
+            let parent = &self.scope_set.scopes[self.scope_stack[scope_stack_depth - 2].0];
+            if parent.kind == ScopeKind::Local {
+                parent.next_slot
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        for stmt in stmts {
+            match stmt {
+                Stmt::Local { left, .. } => {
+                    slot_count += left.len();
+                }
+                Stmt::Label {
+                    name, label, pos, ..
+                } => {
+                    for sid in self.scope_stack.iter().rev() {
+                        let scope = &self.scope_set.scopes[sid.0];
+                        if scope.kind != ScopeKind::Local {
+                            break;
+                        }
+                        if let Some(prev_lid) = scope.labels.get(name.text) {
+                            let prev_pos = self.scope_set.labels[prev_lid.0].pos;
+                            let prev_position = self.lmap.position(prev_pos);
+                            self.error(
+                                *pos,
+                                format!(
+                                    "label {} has the same name as another visible label at {}",
+                                    name.text, prev_position,
+                                ),
+                            );
+                            break;
+                        }
+                    }
+                    let top_sid = self.scope_stack.last().unwrap();
+                    *self.scope_set.ensure_label(*label) = Label {
+                        slot_count,
+                        pos: *pos,
+                    };
+                    self.scope_set.scopes[top_sid.0]
+                        .labels
+                        .insert(name.text, *label);
+                }
+                _ => (),
+            }
+        }
     }
 
     fn resolve_stmt(&mut self, stmt: &Stmt<'src>) {
@@ -266,6 +376,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             }
             Stmt::Do { stmts, scope, .. } => {
                 self.enter(*scope, ScopeKind::Local);
+                self.declare_labels(stmts);
                 for stmt in stmts {
                     self.resolve_stmt(stmt);
                 }
@@ -289,10 +400,20 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             } => {
                 self.resolve_expr(cond);
                 self.enter(*scope, ScopeKind::Local);
+                self.declare_labels(body);
                 for stmt in body {
                     self.resolve_stmt(stmt);
                 }
                 self.leave();
+            }
+            Stmt::Label { .. } => (),
+            Stmt::Goto {
+                name,
+                label_use,
+                pos,
+                ..
+            } => {
+                self.resolve_label(*name, *label_use, *pos);
             }
             Stmt::Print { expr, .. } => {
                 self.resolve_expr(expr);
@@ -403,6 +524,48 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
         };
     }
 
+    fn resolve_label(&mut self, name: Token<'src>, luid: LabelUseID, pos: Pos) {
+        let slot_count = if self.top().kind == ScopeKind::Local {
+            self.top().next_slot
+        } else {
+            0
+        };
+        let mut stack_def_index = self.scope_stack.len() - 1;
+        loop {
+            let sid = self.scope_stack[stack_def_index];
+            let scope = &self.scope_set.scopes[sid.0];
+            if scope.kind != ScopeKind::Local {
+                break;
+            }
+            if let Some(&lid) = scope.labels.get(name.text) {
+                let label = &self.scope_set.labels[lid.0];
+                if label.slot_count > slot_count {
+                    self.error(
+                        pos,
+                        format!(
+                            "cannot jump to label '{}' across local variable declaration",
+                            name.text
+                        ),
+                    )
+                }
+                *self.scope_set.ensure_label_use(luid) = LabelUse {
+                    label: Some(lid),
+                    slot_count,
+                };
+                return;
+            }
+            if stack_def_index == 0 {
+                break;
+            }
+            stack_def_index -= 1;
+        }
+        self.error(pos, format!("undefined label: '{}'", name.text));
+        *self.scope_set.ensure_label_use(luid) = LabelUse {
+            label: None,
+            slot_count,
+        };
+    }
+
     fn enter(&mut self, id: ScopeID, kind: ScopeKind) {
         let next_slot = if let Some(&prev_id) = self.scope_stack.last() {
             let prev = &self.scope_set.scopes[prev_id.0];
@@ -422,6 +585,10 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
 
     fn leave(&mut self) {
         self.scope_stack.pop();
+    }
+
+    fn top(&mut self) -> &Scope {
+        &self.scope_set.scopes[self.scope_stack.last().unwrap().0]
     }
 
     fn error(&mut self, pos: Pos, message: String) {

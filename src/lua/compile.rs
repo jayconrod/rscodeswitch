@@ -2,7 +2,7 @@ use crate::data::{self, List, SetValue, Slice};
 use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
 use crate::lua::scope::{self, ScopeSet, Var, VarKind, VarUse};
-use crate::lua::syntax::{self, Chunk, Expr, LValue, ScopeID, Stmt};
+use crate::lua::syntax::{self, Chunk, Expr, LValue, LabelID, ScopeID, Stmt};
 use crate::lua::token::{self, Number, Token};
 use crate::package::{Function, Global, Object, Package};
 use crate::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
@@ -48,6 +48,7 @@ struct Compiler<'src, 'ss, 'lm, 'err> {
     functions: Vec<Function>,
     strings: Handle<List<data::String>>,
     string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
+    named_labels: Vec<inst::Label>,
     asm_stack: Vec<Assembler>,
     errors: &'err mut Vec<Error>,
 }
@@ -65,6 +66,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             functions: Vec::new(),
             strings: Handle::new(List::alloc()),
             string_index: Handle::new(data::HashMap::alloc()),
+            named_labels: Vec::new(),
             asm_stack: vec![Assembler::new()],
             errors,
         }
@@ -241,6 +243,27 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().bif(&mut body_label);
                 self.asm().bind(&mut end_label);
+            }
+            Stmt::Label { label: lid, .. } => {
+                self.ensure_label(*lid);
+                let last_asm_index = self.asm_stack.len() - 1;
+                self.asm_stack[last_asm_index].bind(&mut self.named_labels[lid.0]);
+            }
+            Stmt::Goto {
+                label_use: luid, ..
+            } => {
+                let label_use = &self.scope_set.label_uses[luid.0];
+                if let Some(lid) = label_use.label {
+                    let label = &self.scope_set.labels[lid.0];
+                    if label.slot_count < label_use.slot_count {
+                        for _ in 0..(label_use.slot_count - label.slot_count) {
+                            self.asm().pop();
+                        }
+                    }
+                    self.ensure_label(lid);
+                    let last_asm_index = self.asm_stack.len() - 1;
+                    self.asm_stack[last_asm_index].b(&mut self.named_labels[lid.0]);
+                }
             }
             Stmt::Print { expr, .. } => {
                 self.compile_expr(expr);
@@ -445,6 +468,13 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 i
             }
         }
+    }
+
+    fn ensure_label(&mut self, lid: LabelID) -> &mut Label {
+        if self.named_labels.len() <= lid.0 {
+            self.named_labels.resize_with(lid.0 + 1, || Label::new());
+        }
+        &mut self.named_labels[lid.0]
     }
 
     fn pop_block(&mut self, sid: ScopeID) {

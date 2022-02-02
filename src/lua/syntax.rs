@@ -74,6 +74,16 @@ pub enum Stmt<'src> {
         scope: ScopeID,
         pos: Pos,
     },
+    Label {
+        name: Token<'src>,
+        label: LabelID,
+        pos: Pos,
+    },
+    Goto {
+        name: Token<'src>,
+        label_use: LabelUseID,
+        pos: Pos,
+    },
     // TODO: Remove this construct after standard library calls are supported.
     // This is a hack to enable debugging and testing.
     Print {
@@ -94,6 +104,8 @@ impl<'src> Stmt<'src> {
             Stmt::Do { pos, .. } => *pos,
             Stmt::If { pos, .. } => *pos,
             Stmt::While { pos, .. } => *pos,
+            Stmt::Label { pos, .. } => *pos,
+            Stmt::Goto { pos, .. } => *pos,
             Stmt::Print { expr, .. } => expr.pos(),
         }
     }
@@ -166,6 +178,12 @@ impl<'src> DisplayIndent for Stmt<'src> {
                     write!(f, "\n")?;
                 }
                 write!(f, "end")
+            }
+            Stmt::Label { name, .. } => {
+                write!(f, "::{}::", name.text)
+            }
+            Stmt::Goto { name, .. } => {
+                write!(f, "goto {}", name.text)
             }
             Stmt::Print { expr, .. } => write!(f, "print({})", expr),
         }
@@ -265,6 +283,12 @@ pub struct VarID(pub usize);
 #[derive(Clone, Copy)]
 pub struct VarUseID(pub usize);
 
+#[derive(Clone, Copy)]
+pub struct LabelID(pub usize);
+
+#[derive(Clone, Copy)]
+pub struct LabelUseID(pub usize);
+
 pub fn parse<'src>(tokens: &[Token<'src>], lmap: &LineMap, errors: &mut Vec<Error>) -> Chunk<'src> {
     let mut parser = Parser::new(tokens, lmap);
     let chunk = parser.parse_chunk();
@@ -279,6 +303,8 @@ struct Parser<'src, 'tok, 'lm> {
     next_scope: usize,
     next_var: usize,
     next_var_use: usize,
+    next_label: usize,
+    next_label_use: usize,
     errors: Vec<Error>,
 }
 
@@ -291,6 +317,8 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             next_scope: 0,
             next_var: 0,
             next_var_use: 0,
+            next_label: 0,
+            next_label_use: 0,
             errors: Vec::new(),
         }
     }
@@ -329,6 +357,8 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             Kind::Do => self.parse_do_stmt(),
             Kind::If => self.parse_if_stmt(),
             Kind::While => self.parse_while_stmt(),
+            Kind::ColonColon => self.parse_label_stmt(),
+            Kind::Goto => self.parse_goto_stmt(),
             Kind::Ident => {
                 if self.tokens[self.next].text == "print" {
                     self.take();
@@ -475,6 +505,27 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             cond,
             body,
             scope,
+            pos,
+        })
+    }
+
+    fn parse_label_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let label = self.next_label();
+        let begin = self.expect(Kind::ColonColon)?.pos();
+        let name = self.expect(Kind::Ident)?;
+        let end = self.expect(Kind::ColonColon)?.pos();
+        let pos = begin.combine(end);
+        Ok(Stmt::Label { name, label, pos })
+    }
+
+    fn parse_goto_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let label_use = self.next_label_use();
+        let begin = self.expect(Kind::Goto)?.pos();
+        let name = self.expect(Kind::Ident)?;
+        let pos = begin.combine(name.pos());
+        Ok(Stmt::Goto {
+            name,
+            label_use,
             pos,
         })
     }
@@ -731,6 +782,18 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         let id = self.next_var_use;
         self.next_var_use += 1;
         VarUseID(id)
+    }
+
+    fn next_label(&mut self) -> LabelID {
+        let id = self.next_label;
+        self.next_label += 1;
+        LabelID(id)
+    }
+
+    fn next_label_use(&mut self) -> LabelUseID {
+        let id = self.next_label_use;
+        self.next_label_use += 1;
+        LabelUseID(id)
     }
 }
 
