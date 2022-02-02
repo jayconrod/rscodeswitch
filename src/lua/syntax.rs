@@ -58,6 +58,11 @@ pub enum Stmt<'src> {
         right: Vec<Expr<'src>>,
         pos: Pos,
     },
+    Do {
+        stmts: Vec<Stmt<'src>>,
+        scope: ScopeID,
+        pos: Pos,
+    },
     // TODO: Remove this construct after standard library calls are supported.
     // This is a hack to enable debugging and testing.
     Print {
@@ -75,6 +80,7 @@ impl<'src> Stmt<'src> {
                 begin.combine(end)
             }
             Stmt::Local { pos, .. } => *pos,
+            Stmt::Do { pos, .. } => *pos,
             Stmt::Print { expr, .. } => expr.pos(),
         }
     }
@@ -113,6 +119,15 @@ impl<'src> DisplayIndent for Stmt<'src> {
                     sep = ", ";
                 }
                 Ok(())
+            }
+            Stmt::Do { stmts, .. } => {
+                write!(f, "do\n")?;
+                for stmt in stmts {
+                    stmt.fmt_indent(f, level + 1)?;
+                    write!(f, "\n")?;
+                }
+                self.write_indent(f, level)?;
+                write!(f, "end")
             }
             Stmt::Print { expr, .. } => write!(f, "print({})", expr),
         }
@@ -273,6 +288,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         match self.peek() {
             Kind::Semi => self.parse_empty_stmt(),
             Kind::Local => self.parse_local_stmt(),
+            Kind::Do => self.parse_do_stmt(),
             Kind::Ident => {
                 if self.tokens[self.next].text == "print" {
                     self.take();
@@ -367,6 +383,15 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             var,
             pos,
         })
+    }
+
+    fn parse_do_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let scope = self.next_scope();
+        let begin = self.expect(Kind::Do)?.pos();
+        let stmts = self.parse_block_stmts(Kind::End);
+        let end = self.expect(Kind::End)?.pos();
+        let pos = begin.combine(end);
+        Ok(Stmt::Do { stmts, scope, pos })
     }
 
     fn parse_expr(&mut self) -> Result<Expr<'src>, Error> {

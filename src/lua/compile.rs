@@ -2,7 +2,7 @@ use crate::data::{self, List, SetValue, Slice};
 use crate::heap::Handle;
 use crate::inst::{self, Assembler};
 use crate::lua::scope::{self, ScopeSet, Var, VarKind, VarUse};
-use crate::lua::syntax::{self, Chunk, Expr, LValue, Stmt};
+use crate::lua::syntax::{self, Chunk, Expr, LValue, ScopeID, Stmt};
 use crate::lua::token::{self, Number, Token};
 use crate::package::{Function, Global, Object, Package};
 use crate::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
@@ -195,6 +195,12 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         self.asm().pop();
                     }
                 }
+            }
+            Stmt::Do { stmts, scope, .. } => {
+                for stmt in stmts {
+                    self.compile_stmt(stmt);
+                }
+                self.pop_block(*scope);
             }
             Stmt::Print { expr, .. } => {
                 self.compile_expr(expr);
@@ -398,6 +404,13 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 (*self.string_index).insert(&*hs, &SetValue { value: i });
                 i
             }
+        }
+    }
+
+    fn pop_block(&mut self, sid: ScopeID) {
+        let scope = &self.scope_set.scopes[sid.0];
+        for _ in 0..scope.vars.len() {
+            self.asm().pop();
         }
     }
 

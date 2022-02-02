@@ -264,6 +264,13 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                     );
                 }
             }
+            Stmt::Do { stmts, scope, .. } => {
+                self.enter(*scope, ScopeKind::Local);
+                for stmt in stmts {
+                    self.resolve_stmt(stmt);
+                }
+                self.leave();
+            }
             Stmt::Print { expr, .. } => {
                 self.resolve_expr(expr);
             }
@@ -393,6 +400,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
     fn leave(&mut self) {
         self.scope_stack.pop();
     }
+
     fn error(&mut self, pos: Pos, message: String) {
         self.errors.push(Error {
             position: self.lmap.position(pos),
