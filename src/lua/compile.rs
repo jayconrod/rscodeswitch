@@ -227,11 +227,14 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm().bind(&mut end_label);
             }
             Stmt::While {
-                cond, body, scope, ..
+                cond,
+                body,
+                break_label: break_lid,
+                scope,
+                ..
             } => {
                 let mut cond_label = Label::new();
                 let mut body_label = Label::new();
-                let mut end_label = Label::new();
                 self.asm().b(&mut cond_label);
                 self.asm().bind(&mut body_label);
                 for stmt in body {
@@ -242,7 +245,23 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.compile_expr(cond);
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().bif(&mut body_label);
-                self.asm().bind(&mut end_label);
+                self.ensure_label(*break_lid);
+                let last_asm_index = self.asm_stack.len() - 1;
+                self.asm_stack[last_asm_index].bind(&mut self.named_labels[break_lid.0]);
+            }
+            Stmt::Break {
+                label_use: luid, ..
+            } => {
+                let label_use = &self.scope_set.label_uses[luid.0];
+                if let Some(lid) = label_use.label {
+                    let label = &self.scope_set.labels[lid.0];
+                    for _ in 0..(label_use.slot_count - label.slot_count) {
+                        self.asm().pop();
+                    }
+                    self.ensure_label(lid);
+                    let last_asm_index = self.asm_stack.len() - 1;
+                    self.asm_stack[last_asm_index].b(&mut self.named_labels[lid.0]);
+                }
             }
             Stmt::Label { label: lid, .. } => {
                 self.ensure_label(*lid);

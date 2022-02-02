@@ -72,6 +72,11 @@ pub enum Stmt<'src> {
         cond: Expr<'src>,
         body: Vec<Stmt<'src>>,
         scope: ScopeID,
+        break_label: LabelID,
+        pos: Pos,
+    },
+    Break {
+        label_use: LabelUseID,
         pos: Pos,
     },
     Label {
@@ -104,6 +109,7 @@ impl<'src> Stmt<'src> {
             Stmt::Do { pos, .. } => *pos,
             Stmt::If { pos, .. } => *pos,
             Stmt::While { pos, .. } => *pos,
+            Stmt::Break { pos, .. } => *pos,
             Stmt::Label { pos, .. } => *pos,
             Stmt::Goto { pos, .. } => *pos,
             Stmt::Print { expr, .. } => expr.pos(),
@@ -179,6 +185,7 @@ impl<'src> DisplayIndent for Stmt<'src> {
                 }
                 write!(f, "end")
             }
+            Stmt::Break { .. } => write!(f, "break"),
             Stmt::Label { name, .. } => {
                 write!(f, "::{}::", name.text)
             }
@@ -357,6 +364,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             Kind::Do => self.parse_do_stmt(),
             Kind::If => self.parse_if_stmt(),
             Kind::While => self.parse_while_stmt(),
+            Kind::Break => self.parse_break_stmt(),
             Kind::ColonColon => self.parse_label_stmt(),
             Kind::Goto => self.parse_goto_stmt(),
             Kind::Ident => {
@@ -495,6 +503,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
 
     fn parse_while_stmt(&mut self) -> Result<Stmt<'src>, Error> {
         let scope = self.next_scope();
+        let break_label = self.next_label();
         let begin = self.expect(Kind::While)?.pos();
         let cond = self.parse_expr()?;
         self.expect(Kind::Do)?;
@@ -505,8 +514,15 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             cond,
             body,
             scope,
+            break_label,
             pos,
         })
+    }
+
+    fn parse_break_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let label_use = self.next_label_use();
+        let pos = self.expect(Kind::Break)?.pos();
+        Ok(Stmt::Break { label_use, pos })
     }
 
     fn parse_label_stmt(&mut self) -> Result<Stmt<'src>, Error> {

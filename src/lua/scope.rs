@@ -44,6 +44,7 @@ impl<'src> ScopeSet<'src> {
                 kind: ScopeKind::Function,
                 vars: HashMap::new(),
                 labels: HashMap::new(),
+                break_label: None,
                 captures: Vec::new(),
                 next_slot: 0,
             });
@@ -106,6 +107,10 @@ pub struct Scope<'src> {
 
     /// Maps label names to labels.
     pub labels: HashMap<&'src str, LabelID>,
+
+    /// An implicit label for the end of the loop, which may be referenced by
+    /// a break statement. Only set for local loop scopes.
+    pub break_label: Option<LabelID>,
 
     /// List of variables defined in an enclosing scope that are captured by
     /// this scope. Captured variables might be referenced in this scope or in
@@ -281,6 +286,16 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
         self.leave();
     }
 
+    fn declare_break_label(&mut self, lid: LabelID) {
+        let scope = &mut self.scope_set.scopes[self.scope_stack.last().unwrap().0];
+        let slot_count = scope.next_slot;
+        scope.break_label = Some(lid);
+        *self.scope_set.ensure_label(lid) = Label {
+            slot_count,
+            pos: Pos { begin: 0, end: 0 },
+        };
+    }
+
     fn declare_labels(&mut self, stmts: &[Stmt<'src>]) {
         let scope_stack_depth = self.scope_stack.len();
         let mut slot_count = if scope_stack_depth >= 2 {
@@ -396,16 +411,22 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 }
             }
             Stmt::While {
-                cond, body, scope, ..
+                cond,
+                body,
+                scope,
+                break_label,
+                ..
             } => {
                 self.resolve_expr(cond);
                 self.enter(*scope, ScopeKind::Local);
+                self.declare_break_label(*break_label);
                 self.declare_labels(body);
                 for stmt in body {
                     self.resolve_stmt(stmt);
                 }
                 self.leave();
             }
+            Stmt::Break { label_use, pos, .. } => self.resolve_break(*label_use, *pos),
             Stmt::Label { .. } => (),
             Stmt::Goto {
                 name,
@@ -560,6 +581,38 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             stack_def_index -= 1;
         }
         self.error(pos, format!("undefined label: '{}'", name.text));
+        *self.scope_set.ensure_label_use(luid) = LabelUse {
+            label: None,
+            slot_count,
+        };
+    }
+
+    fn resolve_break(&mut self, luid: LabelUseID, pos: Pos) {
+        let slot_count = if self.top().kind == ScopeKind::Local {
+            self.top().next_slot
+        } else {
+            0
+        };
+        let mut stack_def_index = self.scope_stack.len() - 1;
+        loop {
+            let sid = self.scope_stack[stack_def_index];
+            let scope = &self.scope_set.scopes[sid.0];
+            if scope.kind != ScopeKind::Local {
+                break;
+            }
+            if let Some(break_label) = scope.break_label {
+                *self.scope_set.ensure_label_use(luid) = LabelUse {
+                    label: Some(break_label),
+                    slot_count,
+                };
+                return;
+            }
+            if stack_def_index == 0 {
+                break;
+            }
+            stack_def_index -= 1;
+        }
+        self.error(pos, format!("break statement used outside of loop"));
         *self.scope_set.ensure_label_use(luid) = LabelUse {
             label: None,
             slot_count,
