@@ -271,6 +271,19 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 }
                 self.leave();
             }
+            Stmt::If {
+                cond_stmts,
+                false_stmt,
+                ..
+            } => {
+                for (cond, stmt) in cond_stmts {
+                    self.resolve_expr(cond);
+                    self.resolve_stmt(stmt);
+                }
+                if let Some(false_stmt) = false_stmt {
+                    self.resolve_stmt(false_stmt);
+                }
+            }
             Stmt::Print { expr, .. } => {
                 self.resolve_expr(expr);
             }

@@ -1,6 +1,6 @@
 use crate::data::{self, List, SetValue, Slice};
 use crate::heap::Handle;
-use crate::inst::{self, Assembler};
+use crate::inst::{self, Assembler, Label};
 use crate::lua::scope::{self, ScopeSet, Var, VarKind, VarUse};
 use crate::lua::syntax::{self, Chunk, Expr, LValue, ScopeID, Stmt};
 use crate::lua::token::{self, Number, Token};
@@ -201,6 +201,28 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     self.compile_stmt(stmt);
                 }
                 self.pop_block(*scope);
+            }
+            Stmt::If {
+                cond_stmts,
+                false_stmt,
+                ..
+            } => {
+                let mut end_label = Label::new();
+                for (cond, stmt) in cond_stmts {
+                    let mut next_label = Label::new();
+                    self.compile_expr(cond);
+                    self.asm().mode(inst::MODE_LUA);
+                    self.asm().not();
+                    self.asm().mode(inst::MODE_LUA);
+                    self.asm().bif(&mut next_label);
+                    self.compile_stmt(stmt);
+                    self.asm().b(&mut end_label);
+                    self.asm().bind(&mut next_label);
+                }
+                if let Some(false_stmt) = false_stmt {
+                    self.compile_stmt(false_stmt);
+                }
+                self.asm().bind(&mut end_label);
             }
             Stmt::Print { expr, .. } => {
                 self.compile_expr(expr);

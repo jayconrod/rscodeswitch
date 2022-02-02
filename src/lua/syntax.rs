@@ -63,6 +63,11 @@ pub enum Stmt<'src> {
         scope: ScopeID,
         pos: Pos,
     },
+    If {
+        cond_stmts: Vec<(Expr<'src>, Stmt<'src>)>,
+        false_stmt: Option<Box<Stmt<'src>>>,
+        pos: Pos,
+    },
     // TODO: Remove this construct after standard library calls are supported.
     // This is a hack to enable debugging and testing.
     Print {
@@ -81,6 +86,7 @@ impl<'src> Stmt<'src> {
             }
             Stmt::Local { pos, .. } => *pos,
             Stmt::Do { pos, .. } => *pos,
+            Stmt::If { pos, .. } => *pos,
             Stmt::Print { expr, .. } => expr.pos(),
         }
     }
@@ -128,6 +134,23 @@ impl<'src> DisplayIndent for Stmt<'src> {
                 }
                 self.write_indent(f, level)?;
                 write!(f, "end")
+            }
+            Stmt::If {
+                cond_stmts,
+                false_stmt,
+                ..
+            } => {
+                let mut sep = "if";
+                for (cond, stmt) in cond_stmts {
+                    write!(f, "{} {}", sep, cond)?;
+                    sep = "\nelseif";
+                    stmt.fmt_indent(f, level)?;
+                }
+                if let Some(false_stmt) = false_stmt {
+                    write!(f, "\nelse ")?;
+                    false_stmt.fmt_indent(f, level)?;
+                }
+                Ok(())
             }
             Stmt::Print { expr, .. } => write!(f, "print({})", expr),
         }
@@ -289,6 +312,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             Kind::Semi => self.parse_empty_stmt(),
             Kind::Local => self.parse_local_stmt(),
             Kind::Do => self.parse_do_stmt(),
+            Kind::If => self.parse_if_stmt(),
             Kind::Ident => {
                 if self.tokens[self.next].text == "print" {
                     self.take();
@@ -392,6 +416,35 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         let end = self.expect(Kind::End)?.pos();
         let pos = begin.combine(end);
         Ok(Stmt::Do { stmts, scope, pos })
+    }
+
+    fn parse_if_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let begin = self.expect(Kind::If)?.pos();
+        let mut cond_stmts = Vec::new();
+        let true_cond = self.parse_expr()?;
+        self.expect(Kind::Then)?;
+        let true_stmt = self.parse_stmt()?;
+        cond_stmts.push((true_cond, true_stmt));
+        while self.peek() == Kind::Elseif {
+            self.take();
+            let cond = self.parse_expr()?;
+            self.expect(Kind::Then)?;
+            let stmt = self.parse_stmt()?;
+            cond_stmts.push((cond, stmt));
+        }
+        let false_stmt = if self.peek() == Kind::Else {
+            self.take();
+            Some(Box::new(self.parse_stmt()?))
+        } else {
+            None
+        };
+        let end = self.expect(Kind::End)?.pos();
+        let pos = begin.combine(end);
+        Ok(Stmt::If {
+            cond_stmts,
+            false_stmt,
+            pos,
+        })
     }
 
     fn parse_expr(&mut self) -> Result<Expr<'src>, Error> {
