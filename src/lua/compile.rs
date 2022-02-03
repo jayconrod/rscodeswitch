@@ -249,6 +249,32 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let last_asm_index = self.asm_stack.len() - 1;
                 self.asm_stack[last_asm_index].bind(&mut self.named_labels[break_lid.0]);
             }
+            Stmt::Repeat {
+                body,
+                cond,
+                break_label: break_lid,
+                scope,
+                ..
+            } => {
+                let mut body_label = Label::new();
+                self.asm().bind(&mut body_label);
+                for stmt in body {
+                    self.compile_stmt(stmt);
+                }
+                self.compile_expr(cond);
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().not();
+                let slot_count = self.scope_set.scopes[scope.0].vars.len();
+                for _ in 0..slot_count {
+                    self.asm().swap();
+                    self.asm().pop();
+                }
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().bif(&mut body_label);
+                self.ensure_label(*break_lid);
+                let last_asm_index = self.asm_stack.len() - 1;
+                self.asm_stack[last_asm_index].bind(&mut self.named_labels[break_lid.0]);
+            }
             Stmt::Break {
                 label_use: luid, ..
             } => {

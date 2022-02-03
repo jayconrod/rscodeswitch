@@ -75,6 +75,13 @@ pub enum Stmt<'src> {
         break_label: LabelID,
         pos: Pos,
     },
+    Repeat {
+        body: Vec<Stmt<'src>>,
+        cond: Expr<'src>,
+        scope: ScopeID,
+        break_label: LabelID,
+        pos: Pos,
+    },
     Break {
         label_use: LabelUseID,
         pos: Pos,
@@ -109,6 +116,7 @@ impl<'src> Stmt<'src> {
             Stmt::Do { pos, .. } => *pos,
             Stmt::If { pos, .. } => *pos,
             Stmt::While { pos, .. } => *pos,
+            Stmt::Repeat { pos, .. } => *pos,
             Stmt::Break { pos, .. } => *pos,
             Stmt::Label { pos, .. } => *pos,
             Stmt::Goto { pos, .. } => *pos,
@@ -183,7 +191,17 @@ impl<'src> DisplayIndent for Stmt<'src> {
                     stmt.fmt_indent(f, level + 1)?;
                     write!(f, "\n")?;
                 }
+                self.write_indent(f, level)?;
                 write!(f, "end")
+            }
+            Stmt::Repeat { body, cond, .. } => {
+                write!(f, "repeat\n")?;
+                for stmt in body {
+                    stmt.fmt_indent(f, level + 1)?;
+                    write!(f, "\n")?;
+                }
+                self.write_indent(f, level)?;
+                write!(f, "until {}", cond)
             }
             Stmt::Break { .. } => write!(f, "break"),
             Stmt::Label { name, .. } => {
@@ -364,6 +382,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             Kind::Do => self.parse_do_stmt(),
             Kind::If => self.parse_if_stmt(),
             Kind::While => self.parse_while_stmt(),
+            Kind::Repeat => self.parse_repeat_stmt(),
             Kind::Break => self.parse_break_stmt(),
             Kind::ColonColon => self.parse_label_stmt(),
             Kind::Goto => self.parse_goto_stmt(),
@@ -513,6 +532,23 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         Ok(Stmt::While {
             cond,
             body,
+            scope,
+            break_label,
+            pos,
+        })
+    }
+
+    fn parse_repeat_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let scope = self.next_scope();
+        let break_label = self.next_label();
+        let begin = self.expect(Kind::Repeat)?.pos();
+        let body = self.parse_block_stmts(Kind::Until);
+        self.expect(Kind::Until)?;
+        let cond = self.parse_expr()?;
+        let pos = begin.combine(cond.pos());
+        Ok(Stmt::Repeat {
+            body,
+            cond,
             scope,
             break_label,
             pos,

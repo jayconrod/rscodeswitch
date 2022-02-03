@@ -426,6 +426,22 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 }
                 self.leave();
             }
+            Stmt::Repeat {
+                body,
+                cond,
+                scope,
+                break_label,
+                ..
+            } => {
+                self.enter(*scope, ScopeKind::Local);
+                self.declare_break_label(*break_label);
+                self.declare_labels(body);
+                for stmt in body {
+                    self.resolve_stmt(stmt);
+                }
+                self.resolve_expr(cond);
+                self.leave();
+            }
             Stmt::Break { label_use, pos, .. } => self.resolve_break(*label_use, *pos),
             Stmt::Label { .. } => (),
             Stmt::Goto {
