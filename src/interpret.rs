@@ -1367,6 +1367,10 @@ impl<'w> Interpreter<'w> {
                     lua_binop_bit!(|);
                     inst::size(inst::OR)
                 }
+                (inst::PANIC, inst::MODE_STRING) => {
+                    let s = (*(sp as *const *const data::String)).as_ref().unwrap();
+                    return_errorf!("{}", s)
+                }
                 (inst::POP, inst::MODE_I64) => {
                     sp += 8;
                     inst::size(inst::POP)
@@ -1617,6 +1621,23 @@ impl<'w> Interpreter<'w> {
                         _ => panic!("unknown sys {}", sys),
                     }
                     inst::size(inst::SYS)
+                }
+                (inst::TOFLOAT, inst::MODE_LUA) => {
+                    let i = pop!();
+                    match nanbox::num_as_f64(i) {
+                        Some(o) => push!(o.to_bits()),
+                        None => return_errorf!(
+                            "could not convert value of type {} to float",
+                            nanbox::debug_type(i)
+                        ),
+                    }
+                    inst::size(inst::TYPEOF)
+                }
+                (inst::TYPEOF, inst::MODE_LUA) => {
+                    let i = pop!();
+                    let o = nanbox::type_tag(i);
+                    push!(o);
+                    inst::size(inst::TYPEOF)
                 }
                 (inst::XOR, inst::MODE_LUA) => {
                     lua_binop_bit!(^);

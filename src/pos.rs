@@ -249,6 +249,7 @@ impl FunctionLineMap {
             let c = self.data[p];
             if c & 0x80 != 0 {
                 cmd_offset += (c & 0x7f) as u32;
+                p += 1;
                 continue;
             }
             cmd_offset += c as u32;

@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 63.
+// Next opcode: 66.
 pub const ADD: u8 = 20;
 pub const ALLOC: u8 = 35;
 pub const AND: u8 = 60;
@@ -47,9 +47,11 @@ pub const NOP: u8 = 1;
 pub const NOT: u8 = 24;
 pub const NOTB: u8 = 53;
 pub const OR: u8 = 61;
+pub const PANIC: u8 = 65;
 pub const POP: u8 = 3;
 pub const PROTOTYPE: u8 = 48;
 pub const RET: u8 = 4;
+pub const TOFLOAT: u8 = 64;
 pub const SHL: u8 = 58;
 pub const SHR: u8 = 59;
 pub const STORE: u8 = 37;
@@ -66,6 +68,7 @@ pub const SWAP: u8 = 34;
 pub const SWAPN: u8 = 44;
 pub const SYS: u8 = 5;
 // pub const TRUE: u8 = 7;
+pub const TYPEOF: u8 = 63;
 pub const XOR: u8 = 62;
 
 pub const SYS_PRINT: u8 = 1;
@@ -103,8 +106,9 @@ pub fn size_at(insts: &[u8]) -> usize {
 pub const fn size(op: u8) -> usize {
     match op {
         ADD | AND | CONSTZERO | DIV | DUP | EQ | EXP | FLOORDIV | GE | GT | LT | LE | LOAD
-        | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | POP
-        | PROTOTYPE | RET | SHL | SHR | STORE | STOREPROTOTYPE | STRCAT | SUB | SWAP | XOR => 1,
+        | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | PANIC | POP
+        | PROTOTYPE | RET | SHL | SHR | STORE | STOREPROTOTYPE | STRCAT | SUB | SWAP | TOFLOAT
+        | TYPEOF | XOR => 1,
         SWAPN | SYS => 2,
         CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
         ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | LOADNAMEDPROPORNIL
@@ -155,6 +159,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         NOT => "not",
         NOTB => "notb",
         OR => "or",
+        PANIC => "panic",
         POP => "pop",
         PROTOTYPE => "prototype",
         RET => "ret",
@@ -173,6 +178,8 @@ pub fn mnemonic(op: u8) -> &'static str {
         SWAP => "swap",
         SWAPN => "swapn",
         SYS => "sys",
+        TOFLOAT => "tofloat",
+        TYPEOF => "typeof",
         XOR => "xor",
         _ => panic!("unknown opcode"),
     }
@@ -415,6 +422,10 @@ impl Assembler {
         self.write_u8(OR);
     }
 
+    pub fn panic(&mut self) {
+        self.write_u8(PANIC);
+    }
+
     pub fn pop(&mut self) {
         self.write_u8(POP);
     }
@@ -493,6 +504,14 @@ impl Assembler {
     pub fn sys(&mut self, sys: u8) {
         self.write_u8(SYS);
         self.write_u8(sys);
+    }
+
+    pub fn tofloat(&mut self) {
+        self.write_u8(TOFLOAT);
+    }
+
+    pub fn typeof_(&mut self) {
+        self.write_u8(TYPEOF);
     }
 
     pub fn xor(&mut self) {
@@ -620,8 +639,9 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "  {}{}", mnemonic(insts[p]), mode)?;
         match insts[p] {
             ADD | AND | CONSTZERO | DIV | DUP | EXP | EQ | FLOORDIV | GE | GT | LT | LE | LOAD
-            | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | POP
-            | PROTOTYPE | RET | SHL | SHR | STORE | STOREPROTOTYPE | STRCAT | SUB | SWAP | XOR => {
+            | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | PANIC
+            | POP | PROTOTYPE | RET | SHL | SHR | STORE | STOREPROTOTYPE | STRCAT | SUB | SWAP
+            | TOFLOAT | TYPEOF | XOR => {
                 f.write_str("\n")?;
             }
             B | BIF => {

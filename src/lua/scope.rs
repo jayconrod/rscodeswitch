@@ -47,6 +47,7 @@ impl<'src> ScopeSet<'src> {
                 break_label: None,
                 captures: Vec::new(),
                 next_slot: 0,
+                slot_count: 0,
             });
         }
         &mut self.scopes[id.0]
@@ -121,12 +122,17 @@ pub struct Scope<'src> {
     /// The next available slot number to store a variable. Used to set
     /// Var::slot for new variables.
     next_slot: usize,
+
+    /// Number of slots in this scope. May different from vars.len(),
+    /// for example, because there are hidden variables not in vars.
+    pub slot_count: usize,
 }
 
 impl<'src> Scope<'src> {
     fn next_slot(&mut self) -> usize {
         let i = self.next_slot;
         self.next_slot += 1;
+        self.slot_count += 1;
         i
     }
 }
@@ -442,6 +448,40 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 self.resolve_expr(cond);
                 self.leave();
             }
+            Stmt::For {
+                name,
+                init,
+                limit,
+                step,
+                body,
+                ind_scope,
+                body_scope,
+                ind_var,
+                limit_var,
+                step_var,
+                body_var,
+                break_label,
+                ..
+            } => {
+                self.resolve_expr(init);
+                self.resolve_expr(limit);
+                if let Some(step) = step {
+                    self.resolve_expr(step);
+                }
+                self.enter(*ind_scope, ScopeKind::Local);
+                self.declare_break_label(*break_label);
+                self.declare_hidden(*ind_var);
+                self.declare_hidden(*limit_var);
+                self.declare_hidden(*step_var);
+                self.enter(*body_scope, ScopeKind::Local);
+                self.declare(*body_var, name.text, VarKind::Local, Attr::None, name.pos());
+                self.declare_labels(body);
+                for stmt in body {
+                    self.resolve_stmt(stmt);
+                }
+                self.leave();
+                self.leave();
+            }
             Stmt::Break { label_use, pos, .. } => self.resolve_break(*label_use, *pos),
             Stmt::Label { .. } => (),
             Stmt::Goto {
@@ -521,7 +561,9 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             return;
         }
 
-        scope.vars.insert(name, vid);
+        if name != "" {
+            scope.vars.insert(name, vid);
+        }
         let var = Var {
             kind,
             attr,
@@ -530,6 +572,16 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             pos,
         };
         *self.scope_set.ensure_var(vid) = var;
+    }
+
+    fn declare_hidden(&mut self, vid: VarID) {
+        self.declare(
+            vid,
+            "",
+            VarKind::Local,
+            Attr::None,
+            Pos { begin: 0, end: 0 },
+        )
     }
 
     fn resolve(&mut self, name: Token<'src>, vuid: VarUseID) {

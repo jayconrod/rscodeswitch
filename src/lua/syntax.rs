@@ -82,6 +82,21 @@ pub enum Stmt<'src> {
         break_label: LabelID,
         pos: Pos,
     },
+    For {
+        name: Token<'src>,
+        init: Expr<'src>,
+        limit: Expr<'src>,
+        step: Option<Expr<'src>>,
+        body: Vec<Stmt<'src>>,
+        ind_scope: ScopeID,
+        body_scope: ScopeID,
+        ind_var: VarID,
+        limit_var: VarID,
+        step_var: VarID,
+        body_var: VarID,
+        break_label: LabelID,
+        pos: Pos,
+    },
     Break {
         label_use: LabelUseID,
         pos: Pos,
@@ -117,6 +132,7 @@ impl<'src> Stmt<'src> {
             Stmt::If { pos, .. } => *pos,
             Stmt::While { pos, .. } => *pos,
             Stmt::Repeat { pos, .. } => *pos,
+            Stmt::For { pos, .. } => *pos,
             Stmt::Break { pos, .. } => *pos,
             Stmt::Label { pos, .. } => *pos,
             Stmt::Goto { pos, .. } => *pos,
@@ -202,6 +218,25 @@ impl<'src> DisplayIndent for Stmt<'src> {
                 }
                 self.write_indent(f, level)?;
                 write!(f, "until {}", cond)
+            }
+            Stmt::For {
+                name,
+                init,
+                limit,
+                step,
+                body,
+                ..
+            } => {
+                write!(f, "for {} = {}, {}", name.text, init, limit)?;
+                if let Some(step) = step {
+                    write!(f, ", {}", step)?;
+                }
+                write!(f, " do\n")?;
+                for stmt in body {
+                    stmt.fmt_indent(f, level + 1)?;
+                }
+                self.write_indent(f, level)?;
+                write!(f, "end")
             }
             Stmt::Break { .. } => write!(f, "break"),
             Stmt::Label { name, .. } => {
@@ -383,6 +418,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             Kind::If => self.parse_if_stmt(),
             Kind::While => self.parse_while_stmt(),
             Kind::Repeat => self.parse_repeat_stmt(),
+            Kind::For => self.parse_for_stmt(),
             Kind::Break => self.parse_break_stmt(),
             Kind::ColonColon => self.parse_label_stmt(),
             Kind::Goto => self.parse_goto_stmt(),
@@ -550,6 +586,47 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             body,
             cond,
             scope,
+            break_label,
+            pos,
+        })
+    }
+
+    fn parse_for_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let ind_scope = self.next_scope();
+        let body_scope = self.next_scope();
+        let ind_var = self.next_var();
+        let limit_var = self.next_var();
+        let step_var = self.next_var();
+        let body_var = self.next_var();
+        let break_label = self.next_label();
+        let begin = self.expect(Kind::For)?.pos();
+        let name = self.expect(Kind::Ident)?;
+        self.expect(Kind::Eq)?;
+        let init = self.parse_expr()?;
+        self.expect(Kind::Comma)?;
+        let limit = self.parse_expr()?;
+        let step = if self.peek() == Kind::Comma {
+            self.take();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.expect(Kind::Do)?;
+        let body = self.parse_block_stmts(Kind::End);
+        let end = self.expect(Kind::End)?.pos();
+        let pos = begin.combine(end);
+        Ok(Stmt::For {
+            name,
+            init,
+            limit,
+            step,
+            body,
+            ind_scope,
+            body_scope,
+            ind_var,
+            limit_var,
+            step_var,
+            body_var,
             break_label,
             pos,
         })

@@ -12,17 +12,26 @@ const QNAN: u64 = 0x7ffc_0000_0000_0000;
 
 /// The low three bits of the mantissa indicate what kind of value is boxed.
 const TAG_MASK: u64 = 7;
-const TAG_SIZE: u64 = 3;
-const TAG_NIL: u64 = 0;
-const TAG_BOOL: u64 = 1;
-const TAG_SMALL_INT: u64 = 2;
-const TAG_BIG_INT: u64 = 3;
-const TAG_STRING: u64 = 4;
-const TAG_CLOSURE: u64 = 5;
-const TAG_OBJECT: u64 = 6;
+pub const TAG_SIZE: u64 = 3;
+pub const TAG_NIL: u64 = 0;
+pub const TAG_BOOL: u64 = 1;
+pub const TAG_SMALL_INT: u64 = 2;
+pub const TAG_BIG_INT: u64 = 3;
+pub const TAG_STRING: u64 = 4;
+pub const TAG_CLOSURE: u64 = 5;
+pub const TAG_OBJECT: u64 = 6;
+pub const TAG_FLOAT: u64 = 8;
 
 const VALUE_MASK: u64 = 0x0003_ffff_ffff_ffff;
 const SMALL_INT_BITS: u64 = 47;
+
+pub fn type_tag(v: u64) -> u64 {
+    if v & QNAN == QNAN {
+        v & TAG_MASK
+    } else {
+        TAG_FLOAT
+    }
+}
 
 pub fn from_nil() -> u64 {
     QNAN | TAG_NIL
