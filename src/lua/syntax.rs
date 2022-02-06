@@ -111,10 +111,35 @@ pub enum Stmt<'src> {
         label_use: LabelUseID,
         pos: Pos,
     },
+    Function {
+        name: FunctionName<'src>,
+        parameters: Vec<Param<'src>>,
+        is_variadic: bool,
+        body: Vec<Stmt<'src>>,
+        param_scope: ScopeID,
+        body_scope: ScopeID,
+        pos: Pos,
+    },
+    LocalFunction {
+        name: Token<'src>,
+        parameters: Vec<Param<'src>>,
+        is_variadic: bool,
+        body: Vec<Stmt<'src>>,
+        var: VarID,
+        param_scope: ScopeID,
+        body_scope: ScopeID,
+        pos: Pos,
+    },
+    Call(Call<'src>),
+    Return {
+        exprs: Vec<Expr<'src>>,
+        pos: Pos,
+    },
     // TODO: Remove this construct after standard library calls are supported.
     // This is a hack to enable debugging and testing.
     Print {
-        expr: Expr<'src>,
+        exprs: Vec<Expr<'src>>,
+        pos: Pos,
     },
 }
 
@@ -136,8 +161,52 @@ impl<'src> Stmt<'src> {
             Stmt::Break { pos, .. } => *pos,
             Stmt::Label { pos, .. } => *pos,
             Stmt::Goto { pos, .. } => *pos,
-            Stmt::Print { expr, .. } => expr.pos(),
+            Stmt::Function { pos, .. } => *pos,
+            Stmt::LocalFunction { pos, .. } => *pos,
+            Stmt::Call(Call { pos, .. }) => *pos,
+            Stmt::Return { pos, .. } => *pos,
+            Stmt::Print { pos, .. } => *pos,
         }
+    }
+
+    fn fmt_function_parameters_and_body(
+        &self,
+        f: &mut Formatter,
+        parameters: &[Param<'src>],
+        is_variadic: bool,
+        body: &[Stmt<'src>],
+        level: usize,
+    ) -> fmt::Result {
+        let mut sep = "";
+        for p in parameters {
+            write!(f, "{}{}", sep, p.name.text)?;
+            sep = ", ";
+        }
+        if is_variadic {
+            write!(f, "{}...", sep)?;
+        }
+        write!(f, ")\n")?;
+        for stmt in body {
+            stmt.fmt_indent(f, level + 1)?;
+            write!(f, "\n")?;
+        }
+        self.write_indent(f, level)?;
+        write!(f, "end")
+    }
+
+    fn write_expr_list(
+        &self,
+        f: &mut Formatter,
+        exprs: &[Expr<'src>],
+        level: usize,
+    ) -> fmt::Result {
+        let mut sep = "";
+        for expr in exprs {
+            write!(f, "{}", sep)?;
+            sep = ", ";
+            expr.fmt_indent(f, level)?;
+        }
+        Ok(())
     }
 }
 
@@ -245,7 +314,41 @@ impl<'src> DisplayIndent for Stmt<'src> {
             Stmt::Goto { name, .. } => {
                 write!(f, "goto {}", name.text)
             }
-            Stmt::Print { expr, .. } => write!(f, "print({})", expr),
+            Stmt::Function {
+                name,
+                parameters,
+                is_variadic,
+                body,
+                ..
+            } => {
+                write!(f, "function {}(", name)?;
+                self.fmt_function_parameters_and_body(f, parameters, *is_variadic, body, level)
+            }
+            Stmt::LocalFunction {
+                name,
+                parameters,
+                is_variadic,
+                body,
+                ..
+            } => {
+                write!(f, "local function {}(", name.text)?;
+                self.fmt_function_parameters_and_body(f, parameters, *is_variadic, body, level)
+            }
+            Stmt::Call(e) => e.fmt_indent(f, level),
+            Stmt::Return { exprs, .. } => {
+                write!(f, "return")?;
+                let mut sep = " ";
+                for expr in exprs {
+                    write!(f, "{}{}", sep, expr)?;
+                    sep = ", ";
+                }
+                Ok(())
+            }
+            Stmt::Print { exprs, .. } => {
+                write!(f, "print(")?;
+                self.write_expr_list(f, exprs, level)?;
+                write!(f, ")")
+            }
         }
     }
 }
@@ -273,6 +376,40 @@ impl<'src> Display for NameAttr<'src> {
     }
 }
 
+pub struct FunctionName<'src> {
+    pub names: Vec<Token<'src>>,
+    pub is_method: bool,
+}
+
+impl<'src> FunctionName<'src> {
+    pub fn pos(&self) -> Pos {
+        if self.names.len() == 1 {
+            self.names[0].pos()
+        } else {
+            self.names
+                .first()
+                .unwrap()
+                .pos()
+                .combine(self.names.last().unwrap().pos())
+        }
+    }
+}
+
+impl<'src> Display for FunctionName<'src> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let mut sep = "";
+        for (i, t) in self.names.iter().enumerate() {
+            write!(f, "{}{}", sep, t.text)?;
+            if i == self.names.len() - 2 && self.is_method {
+                sep = ":";
+            } else {
+                sep = ".";
+            }
+        }
+        Ok(())
+    }
+}
+
 pub enum Expr<'src> {
     Literal(Token<'src>),
     Var {
@@ -285,6 +422,15 @@ pub enum Expr<'src> {
         expr: Box<Expr<'src>>,
         pos: Pos,
     },
+    Function {
+        parameters: Vec<Param<'src>>,
+        is_variadic: bool,
+        body: Vec<Stmt<'src>>,
+        param_scope: ScopeID,
+        body_scope: ScopeID,
+        pos: Pos,
+    },
+    Call(Call<'src>),
 }
 
 impl<'src> Expr<'src> {
@@ -295,18 +441,84 @@ impl<'src> Expr<'src> {
             Expr::Unary(op, expr) => op.pos().combine(expr.pos()),
             Expr::Binary(l, _, r) => l.pos().combine(r.pos()),
             Expr::Group { pos, .. } => *pos,
+            Expr::Function { pos, .. } => *pos,
+            Expr::Call(Call { pos, .. }) => *pos,
         }
     }
 }
 
 impl<'src> Display for Expr<'src> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        self.fmt_indent(f, 0)
+    }
+}
+
+impl<'src> DisplayIndent for Expr<'src> {
+    fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
         match self {
             Expr::Literal(t) => write!(f, "{}", t.text),
             Expr::Var { name, .. } => write!(f, "{}", name.text),
             Expr::Unary(op, expr) => write!(f, "{}{}", op.text, expr),
             Expr::Binary(l, op, r) => write!(f, "{} {} {}", l, op.text, r),
             Expr::Group { expr, .. } => write!(f, "({})", expr),
+            Expr::Function {
+                parameters,
+                is_variadic,
+                body,
+                ..
+            } => {
+                write!(f, "function(")?;
+                let mut sep = "";
+                for p in parameters {
+                    write!(f, "{}{}", sep, p.name.text)?;
+                    sep = ", ";
+                }
+                if *is_variadic {
+                    write!(f, "{}...", sep)?;
+                }
+                write!(f, ")\n")?;
+                self.write_indent(f, level + 1)?;
+                for stmt in body {
+                    stmt.fmt_indent(f, level + 1)?;
+                    write!(f, "\n")?;
+                }
+                self.write_indent(f, level)?;
+                write!(f, "end")
+            }
+            Expr::Call(call) => call.fmt_indent(f, level),
+        }
+    }
+}
+
+pub struct Call<'src> {
+    pub callee: Box<Expr<'src>>,
+    pub method_name: Option<Token<'src>>,
+    pub arguments: Vec<Expr<'src>>,
+    pub pos: Pos,
+}
+
+impl<'src> DisplayIndent for Call<'src> {
+    fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
+        self.callee.fmt_indent(f, level)?;
+        write!(f, "{}", self.callee)?;
+        if let Some(method_name) = self.method_name {
+            write!(f, ":{}", method_name.text)?;
+        }
+        match self.arguments[..] {
+            [Expr::Literal(t)] if t.kind == Kind::String =>
+                write!(f, "{}", t.text)
+            ,
+            // TODO: f {...} for single table constructor arg
+            _ => {
+                write!(f, "(")?;
+                let mut sep = "";
+                for a in &self.arguments {
+                    write!(f, "{}", sep)?;
+                    a.fmt_indent(f, level)?;
+                    sep = ", ";
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -332,6 +544,11 @@ impl<'src> Display for LValue<'src> {
             LValue::Var { name, .. } => write!(f, "{}", name.text),
         }
     }
+}
+
+pub struct Param<'src> {
+    pub name: Token<'src>,
+    pub var: VarID,
 }
 
 #[derive(Clone, Copy)]
@@ -407,6 +624,19 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
                 }
             }
         }
+        let mut returned = false;
+        for stmt in &stmts {
+            if returned {
+                self.errors.push(Error {
+                    position: self.lmap.position(stmt.pos()),
+                    message: String::from("statement not allowed in the same block after 'return'"),
+                });
+                break;
+            }
+            if let Stmt::Return { .. } = stmt {
+                returned = true;
+            }
+        }
         stmts
     }
 
@@ -422,51 +652,50 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             Kind::Break => self.parse_break_stmt(),
             Kind::ColonColon => self.parse_label_stmt(),
             Kind::Goto => self.parse_goto_stmt(),
-            Kind::Ident => {
-                if self.tokens[self.next].text == "print" {
-                    self.take();
-                    self.expect(Kind::LParen)?;
-                    let expr = self.parse_expr()?;
-                    self.expect(Kind::RParen)?;
-                    return Ok(Stmt::Print { expr });
-                }
-
+            Kind::Function => self.parse_function_stmt(),
+            Kind::Return => self.parse_return_stmt(),
+            Kind::Ident if self.tokens[self.next].text == "print" => {
+                let begin = self.take().pos();
+                self.expect(Kind::LParen)?;
+                let exprs = self.parse_expr_list()?;
+                let end = self.expect(Kind::RParen)?.pos();
+                let pos = begin.combine(end);
+                return Ok(Stmt::Print { exprs, pos });
+            }
+            _ => {
                 let e = self.parse_expr()?;
-                match self.peek() {
-                    Kind::Comma | Kind::Eq => {
-                        let mut left_exprs = Vec::new();
-                        left_exprs.push(e);
-                        while self.peek() == Kind::Comma {
-                            self.take();
-                            left_exprs.push(self.parse_expr()?);
-                        }
-                        self.expect(Kind::Eq)?;
-                        let mut right_exprs = Vec::new();
-                        right_exprs.push(self.parse_expr()?);
-                        while self.peek() == Kind::Comma {
-                            self.take();
-                            right_exprs.push(self.parse_expr()?);
-                        }
-                        let mut left_lvals = Vec::new();
-                        for l in left_exprs {
-                            match self.expr_to_lvalue(l) {
-                                Ok(l) => {
-                                    left_lvals.push(l);
-                                }
-                                Err(err) => {
-                                    self.errors.push(err);
-                                }
+                if self.peek() == Kind::Comma || self.peek() == Kind::Eq {
+                    // Assignment
+                    let mut left_exprs = Vec::new();
+                    left_exprs.push(e);
+                    while self.peek() == Kind::Comma {
+                        self.take();
+                        left_exprs.push(self.parse_expr()?);
+                    }
+                    self.expect(Kind::Eq)?;
+                    let right_exprs = self.parse_non_empty_expr_list()?;
+                    let mut left_lvals = Vec::new();
+                    for l in left_exprs {
+                        match self.expr_to_lvalue(l) {
+                            Ok(l) => {
+                                left_lvals.push(l);
+                            }
+                            Err(err) => {
+                                self.errors.push(err);
                             }
                         }
-                        Ok(Stmt::Assign {
-                            left: left_lvals,
-                            right: right_exprs,
-                        })
                     }
-                    _ => Err(self.expect_error("',' or '='")),
+                    Ok(Stmt::Assign {
+                        left: left_lvals,
+                        right: right_exprs,
+                    })
+                } else if let Expr::Call(call) = e {
+                    // Call statement
+                    Ok(Stmt::Call(call))
+                } else {
+                    Err(self.expect_error("statement"))
                 }
             }
-            _ => Err(self.expect_error("statement")),
         }
     }
 
@@ -477,6 +706,9 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
 
     fn parse_local_stmt(&mut self) -> Result<Stmt<'src>, Error> {
         let begin = self.expect(Kind::Local)?.pos();
+        if self.peek() == Kind::Function {
+            return self.parse_local_function_stmt(begin);
+        }
         let mut left = Vec::new();
         left.push(self.parse_name_attr()?);
         while self.peek() == Kind::Comma {
@@ -486,17 +718,33 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         let mut right = Vec::new();
         let end = if self.peek() == Kind::Eq {
             self.take();
-            right.push(self.parse_expr()?);
-            while self.peek() == Kind::Comma {
-                self.take();
-                right.push(self.parse_expr()?);
-            }
+            right = self.parse_non_empty_expr_list()?;
             right.last().unwrap().pos()
         } else {
             left.last().unwrap().pos
         };
         let pos = begin.combine(end);
         Ok(Stmt::Local { left, right, pos })
+    }
+
+    fn parse_local_function_stmt(&mut self, begin: Pos) -> Result<Stmt<'src>, Error> {
+        let var = self.next_var();
+        let param_scope = self.next_scope();
+        let body_scope = self.next_scope();
+        self.expect(Kind::Function)?;
+        let name = self.expect(Kind::Ident)?;
+        let (parameters, is_variadic, body, end) = self.parse_function_parameters_and_body()?;
+        let pos = begin.combine(end);
+        Ok(Stmt::LocalFunction {
+            name,
+            parameters,
+            is_variadic,
+            body,
+            var,
+            param_scope,
+            body_scope,
+            pos,
+        })
     }
 
     fn parse_name_attr(&mut self) -> Result<NameAttr<'src>, Error> {
@@ -659,8 +907,81 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         })
     }
 
+    fn parse_function_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let param_scope = self.next_scope();
+        let body_scope = self.next_scope();
+        let begin = self.expect(Kind::Function)?.pos();
+        let name = self.parse_function_name()?;
+        let (parameters, is_variadic, body, end) = self.parse_function_parameters_and_body()?;
+        let pos = begin.combine(end);
+        Ok(Stmt::Function {
+            name,
+            parameters,
+            is_variadic,
+            body,
+            param_scope,
+            body_scope,
+            pos,
+        })
+    }
+
+    fn parse_function_name(&mut self) -> Result<FunctionName<'src>, Error> {
+        let mut names = Vec::new();
+        names.push(self.expect(Kind::Ident)?);
+        while self.peek() == Kind::Dot {
+            self.take();
+            names.push(self.expect(Kind::Ident)?);
+        }
+        let mut is_method = false;
+        if self.peek() == Kind::Colon {
+            is_method = true;
+            self.take();
+            names.push(self.expect(Kind::Ident)?);
+        }
+        Ok(FunctionName { names, is_method })
+    }
+
+    fn parse_return_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let begin = self.expect(Kind::Return)?.pos();
+        let exprs = self.parse_expr_list()?;
+        let end = if self.peek() == Kind::Semi {
+            self.take().pos()
+        } else if let Some(last) = exprs.last() {
+            last.pos()
+        } else {
+            begin
+        };
+        let pos = begin.combine(end);
+        Ok(Stmt::Return { exprs, pos })
+    }
+
     fn parse_expr(&mut self) -> Result<Expr<'src>, Error> {
         self.parse_precedence(PREC_OR)
+    }
+
+    fn parse_expr_list(&mut self) -> Result<Vec<Expr<'src>>, Error> {
+        let k = self.peek();
+        if k == Kind::RParen || k == Kind::Semi || k == Kind::End || k == Kind::EOF {
+            // In many contexts, the expression list may be empty, for example,
+            // a function call with no arguments. Ideally, we'd match tokens
+            // that can begin an expression, but there are a lot of them. None
+            // of the above tokens can begin an expression, and one of them
+            // should appear after an empty expression list, so we match them
+            // instead.
+            return Ok(Vec::new());
+        }
+
+        self.parse_non_empty_expr_list()
+    }
+
+    fn parse_non_empty_expr_list(&mut self) -> Result<Vec<Expr<'src>>, Error> {
+        let mut exprs = Vec::new();
+        exprs.push(self.parse_expr()?);
+        while self.peek() == Kind::Comma {
+            self.take();
+            exprs.push(self.parse_expr()?);
+        }
+        Ok(exprs)
     }
 
     fn parse_precedence(&mut self, prec: Precedence) -> Result<Expr<'src>, Error> {
@@ -694,6 +1015,48 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             e = rule.infix.unwrap()(self, e)?;
         }
         Ok(e)
+    }
+
+    fn parse_call_expr(&mut self, callee: Expr<'src>) -> Result<Expr<'src>, Error> {
+        let method_name = if self.peek() == Kind::Colon {
+            self.take();
+            Some(self.expect(Kind::Ident)?)
+        } else {
+            None
+        };
+        let mut arguments = Vec::new();
+        let end = match self.peek() {
+            Kind::String | Kind::LBrace => {
+                let arg = self.parse_expr()?;
+                let pos = arg.pos();
+                arguments.push(arg);
+                pos
+            }
+            Kind::LParen => {
+                self.take();
+                while self.peek() != Kind::RParen {
+                    arguments.push(self.parse_expr()?);
+                    if self.peek() == Kind::Comma {
+                        self.take();
+                    } else if self.peek() != Kind::RParen {
+                        return Err(self.expect_error("',' or ')'"));
+                    }
+                }
+                self.expect(Kind::RParen)?.pos()
+            }
+            _ => {
+                return Err(
+                    self.expect_error("function arguments starting with '(' or '{' or string")
+                )
+            }
+        };
+        let pos = callee.pos().combine(end);
+        Ok(Expr::Call(Call {
+            callee: Box::new(callee),
+            method_name,
+            arguments,
+            pos,
+        }))
     }
 
     fn parse_group_expr(&mut self) -> Result<Expr<'src>, Error> {
@@ -752,6 +1115,58 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         Ok(Expr::Var { name, var_use })
     }
 
+    fn parse_function_expr(&mut self) -> Result<Expr<'src>, Error> {
+        let param_scope = self.next_scope();
+        let body_scope = self.next_scope();
+        let begin = self.expect(Kind::Function)?.pos();
+        let (parameters, is_variadic, body, end) = self.parse_function_parameters_and_body()?;
+        let pos = begin.combine(end);
+        Ok(Expr::Function {
+            parameters,
+            is_variadic,
+            body,
+            param_scope,
+            body_scope,
+            pos,
+        })
+    }
+
+    fn parse_function_parameters_and_body(
+        &mut self,
+    ) -> Result<(Vec<Param<'src>>, bool, Vec<Stmt<'src>>, Pos), Error> {
+        let (parameters, is_variadic) = self.parse_parameters()?;
+        let body = self.parse_block_stmts(Kind::End);
+        let end = self.expect(Kind::End)?.pos();
+        Ok((parameters, is_variadic, body, end))
+    }
+
+    fn parse_parameters(&mut self) -> Result<(Vec<Param<'src>>, bool), Error> {
+        self.expect(Kind::LParen)?;
+        let mut parameters = Vec::new();
+        let mut is_variadic = false;
+        loop {
+            match self.peek() {
+                Kind::Ident => {
+                    let var = self.next_var();
+                    let name = self.expect(Kind::Ident)?;
+                    parameters.push(Param { name, var });
+                }
+                Kind::DotDotDot => {
+                    is_variadic = true;
+                    break;
+                }
+                _ => break,
+            }
+            if self.peek() == Kind::Comma {
+                self.take();
+            } else if self.peek() != Kind::RParen {
+                return Err(self.expect_error("',' or ')'"));
+            }
+        }
+        self.expect(Kind::RParen)?;
+        Ok((parameters, is_variadic))
+    }
+
     fn expr_to_lvalue(&self, e: Expr<'src>) -> Result<LValue<'src>, Error> {
         match e {
             Expr::Var { name, var_use, .. } => Ok(LValue::Var { name, var_use }),
@@ -765,11 +1180,16 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         match kind {
             Kind::Nil | Kind::True | Kind::False | Kind::Number | Kind::String => ParseRule {
                 prefix: Some(&Parser::parse_literal_expr),
-                infix: None,
-                precedence: PREC_NONE,
+                infix: Some(&Parser::parse_call_expr),
+                precedence: PREC_PRIMARY,
             },
             Kind::Ident => ParseRule {
                 prefix: Some(&Parser::parse_var_expr),
+                infix: None,
+                precedence: PREC_NONE,
+            },
+            Kind::Function => ParseRule {
+                prefix: Some(&Parser::parse_function_expr),
                 infix: None,
                 precedence: PREC_NONE,
             },
@@ -832,8 +1252,18 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             },
             Kind::LParen => ParseRule {
                 prefix: Some(&Parser::parse_group_expr),
-                infix: None,
-                precedence: PREC_NONE, // PREC_PRIMARY
+                infix: Some(&Parser::parse_call_expr),
+                precedence: PREC_PRIMARY,
+            },
+            Kind::Colon => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_call_expr),
+                precedence: PREC_PRIMARY,
+            },
+            Kind::LBrace => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_call_expr),
+                precedence: PREC_PRIMARY,
             },
             _ => ParseRule {
                 prefix: None,
@@ -950,7 +1380,7 @@ const PREC_ADD: Precedence = 9;
 const PREC_MUL: Precedence = 10;
 const PREC_UNARY: Precedence = 11;
 const PREC_EXP: Precedence = 12;
-const _PREC_PRIMARY: Precedence = 13;
+const PREC_PRIMARY: Precedence = 13;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Associativity {

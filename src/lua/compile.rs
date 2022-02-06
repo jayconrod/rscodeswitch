@@ -2,10 +2,10 @@ use crate::data::{self, List, SetValue, Slice};
 use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
 use crate::lua::scope::{self, ScopeSet, Var, VarKind, VarUse};
-use crate::lua::syntax::{self, Chunk, Expr, LValue, LabelID, ScopeID, Stmt};
+use crate::lua::syntax::{self, Call, Chunk, Expr, LValue, LabelID, Param, ScopeID, Stmt};
 use crate::lua::token::{self, Number, Token};
 use crate::nanbox;
-use crate::package::{Function, Global, Object, Package};
+use crate::package::{Function, Global, Object, Package, Type};
 use crate::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
 
 use std::fs;
@@ -74,10 +74,10 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     }
 
     fn finish(mut self) -> Option<Box<Package>> {
-        self.asm().constzero();
-        self.asm().mode(inst::MODE_PTR);
-        self.asm().nanbox();
-        self.asm().ret();
+        self.asm().mode(inst::MODE_LUA);
+        self.asm().setv(0);
+        self.asm().mode(inst::MODE_LUA);
+        self.asm().retv();
         match self.asm_stack.pop().unwrap().finish() {
             Ok((insts, line_map)) => {
                 self.functions.push(Function {
@@ -144,6 +144,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 for l in left {
                     self.compile_lvalue(l);
                 }
+                // TODO: use compile_expr_list to dynamically adjust the number
+                // of valueson the right, when needed.
                 for r in right {
                     self.compile_expr(r);
                 }
@@ -176,6 +178,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Stmt::Local { left, right, .. } => {
                 // Compile and assign each expression that has a corresponding
                 // variable.
+                // TODO: use compile_expr_list to dynamically adjust the number
+                // of valueson the right, when needed.
                 for (l, r) in left.iter().zip(right.iter()) {
                     let var = &self.scope_set.vars[l.var.0];
                     self.compile_define_prepare(var);
@@ -515,8 +519,70 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     self.asm_stack[last_asm_index].b(&mut self.named_labels[lid.0]);
                 }
             }
-            Stmt::Print { expr, .. } => {
-                self.compile_expr(expr);
+            Stmt::Function { .. } => {
+                // TODO: implement non-local functions
+                unimplemented!();
+            }
+            Stmt::LocalFunction {
+                name: name_tok,
+                parameters,
+                is_variadic,
+                body,
+                var: vid,
+                pos,
+                ..
+            } => {
+                let var = &self.scope_set.vars[vid.0];
+                self.compile_define_prepare(var);
+                let name = String::from(name_tok.text);
+                let fn_index = self.compile_function(name, parameters, *is_variadic, body, *pos);
+                self.compile_closure(fn_index);
+                self.compile_define(var);
+            }
+            Stmt::Call(call) => {
+                self.compile_call(call, ResultMode::Drop);
+            }
+            Stmt::Return { exprs, pos, .. } => {
+                // TODO: support tail calls.
+                // TODO: disable code generation after return.
+                // Compile the expressions to return. If the last expression is
+                // a call or '...', we don't statically know the number of
+                // values being returned, but compile_expr_list will set the
+                // vc register for us. If we do statically know, we need to
+                // use setv explicitly. In either case, vc is set to the number
+                // of returned values, so the caller knows what to do with them.
+                match self.compile_expr_list(exprs) {
+                    ExprListLen::Static => {
+                        let n = match exprs.len().try_into() {
+                            Ok(n) => n,
+                            Err(_) => {
+                                self.error(*pos, String::from("too many return values"));
+                                !0
+                            }
+                        };
+                        self.asm().mode(inst::MODE_LUA);
+                        self.asm().setv(n);
+                    }
+                    ExprListLen::Dynamic => (),
+                }
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().retv();
+            }
+            Stmt::Print { exprs, .. } => {
+                match self.compile_expr_list(exprs) {
+                    ExprListLen::Static => {
+                        self.asm().mode(inst::MODE_LUA);
+                        let n = match exprs.len().try_into() {
+                            Ok(n) => n,
+                            Err(_) => {
+                                self.error(stmt.pos(), String::from("too many arguments"));
+                                !0
+                            }
+                        };
+                        self.asm().setv(n);
+                    }
+                    ExprListLen::Dynamic => (),
+                };
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().sys(inst::SYS_PRINT);
             }
@@ -619,6 +685,68 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Expr::Group { expr, .. } => {
                 self.compile_expr(expr);
             }
+            Expr::Function {
+                parameters,
+                is_variadic,
+                body,
+                pos,
+                ..
+            } => {
+                let name = String::from("·anonymous");
+                let fn_index = self.compile_function(name, parameters, *is_variadic, body, *pos);
+                self.compile_closure(fn_index);
+            }
+            Expr::Call(call) => {
+                self.compile_call(call, ResultMode::Truncate);
+            }
+        }
+    }
+
+    /// Compiles a list of expressions, as in an assignment, local definition,
+    /// argument list, or return list.
+    ///
+    /// Every expression except the last pushes exactly one value. If an
+    /// expression dynamically produces 0 values, nil is pushed. If an
+    /// expression produces multiple values, all but the first are dropped.
+    /// Function calls and '...' are expressions like this.
+    ///
+    /// If the last expression produces a dynamic number of values, they're
+    /// all pushed and ExprListLen::Dynamic is returned. In this case, the
+    /// vc (value count) register will be set to the total number of values
+    /// pushed by all expressions. If the last expression statically produces
+    /// one value, or if there are no expressions, ExprListLen::Static is
+    /// returned. The caller may choose to run setv to set vc, if needed.
+    fn compile_expr_list(&mut self, exprs: &[Expr<'src>]) -> ExprListLen {
+        if exprs.len() >= 2 {
+            for expr in exprs.iter().take(exprs.len() - 1) {
+                self.compile_expr(expr);
+            }
+        }
+        let static_expr_count = match exprs.len().try_into() {
+            Ok(n) => n,
+            Err(_) => {
+                self.error(
+                    exprs.last().unwrap().pos(),
+                    String::from("too many expressions"),
+                );
+                !0
+            }
+        };
+        match exprs.last() {
+            Some(Expr::Call(call)) => {
+                self.compile_call(call, ResultMode::Append);
+                if static_expr_count > 1 {
+                    self.asm().mode(inst::MODE_LUA);
+                    self.asm().appendv(static_expr_count - 1);
+                }
+                ExprListLen::Dynamic
+            }
+            // TODO: expand '...'
+            Some(expr) => {
+                self.compile_expr(expr);
+                ExprListLen::Static
+            }
+            None => ExprListLen::Static,
         }
     }
 
@@ -626,6 +754,111 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         self.line(lval.pos());
         // TODO: evaluate expressions that produce tables into which we're
         // storing fields. For now, no expression does that.
+    }
+
+    fn compile_function(
+        &mut self,
+        name: String,
+        parameters: &[Param<'src>],
+        is_variadic: bool,
+        body: &[Stmt<'src>],
+        pos: Pos,
+    ) -> u32 {
+        // TODO: support variadic functions.
+        if is_variadic {
+            unimplemented!();
+        }
+
+        // Start compiling the function.
+        // TODO: move captured parameters into cells.
+        self.asm_stack.push(Assembler::new());
+        self.line(pos);
+
+        // Compile the function body.
+        for stmt in body {
+            self.compile_stmt(stmt);
+        }
+
+        // If the function didn't end with a return statement,
+        // return nothing.
+        self.asm().mode(inst::MODE_LUA);
+        self.asm().setv(0);
+        self.asm().mode(inst::MODE_LUA);
+        self.asm().retv();
+
+        // Finish building the function and add it to the package.
+        let (insts, line_map) = match self.asm_stack.pop().unwrap().finish() {
+            Ok(res) => res,
+            Err(err) => {
+                self.errors.push(Error::wrap(self.lmap.position(pos), &err));
+                return !0;
+            }
+        };
+        let param_types = vec![Type::Nanbox; parameters.len()];
+        let fn_index = match self.functions.len().try_into() {
+            Ok(i) => i,
+            Err(_) => {
+                self.error(pos, String::from("too many functions"));
+                return !0;
+            }
+        };
+        self.functions.push(Function {
+            name: String::from(name),
+            insts,
+            package: 0 as *mut Package,
+            param_types,
+            cell_types: Vec::new(),
+            line_map,
+        });
+        fn_index
+    }
+
+    fn compile_closure(&mut self, fn_index: u32) {
+        // TODO: load captured cells.
+        let capture_count = 0;
+        let bound_arg_count = 0;
+        self.asm()
+            .newclosure(fn_index, capture_count, bound_arg_count);
+        self.asm().mode(inst::MODE_CLOSURE);
+        self.asm().nanbox();
+    }
+
+    fn compile_call(&mut self, call: &Call<'src>, rmode: ResultMode) {
+        // TODO: support method
+        if call.method_name.is_some() {
+            unimplemented!();
+        }
+
+        let static_arg_count = match call.arguments.len().try_into() {
+            Ok(i) => i,
+            Err(_) => {
+                self.error(call.pos, String::from("too many arguments"));
+                !0
+            }
+        };
+        self.compile_expr(&call.callee);
+        match self.compile_expr_list(&call.arguments) {
+            ExprListLen::Static => {
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().callvalue(static_arg_count);
+            }
+            ExprListLen::Dynamic => {
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().callvaluev();
+            }
+        }
+
+        match rmode {
+            ResultMode::Drop => {
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().adjustv(0);
+            }
+            ResultMode::Truncate => {
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().adjustv(1);
+            }
+            ResultMode::Append => (),
+        }
     }
 
     fn compile_define_prepare(&mut self, _: &Var) {
@@ -775,4 +1008,28 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             message,
         })
     }
+}
+
+/// Indicates what to do with the results of an expression.
+enum ResultMode {
+    /// The results should be popped from the stack and ignored.
+    /// Used by call statements.
+    Drop,
+
+    /// All results but the first should be popped. If the expression
+    /// dynamically produces no results, nil is pushed. Used for call
+    /// expressions and '...' that are not at the end of an expression list.
+    Truncate,
+
+    /// All results should be kept on the stack and vc should be set to the
+    /// total number of values in the expression list. Used for call expressions
+    /// and '...' at the end of an expression list.
+    Append,
+}
+
+/// Indicates whether an expression list produces a statically-known number
+/// of values.
+enum ExprListLen {
+    Static,
+    Dynamic,
 }

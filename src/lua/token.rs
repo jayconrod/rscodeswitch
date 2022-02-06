@@ -312,6 +312,7 @@ impl<'src, 'lm> Lexer<'src, 'lm> {
                     "not" => Kind::Not,
                     "or" => Kind::Or,
                     "repeat" => Kind::Repeat,
+                    "return" => Kind::Return,
                     "then" => Kind::Then,
                     "true" => Kind::True,
                     "until" => Kind::Until,

@@ -1,5 +1,5 @@
 use crate::lua::syntax::{
-    Chunk, Expr, LValue, LabelID, LabelUseID, ScopeID, Stmt, VarID, VarUseID,
+    Call, Chunk, Expr, LValue, LabelID, LabelUseID, Param, ScopeID, Stmt, VarID, VarUseID,
 };
 use crate::lua::token::Token;
 use crate::pos::{Error, LineMap, Pos};
@@ -492,8 +492,44 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             } => {
                 self.resolve_label(*name, *label_use, *pos);
             }
-            Stmt::Print { expr, .. } => {
-                self.resolve_expr(expr);
+            Stmt::Function { .. } => {
+                // TODO: implement non-local functions
+                unimplemented!();
+            }
+            Stmt::LocalFunction {
+                name,
+                parameters,
+                body,
+                var,
+                param_scope,
+                body_scope,
+                ..
+            } => {
+                self.declare(*var, name.text, VarKind::Local, Attr::None, name.pos());
+                self.resolve_function_parameters_and_body(
+                    *param_scope,
+                    parameters,
+                    *body_scope,
+                    body,
+                );
+            }
+            Stmt::Call(Call {
+                callee, arguments, ..
+            }) => {
+                self.resolve_expr(callee);
+                for a in arguments {
+                    self.resolve_expr(a);
+                }
+            }
+            Stmt::Return { exprs, .. } => {
+                for expr in exprs {
+                    self.resolve_expr(expr);
+                }
+            }
+            Stmt::Print { exprs, .. } => {
+                for expr in exprs {
+                    self.resolve_expr(expr);
+                }
             }
         }
     }
@@ -513,6 +549,28 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             }
             Expr::Group { expr, .. } => {
                 self.resolve_expr(expr);
+            }
+            Expr::Function {
+                parameters,
+                body,
+                param_scope,
+                body_scope,
+                ..
+            } => {
+                self.resolve_function_parameters_and_body(
+                    *param_scope,
+                    parameters,
+                    *body_scope,
+                    body,
+                );
+            }
+            Expr::Call(Call {
+                callee, arguments, ..
+            }) => {
+                self.resolve_expr(callee);
+                for a in arguments {
+                    self.resolve_expr(a);
+                }
             }
         }
     }
@@ -537,6 +595,32 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 }
             }
         }
+    }
+
+    fn resolve_function_parameters_and_body(
+        &mut self,
+        param_scope: ScopeID,
+        parameters: &[Param<'src>],
+        body_scope: ScopeID,
+        body: &[Stmt<'src>],
+    ) {
+        self.enter(param_scope, ScopeKind::Function);
+        for p in parameters {
+            self.declare(
+                p.var,
+                p.name.text,
+                VarKind::Parameter,
+                Attr::None,
+                p.name.pos(),
+            );
+        }
+        self.enter(body_scope, ScopeKind::Local);
+        self.declare_labels(body);
+        for stmt in body {
+            self.resolve_stmt(stmt);
+        }
+        self.leave();
+        self.leave();
     }
 
     fn declare(&mut self, vid: VarID, name: &'src str, kind: VarKind, attr: Attr, pos: Pos) {

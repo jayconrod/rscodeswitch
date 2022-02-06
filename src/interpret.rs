@@ -36,6 +36,10 @@ impl<'w> Interpreter<'w> {
     pub unsafe fn interpret_unsafe(&mut self, mut func: &Function) -> Result<(), Error> {
         assert!(func.param_types.is_empty());
 
+        // vc is value count. In Lua, this is the number of dynamic values in
+        // an expression list.
+        let mut vc = 0;
+
         // pp points to the current function's package.
         let mut pp = func.package.as_ref().unwrap();
         if self.global_slots.is_empty() {
@@ -465,6 +469,61 @@ impl<'w> Interpreter<'w> {
             }};
         }
 
+        macro_rules! lua_call_closure {
+            ($callee:expr, $arg_count:expr) => {{
+                // TODO: support variadic functions
+                // TODO: support metatable calls
+                let callee = $callee;
+                let arg_count = ($arg_count) as usize;
+                let callee_func = callee.function.unwrap_ref();
+
+                // If the callee has bound arguments, insert them on the stack
+                // before the regular arguments.
+                if callee.bound_arg_count > 0 {
+                    let bound_arg_begin = sp + arg_count * 8 - 8;
+                    let delta = callee.bound_arg_count as usize * 8;
+                    let mut from = sp;
+                    sp -= delta;
+                    let mut to = sp;
+                    while from <= bound_arg_begin {
+                        *(to as *mut u64) = *(from as *mut u64);
+                        to += 8;
+                        from += 8;
+                    }
+                    for i in 0..callee.bound_arg_count {
+                        let to = (bound_arg_begin - i as usize * 8) as *mut u64;
+                        *to = callee.bound_arg(i);
+                    }
+                }
+
+                // Adjust the number of arguments to match the number of
+                // parameters by popping arguments or pushing nil.
+                let total_arg_count = arg_count + callee.bound_arg_count as usize;
+                let param_count = callee_func.param_types.len();
+                if total_arg_count > param_count {
+                    sp += (total_arg_count - param_count) * 8;
+                } else if total_arg_count < param_count {
+                    for _ in 0..(param_count - total_arg_count) {
+                        push!(nanbox::from_nil());
+                    }
+                }
+
+                // Construct a stack frame for the callee, and set the
+                // "registers" so the function's instructions, cells,
+                // and package will be used.
+                sp -= FRAME_SIZE;
+                *((sp as usize + 24) as *mut u64) = func as *const Function as u64;
+                func = callee_func;
+                *((sp as usize + 16) as *mut u64) = cp as u64;
+                cp = callee;
+                *((sp as usize + 8) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
+                ip = &func.insts[0] as *const u8;
+                *(sp as *mut u64) = fp as u64;
+                fp = sp;
+                pp = callee_func.package.as_ref().unwrap();
+            }};
+        }
+
         // Main loop
         loop {
             let mut op = *ip;
@@ -548,6 +607,18 @@ impl<'w> Interpreter<'w> {
                     push!(v);
                     inst::size(inst::ADD)
                 }
+                (inst::ADJUSTV, inst::MODE_LUA) => {
+                    let value_count = read_imm!(u16, 1) as usize;
+                    if vc < value_count {
+                        for _ in 0..(value_count - vc) {
+                            push!(nanbox::from_nil());
+                        }
+                    } else {
+                        sp += (vc - value_count) as usize * 8;
+                    }
+                    vc = value_count;
+                    inst::size(inst::ADJUSTV)
+                }
                 (inst::ALLOC, inst::MODE_I64) => {
                     let size = read_imm!(u32, 1) as usize;
                     push!(HEAP.allocate(size) as u64);
@@ -556,6 +627,11 @@ impl<'w> Interpreter<'w> {
                 (inst::AND, inst::MODE_LUA) => {
                     lua_binop_bit!(&);
                     inst::size(inst::AND)
+                }
+                (inst::APPENDV, inst::MODE_LUA) => {
+                    let value_count = read_imm!(u16, 1) as usize;
+                    vc += value_count;
+                    inst::size(inst::APPENDV)
                 }
                 (inst::B, inst::MODE_I64) => {
                     let delta = read_imm!(i32, 1) as usize;
@@ -669,7 +745,21 @@ impl<'w> Interpreter<'w> {
                     // is a field instead of a method. See comment there.
                     // TODO: this is a terrible, inefficient solution.
                     shift_args!(arg_count, 1);
-                    call_closure!(callee, arg_count);
+                    lua_call_closure!(callee, arg_count);
+                    continue;
+                }
+                (inst::CALLVALUEV, inst::MODE_LUA) => {
+                    let callee_addr = sp + vc * 8;
+                    let raw_callee = *(callee_addr as *const u64);
+                    let callee = match nanbox::to_closure(raw_callee) {
+                        Some(c) => c.as_ref().unwrap(),
+                        _ => return_errorf!(
+                            "called value is not a function: {}",
+                            nanbox::debug_type(raw_callee)
+                        ),
+                    };
+                    shift_args!(vc, 1);
+                    lua_call_closure!(callee, vc);
                     continue;
                 }
                 (inst::CAPTURE, inst::MODE_I64) => {
@@ -1399,6 +1489,27 @@ impl<'w> Interpreter<'w> {
                     *(sp as *mut u64) = v;
                     continue;
                 }
+                (inst::RETV, inst::MODE_LUA) => {
+                    // TODO: support variadic functions.
+                    let mut retp = sp + vc * 8;
+                    sp = fp + FRAME_SIZE + func.param_types.len() * 8;
+                    func = match (*((fp + 24) as *const *const Function)).as_ref() {
+                        Some(f) => f,
+                        None => {
+                            return Ok(());
+                        }
+                    };
+                    pp = func.package.as_ref().unwrap();
+                    cp = *((fp + 16) as *const *const Closure);
+                    ip = *((fp + 8) as *const *const u8);
+                    fp = *(fp as *const usize);
+                    for _ in 0..vc {
+                        sp -= 8;
+                        retp -= 8;
+                        *(sp as *mut u64) = *(retp as *const u64);
+                    }
+                    continue;
+                }
                 (inst::SHL, inst::MODE_LUA) => {
                     let r = pop!();
                     let l = pop!();
@@ -1432,6 +1543,10 @@ impl<'w> Interpreter<'w> {
                     };
                     push!(maybe_box_int!(vi as i64));
                     inst::size(inst::SHR)
+                }
+                (inst::SETV, inst::MODE_LUA) => {
+                    vc = read_imm!(u16, 1) as usize;
+                    inst::size(inst::SETV)
                 }
                 (inst::STORE, inst::MODE_I64) => {
                     let v = pop!() as i64;
@@ -1613,13 +1728,18 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::SYS, inst::MODE_LUA) => {
                     let sys = read_imm!(u8, 1);
+                    let mut args = vec![0; vc];
+                    for i in 0..vc {
+                        let argp = sp + (vc - i - 1) * 8;
+                        args[i] = *(argp as *const u64);
+                    }
                     match sys {
                         inst::SYS_PRINT => {
-                            let v = pop!();
-                            self.sys_print(v)?;
+                            self.sys_print(&args)?;
                         }
                         _ => panic!("unknown sys {}", sys),
                     }
+                    sp += vc * 8;
                     inst::size(inst::SYS)
                 }
                 (inst::TOFLOAT, inst::MODE_LUA) => {
@@ -1658,8 +1778,13 @@ impl<'w> Interpreter<'w> {
         }
     }
 
-    fn sys_print(&mut self, v: u64) -> Result<(), Error> {
-        let _ = write!(self.w, "{}\n", nanbox::debug_str(v));
+    fn sys_print(&mut self, vs: &[u64]) -> Result<(), Error> {
+        let mut sep = "";
+        for v in vs {
+            let _ = write!(self.w, "{}{}", sep, nanbox::debug_str(*v));
+            sep = " ";
+        }
+        let _ = write!(self.w, "\n");
         Ok(())
     }
 

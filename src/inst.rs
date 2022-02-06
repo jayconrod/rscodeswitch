@@ -4,15 +4,18 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 66.
+// Next opcode: 71.
 pub const ADD: u8 = 20;
+pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
 pub const AND: u8 = 60;
+pub const APPENDV: u8 = 70;
 pub const B: u8 = 27;
 pub const BIF: u8 = 28;
 pub const CALLNAMEDPROP: u8 = 45;
 pub const CALLNAMEDPROPWITHPROTOTYPE: u8 = 47;
 pub const CALLVALUE: u8 = 32;
+pub const CALLVALUEV: u8 = 69;
 pub const CAPTURE: u8 = 38;
 pub const CONST: u8 = 51;
 pub const CONSTZERO: u8 = 52;
@@ -51,7 +54,9 @@ pub const PANIC: u8 = 65;
 pub const POP: u8 = 3;
 pub const PROTOTYPE: u8 = 48;
 pub const RET: u8 = 4;
+pub const RETV: u8 = 67;
 pub const TOFLOAT: u8 = 64;
+pub const SETV: u8 = 66;
 pub const SHL: u8 = 58;
 pub const SHR: u8 = 59;
 pub const STORE: u8 = 37;
@@ -105,12 +110,13 @@ pub fn size_at(insts: &[u8]) -> usize {
 
 pub const fn size(op: u8) -> usize {
     match op {
-        ADD | AND | CONSTZERO | DIV | DUP | EQ | EXP | FLOORDIV | GE | GT | LT | LE | LOAD
-        | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | PANIC | POP
-        | PROTOTYPE | RET | SHL | SHR | STORE | STOREPROTOTYPE | STRCAT | SUB | SWAP | TOFLOAT
-        | TYPEOF | XOR => 1,
+        ADD | AND | CALLVALUEV | CONSTZERO | DIV | DUP | EQ | EXP | FLOORDIV | GE | GT | LT
+        | LE | LOAD | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR
+        | PANIC | POP | PROTOTYPE | RET | RETV | SHL | SHR | STORE | STOREPROTOTYPE | STRCAT
+        | SUB | SWAP | TOFLOAT | TYPEOF | XOR => 1,
         SWAPN | SYS => 2,
-        CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => 3,
+        ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETV | STOREARG
+        | STORELOCAL => 3,
         ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | LOADNAMEDPROPORNIL
         | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP | STRING => 5,
         CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE => 7,
@@ -122,13 +128,16 @@ pub const fn size(op: u8) -> usize {
 pub fn mnemonic(op: u8) -> &'static str {
     match op {
         ADD => "add",
+        ADJUSTV => "adjustv",
         ALLOC => "alloc",
         AND => "and",
+        APPENDV => "appendv",
         B => "b",
         BIF => "bif",
         CALLNAMEDPROP => "callnamedprop",
         CALLNAMEDPROPWITHPROTOTYPE => "callnamedpropwithprototype",
         CALLVALUE => "callvalue",
+        CALLVALUEV => "callvaluev",
         CAPTURE => "capture",
         CONST => "const",
         CONSTZERO => "constzero",
@@ -163,6 +172,8 @@ pub fn mnemonic(op: u8) -> &'static str {
         POP => "pop",
         PROTOTYPE => "prototype",
         RET => "ret",
+        RETV => "retv",
+        SETV => "setv",
         SHL => "shl",
         SHR => "shr",
         STORE => "store",
@@ -255,6 +266,11 @@ impl Assembler {
         self.write_u8(ADD);
     }
 
+    pub fn adjustv(&mut self, value_count: u16) {
+        self.write_u8(ADJUSTV);
+        self.write_u16(value_count);
+    }
+
     pub fn alloc(&mut self, size: u32) {
         self.write_u8(ALLOC);
         self.write_u32(size);
@@ -262,6 +278,11 @@ impl Assembler {
 
     pub fn and(&mut self) {
         self.write_u8(AND);
+    }
+
+    pub fn appendv(&mut self, value_count: u16) {
+        self.write_u8(APPENDV);
+        self.write_u16(value_count);
     }
 
     pub fn b(&mut self, label: &mut Label) {
@@ -289,6 +310,10 @@ impl Assembler {
     pub fn callvalue(&mut self, arg_count: u16) {
         self.write_u8(CALLVALUE);
         self.write_u16(arg_count);
+    }
+
+    pub fn callvaluev(&mut self) {
+        self.write_u8(CALLVALUEV);
     }
 
     pub fn capture(&mut self, i: u16) {
@@ -436,6 +461,15 @@ impl Assembler {
 
     pub fn ret(&mut self) {
         self.write_u8(RET);
+    }
+
+    pub fn retv(&mut self) {
+        self.write_u8(RETV);
+    }
+
+    pub fn setv(&mut self, value_count: u16) {
+        self.write_u8(SETV);
+        self.write_u16(value_count);
     }
 
     pub fn shl(&mut self) {
@@ -638,10 +672,10 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         };
         write!(f, "  {}{}", mnemonic(insts[p]), mode)?;
         match insts[p] {
-            ADD | AND | CONSTZERO | DIV | DUP | EXP | EQ | FLOORDIV | GE | GT | LT | LE | LOAD
-            | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | PANIC
-            | POP | PROTOTYPE | RET | SHL | SHR | STORE | STOREPROTOTYPE | STRCAT | SUB | SWAP
-            | TOFLOAT | TYPEOF | XOR => {
+            ADD | AND | CALLVALUEV | CONSTZERO | DIV | DUP | EXP | EQ | FLOORDIV | GE | GT | LT
+            | LE | LOAD | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR
+            | PANIC | POP | PROTOTYPE | RET | RETV | SHL | SHR | STORE | STOREPROTOTYPE
+            | STRCAT | SUB | SWAP | TOFLOAT | TYPEOF | XOR => {
                 f.write_str("\n")?;
             }
             B | BIF => {
@@ -667,7 +701,8 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let arg_count = u16::from_le_bytes(insts[p + 5..p + 7].try_into().unwrap());
                 write!(f, " {} {}\n", name_index, arg_count)?;
             }
-            CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | STOREARG | STORELOCAL => {
+            ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETV | STOREARG
+            | STORELOCAL => {
                 if p + 3 > insts.len() {
                     return Err(fmt::Error);
                 }
