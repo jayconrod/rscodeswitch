@@ -144,28 +144,11 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 for l in left {
                     self.compile_lvalue(l);
                 }
-                // TODO: use compile_expr_list to dynamically adjust the number
-                // of valueson the right, when needed.
-                for r in right {
-                    self.compile_expr(r);
-                }
 
-                // If there are extra expressions on the right, drop them.
-                // If there aren't enough, add nils.
-                // TODO: if the last expression in an assignment is a function
-                // call, append all the returned values to the list of values
-                // being assigned before this adjustment.
-                if left.len() < right.len() {
-                    for _ in 0..right.len() - left.len() {
-                        self.asm().pop();
-                    }
-                } else {
-                    for _ in 0..left.len() - right.len() {
-                        self.asm().constzero();
-                        self.asm().mode(inst::MODE_PTR);
-                        self.asm().nanbox();
-                    }
-                }
+                // Compile the expressions on the right, then adjust the number
+                // of values to match the number of expressions on the left.
+                let len_known = self.compile_expr_list(right);
+                self.compile_adjust(right.len(), len_known, left.len(), stmt.pos());
 
                 // Perform the actual assignment, right to left.
                 // Again, the reference doesn't say what should happen here if
@@ -175,33 +158,27 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     self.compile_assign(l);
                 }
             }
-            Stmt::Local { left, right, .. } => {
-                // Compile and assign each expression that has a corresponding
-                // variable.
-                // TODO: use compile_expr_list to dynamically adjust the number
-                // of valueson the right, when needed.
-                for (l, r) in left.iter().zip(right.iter()) {
-                    let var = &self.scope_set.vars[l.var.0];
-                    self.compile_define_prepare(var);
-                    self.compile_expr(r);
-                    self.compile_define(var);
-                }
+            Stmt::Local {
+                left, right, pos, ..
+            } => {
+                let len_known = self.compile_expr_list(right);
+                self.compile_adjust(right.len(), len_known, left.len(), *pos);
 
-                // If there are extra variables, assign nil.
-                // If there are extra expressions, compile and pop them.
-                if left.len() > right.len() {
-                    for l in left.iter().skip(right.len()) {
-                        let var = &self.scope_set.vars[l.var.0];
-                        self.compile_define_prepare(var);
-                        self.asm().constzero();
-                        self.asm().mode(inst::MODE_PTR);
-                        self.asm().nanbox();
-                        self.compile_define(var);
-                    }
-                } else if left.len() < right.len() {
-                    for r in right.iter().skip(left.len()) {
-                        self.compile_expr(r);
-                        self.asm().pop();
+                for l in left {
+                    let var = &self.scope_set.vars[l.var.0];
+                    match var.kind {
+                        VarKind::Global | VarKind::Parameter => unreachable!(),
+                        VarKind::Local => {
+                            // We've arranged for the adjusted list of values to
+                            // be evaluated into place, so there's no need for
+                            // a storelocal instruction.
+                        }
+                        VarKind::Capture => {
+                            // TODO: the value is in the slot where the cell
+                            // should go. Allocate a cell, store the value,
+                            // and put the cell in that slot.
+                            unimplemented!();
+                        }
                     }
                 }
             }
@@ -747,6 +724,46 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 ExprListLen::Static
             }
             None => ExprListLen::Static,
+        }
+    }
+
+    /// Adjusts a compiled list of values (produced by compile_expr_list) to
+    /// the given length by popping extra values or pushing nil.
+    ///
+    /// If the number of values is known statically, compile_adjust emits
+    /// the correct number of pop or constzero/nanbox/dup instructions.
+    ///
+    /// If the number of values is not known statically, for example, because
+    /// the last expression is a function call, compile_adjust emits adjustv,
+    /// which pushes or pops based on the vc register, which compile_expr_list
+    /// should have set.
+    fn compile_adjust(&mut self, expr_count: usize, len_known: ExprListLen, want: usize, pos: Pos) {
+        match len_known {
+            ExprListLen::Static => {
+                if want > expr_count {
+                    self.asm().constzero();
+                    self.asm().mode(inst::MODE_PTR);
+                    self.asm().nanbox();
+                    for _ in 0..(want - expr_count - 1) {
+                        self.asm().dup();
+                    }
+                } else {
+                    for _ in 0..(expr_count - want) {
+                        self.asm().pop();
+                    }
+                }
+            }
+            ExprListLen::Dynamic => {
+                let want_narrow = match want.try_into() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        self.error(pos, String::from("too many expressions"));
+                        !0
+                    }
+                };
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().adjustv(want_narrow);
+            }
         }
     }
 
