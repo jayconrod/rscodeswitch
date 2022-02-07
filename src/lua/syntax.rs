@@ -554,7 +554,7 @@ pub struct Param<'src> {
 #[derive(Clone, Copy)]
 pub struct ScopeID(pub usize);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct VarID(pub usize);
 
 #[derive(Clone, Copy)]

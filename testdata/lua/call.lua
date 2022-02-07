@@ -12,6 +12,7 @@ print0(1) -- Output: 0
 print1() -- Output: nil
 print1(1) -- Output: 1
 print1(1, 2) -- Output: 1
+print1 "a" -- Output: a
 print2() -- Output: nil nil
 print2(1) -- Output: 1 nil
 print2(1, 2) -- Output: 1 2

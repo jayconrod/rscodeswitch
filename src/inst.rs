@@ -192,14 +192,35 @@ pub fn mnemonic(op: u8) -> &'static str {
         TOFLOAT => "tofloat",
         TYPEOF => "typeof",
         XOR => "xor",
-        _ => panic!("unknown opcode"),
+        _ => "unknown",
+    }
+}
+
+pub fn mode_mnemonic(mode: u8) -> &'static str {
+    match mode {
+        MODE_I32 => ".i32",
+        MODE_I16 => ".i16",
+        MODE_I8 => ".i8",
+        MODE_U64 => ".u64",
+        MODE_U32 => ".u32",
+        MODE_U16 => ".u16",
+        MODE_U8 => ".u8",
+        MODE_F64 => ".f64",
+        MODE_F32 => ".f32",
+        MODE_BOOL => ".bool",
+        MODE_PTR => ".ptr",
+        MODE_STRING => ".string",
+        MODE_CLOSURE => ".closure",
+        MODE_OBJECT => ".object",
+        MODE_LUA => ".lua",
+        _ => ".unknown",
     }
 }
 
 pub fn sys_mnemonic(sys: u8) -> &'static str {
     match sys {
         SYS_PRINT => "print",
-        _ => panic!("unknown sys"),
+        _ => "unknown",
     }
 }
 

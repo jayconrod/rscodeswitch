@@ -42,7 +42,8 @@ impl<'src> ScopeSet<'src> {
         if self.scopes.len() <= id.0 {
             self.scopes.resize_with(id.0 + 1, || Scope {
                 kind: ScopeKind::Function,
-                vars: HashMap::new(),
+                vars: Vec::new(),
+                bindings: HashMap::new(),
                 labels: HashMap::new(),
                 break_label: None,
                 captures: Vec::new(),
@@ -103,8 +104,12 @@ pub struct Scope<'src> {
     /// storage and capturing.
     pub kind: ScopeKind,
 
+    /// All variables defined in the scope, including hidden variables
+    /// without bindings.
+    pub vars: Vec<VarID>,
+
     /// Maps variable names to variable definitions.
-    pub vars: HashMap<&'src str, VarID>,
+    pub bindings: HashMap<&'src str, VarID>,
 
     /// Maps label names to labels.
     pub labels: HashMap<&'src str, LabelID>,
@@ -621,6 +626,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
         }
         self.leave();
         self.leave();
+        self.shift_captured_parameters_in_function(parameters, body, body_scope);
     }
 
     fn declare(&mut self, vid: VarID, name: &'src str, kind: VarKind, attr: Attr, pos: Pos) {
@@ -646,8 +652,9 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
         }
 
         if name != "" {
-            scope.vars.insert(name, vid);
+            scope.bindings.insert(name, vid);
         }
+        scope.vars.push(vid);
         let var = Var {
             kind,
             attr,
@@ -673,13 +680,13 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
         let mut stack_def_index = self.scope_stack.len() - 1;
         loop {
             let sid = self.scope_stack[stack_def_index];
-            if let Some(&vid) = self.scope_set.scopes[sid.0].vars.get(name.text) {
+            if let Some(&vid) = self.scope_set.scopes[sid.0].bindings.get(name.text) {
                 *self.scope_set.ensure_var_use(vuid) = VarUse {
                     var: Some(vid),
                     cell: None,
                 };
                 if may_need_capture {
-                    unimplemented!();
+                    self.capture(vid, vuid, stack_def_index);
                 }
                 return;
             }
@@ -695,6 +702,154 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             var: None,
             cell: None,
         };
+    }
+
+    fn capture(&mut self, vid: VarID, vuid: VarUseID, stack_def_index: usize) {
+        // Mark the variable as captured, if it wasn't captured already.
+        // This will cause the compiler to allocate a cell for it when
+        // it's defined.
+        let var = &mut self.scope_set.vars[vid.0];
+        match var.kind {
+            VarKind::Global => unreachable!(),
+            VarKind::Parameter => {
+                // When a parameter is captured, we allocate a new local slot
+                // and copy the value into it. We don't want to change the
+                // actual type of the parameter slot. We're effectively
+                // defining a local variable that shadows the parameter.
+                // The local slot needs to be before other local variables,
+                // since we won't write it with storelocal. So we'll shift
+                // other locals to higher stack slots. This is done in
+                // shift_captured_params_in_function, which also assigns the
+                // captured parameter's cell slot.
+                var.kind = VarKind::Capture;
+            }
+            VarKind::Local => {
+                // When a local variable is captured, the compiler uses the
+                // same stack slot to hold the cell instead of the variable's
+                // value. So we set cell_slot to slot.
+                var.kind = VarKind::Capture;
+                var.cell_slot = var.slot;
+            }
+            VarKind::Capture => (),
+        }
+
+        // Ensure the captured variable is available in each enclosing function.
+        // This ensures closures can be created with cells needed to create
+        // nested, capturing closures.
+        let mut capture_from = CaptureFrom::Local;
+        for stack_capture_index in (stack_def_index + 1)..self.scope_stack.len() {
+            let sid = self.scope_stack[stack_capture_index];
+            let scope = &mut self.scope_set.scopes[sid.0];
+            if scope.kind != ScopeKind::Function {
+                continue;
+            }
+            match scope.captures.iter().position(|c| c.var == vid) {
+                Some(slot) => capture_from = CaptureFrom::Closure(slot),
+                None => {
+                    let slot = scope.captures.len();
+                    scope.captures.push(Capture {
+                        var: vid,
+                        from: capture_from,
+                    });
+                    capture_from = CaptureFrom::Closure(slot);
+                }
+            }
+        }
+
+        // Make the reference use the closure's cell.
+        let cell = match capture_from {
+            CaptureFrom::Local => None,
+            CaptureFrom::Closure(cell) => Some(cell),
+        };
+        self.scope_set.var_uses[vuid.0].cell = cell;
+    }
+
+    /// Shifts all variables defined within a function body to higher slots,
+    /// making room for slots to contain captured parameters.
+    fn shift_captured_parameters_in_function(
+        &mut self,
+        params: &[Param<'src>],
+        body: &[Stmt<'src>],
+        body_scope: ScopeID,
+    ) {
+        let param_capture_count = params
+            .iter()
+            .filter(|p| self.scope_set.vars[p.var.0].kind == VarKind::Capture)
+            .count();
+        self.shift_vars_in_scope(body_scope, param_capture_count);
+        for stmt in body {
+            self.shift_vars_in_stmt(stmt, param_capture_count);
+        }
+        let mut cell_slot = 0;
+        for p in params {
+            let var = &mut self.scope_set.vars[p.var.0];
+            if var.kind == VarKind::Capture {
+                var.cell_slot = cell_slot;
+                cell_slot += 1;
+            }
+        }
+    }
+
+    fn shift_vars_in_scope(&mut self, sid: ScopeID, shift: usize) {
+        for vid in &self.scope_set.scopes[sid.0].vars {
+            let var = &mut self.scope_set.vars[vid.0];
+            var.slot += shift;
+            if var.kind == VarKind::Capture {
+                var.cell_slot += shift;
+            }
+        }
+    }
+
+    fn shift_vars_in_stmt(&mut self, stmt: &Stmt<'src>, shift: usize) {
+        match stmt {
+            Stmt::Empty(_)
+            | Stmt::Assign { .. }
+            | Stmt::Local { .. }
+            | Stmt::Break { .. }
+            | Stmt::Label { .. }
+            | Stmt::Goto { .. }
+            | Stmt::Function { .. }
+            | Stmt::LocalFunction { .. }
+            | Stmt::Call(_)
+            | Stmt::Return { .. }
+            | Stmt::Print { .. } => (),
+            Stmt::Do { scope, stmts, .. } => {
+                self.shift_vars_in_scope(*scope, shift);
+                for stmt in stmts {
+                    self.shift_vars_in_stmt(stmt, shift);
+                }
+            }
+            Stmt::If {
+                cond_stmts,
+                false_stmt,
+                ..
+            } => {
+                for (_, stmt) in cond_stmts {
+                    self.shift_vars_in_stmt(stmt, shift);
+                }
+                if let Some(false_stmt) = false_stmt {
+                    self.shift_vars_in_stmt(false_stmt, shift);
+                }
+            }
+            Stmt::While { body, scope, .. } | Stmt::Repeat { body, scope, .. } => {
+                self.shift_vars_in_scope(*scope, shift);
+                for stmt in body {
+                    self.shift_vars_in_stmt(stmt, shift);
+                }
+            }
+            Stmt::For {
+                body,
+                ind_scope,
+                body_scope,
+                ..
+            } => {
+                self.shift_vars_in_scope(*ind_scope, shift);
+                self.shift_vars_in_scope(*body_scope, shift);
+                for stmt in body {
+                    self.shift_vars_in_stmt(stmt, shift);
+                }
+            }
+        }
     }
 
     fn resolve_label(&mut self, name: Token<'src>, luid: LabelUseID, pos: Pos) {

@@ -1766,12 +1766,26 @@ impl<'w> Interpreter<'w> {
                 (_, inst::MODE_I64) => {
                     panic!(
                         "{}",
-                        Interpreter::error(func, ip, format!("unknown opcode {}", op))
+                        Interpreter::error(
+                            func,
+                            ip,
+                            format!("unknown opcode {} code {}", inst::mnemonic(op), op)
+                        )
                     )
                 }
                 _ => panic!(
                     "{}",
-                    Interpreter::error(func, ip, format!("unknown opcode {} mode {}", op, mode))
+                    Interpreter::error(
+                        func,
+                        ip,
+                        format!(
+                            "unknown opcode {}{} code {} {}",
+                            inst::mnemonic(op),
+                            inst::mode_mnemonic(mode),
+                            mode,
+                            op
+                        )
+                    )
                 ),
             };
             ip = (ip as usize + inst_size) as *const u8;

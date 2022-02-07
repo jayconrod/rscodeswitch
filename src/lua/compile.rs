@@ -1,7 +1,7 @@
 use crate::data::{self, List, SetValue, Slice};
 use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
-use crate::lua::scope::{self, ScopeSet, Var, VarKind, VarUse};
+use crate::lua::scope::{self, CaptureFrom, ScopeSet, Var, VarKind, VarUse};
 use crate::lua::syntax::{self, Call, Chunk, Expr, LValue, LabelID, Param, ScopeID, Stmt};
 use crate::lua::token::{self, Number, Token};
 use crate::nanbox;
@@ -174,10 +174,16 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                             // a storelocal instruction.
                         }
                         VarKind::Capture => {
-                            // TODO: the value is in the slot where the cell
-                            // should go. Allocate a cell, store the value,
-                            // and put the cell in that slot.
-                            unimplemented!();
+                            // The value is in the slot where the cell should
+                            // go. Allocate a cell, store the value, and put
+                            // the cell in that slot.
+                            assert_eq!(var.slot, var.cell_slot);
+                            self.asm().alloc(mem::size_of::<usize>() as u32);
+                            self.asm().dup();
+                            self.asm().loadlocal(var.slot as u16);
+                            self.asm().mode(inst::MODE_LUA);
+                            self.asm().store();
+                            self.asm().storelocal(var.slot as u16);
                         }
                     }
                 }
@@ -316,7 +322,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let mut check_limit_label = Label::new();
                 let mut limit_ok_label = Label::new();
                 self.line(init.pos());
-                self.compile_load_var(ind_var);
+                self.compile_load_var(ind_var, None);
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().typeof_();
                 self.asm().dup();
@@ -332,7 +338,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 if let Some(step) = step {
                     self.line(step.pos());
                     self.asm().pop(); // type of ind
-                    self.compile_load_var(step_var);
+                    self.compile_load_var(step_var, None);
                     self.asm().mode(inst::MODE_LUA);
                     self.asm().typeof_();
                     self.asm().dup();
@@ -354,24 +360,24 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm().bind(&mut convert_float_label);
                 self.asm().pop(); // type of step or ind
                 self.compile_store_var_prepare(ind_var);
-                self.compile_load_var(ind_var);
+                self.compile_load_var(ind_var, None);
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().tofloat();
                 self.asm().mode(inst::MODE_F64);
                 self.asm().nanbox();
-                self.compile_store_var(ind_var);
+                self.compile_store_var(ind_var, None);
                 self.compile_store_var_prepare(step_var);
-                self.compile_load_var(step_var);
+                self.compile_load_var(step_var, None);
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().tofloat();
                 self.asm().mode(inst::MODE_F64);
                 self.asm().nanbox();
-                self.compile_store_var(step_var);
+                self.compile_store_var(step_var, None);
 
                 // Also check that limit is a number. We don't convert it
                 // to a float if init and step were floats though.
                 self.asm().bind(&mut check_limit_label);
-                self.compile_load_var(limit_var);
+                self.compile_load_var(limit_var, None);
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().typeof_();
                 self.asm().dup();
@@ -399,7 +405,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // variable to the visible variable first.
                 self.asm().bind(&mut body_label);
                 self.compile_define_prepare(body_var);
-                self.compile_load_var(ind_var);
+                self.compile_load_var(ind_var, None);
                 self.compile_define(body_var);
                 for stmt in body {
                     self.compile_stmt(stmt);
@@ -412,11 +418,11 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let mut step_inc_ok_label = Label::new();
                 self.line(init.pos());
                 self.compile_store_var_prepare(ind_var);
-                self.compile_load_var(ind_var);
-                self.compile_load_var(step_var);
+                self.compile_load_var(ind_var, None);
+                self.compile_load_var(step_var, None);
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().add();
-                self.compile_load_var(step_var);
+                self.compile_load_var(step_var, None);
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().typeof_();
                 self.asm().const_(nanbox::TAG_FLOAT);
@@ -431,7 +437,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm().pop();
                 self.b_named_label(*break_lid);
                 self.asm().bind(&mut step_inc_ok_label);
-                self.compile_store_var(ind_var);
+                self.compile_store_var(ind_var, None);
 
                 // Check the condition.
                 // If step is positive, we check ind <= limit.
@@ -439,9 +445,9 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let mut negative_cond_label = Label::new();
                 self.line(limit.pos());
                 self.asm().bind(&mut cond_label);
-                self.compile_load_var(ind_var);
-                self.compile_load_var(limit_var);
-                self.compile_load_var(step_var);
+                self.compile_load_var(ind_var, None);
+                self.compile_load_var(limit_var, None);
+                self.compile_load_var(step_var, None);
                 self.asm().constzero();
                 self.asm().nanbox();
                 self.asm().mode(inst::MODE_LUA);
@@ -503,6 +509,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Stmt::LocalFunction {
                 name: name_tok,
                 parameters,
+                param_scope,
                 is_variadic,
                 body,
                 var: vid,
@@ -513,7 +520,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.compile_define_prepare(var);
                 let name = String::from(name_tok.text);
                 let fn_index = self.compile_function(name, parameters, *is_variadic, body, *pos);
-                self.compile_closure(fn_index);
+                self.compile_closure(fn_index, *param_scope, *pos);
                 self.compile_define(var);
             }
             Stmt::Call(call) => {
@@ -664,6 +671,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             }
             Expr::Function {
                 parameters,
+                param_scope,
                 is_variadic,
                 body,
                 pos,
@@ -671,7 +679,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             } => {
                 let name = String::from("·anonymous");
                 let fn_index = self.compile_function(name, parameters, *is_variadic, body, *pos);
-                self.compile_closure(fn_index);
+                self.compile_closure(fn_index, *param_scope, *pos);
             }
             Expr::Call(call) => {
                 self.compile_call(call, ResultMode::Truncate);
@@ -787,9 +795,30 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         }
 
         // Start compiling the function.
-        // TODO: move captured parameters into cells.
         self.asm_stack.push(Assembler::new());
         self.line(pos);
+
+        // Move captured parameters into cells.
+        let mut cell_slot = 0;
+        for p in parameters {
+            let var = &self.scope_set.vars[p.var.0];
+            if var.kind == VarKind::Capture {
+                self.asm().alloc(mem::size_of::<usize>() as u32); // pointer to nanbox
+                self.asm().dup();
+                let param_slot = match var.slot.try_into() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        self.error(pos, String::from("too many parameters"));
+                        !0
+                    }
+                };
+                self.asm().loadarg(param_slot);
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().store();
+                assert_eq!(var.cell_slot, cell_slot);
+                cell_slot += 1;
+            }
+        }
 
         // Compile the function body.
         for stmt in body {
@@ -830,9 +859,33 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         fn_index
     }
 
-    fn compile_closure(&mut self, fn_index: u32) {
-        // TODO: load captured cells.
-        let capture_count = 0;
+    fn compile_closure(&mut self, fn_index: u32, param_sid: ScopeID, pos: Pos) {
+        // Load variables captured by the function or one of its nested
+        // functions.
+        let param_scope = &self.scope_set.scopes[param_sid.0];
+        for capture in &param_scope.captures {
+            match capture.from {
+                CaptureFrom::Local => {
+                    let slot = self.scope_set.vars[capture.var.0]
+                        .cell_slot
+                        .try_into()
+                        .unwrap();
+                    self.asm().loadlocal(slot);
+                }
+                CaptureFrom::Closure(slot) => {
+                    self.asm().capture(slot.try_into().unwrap());
+                }
+            }
+        }
+
+        // Construct and box the closure.
+        let capture_count = match param_scope.captures.len().try_into() {
+            Ok(n) => n,
+            Err(_) => {
+                self.error(pos, String::from("too many captures"));
+                !0
+            }
+        };
         let bound_arg_count = 0;
         self.asm()
             .newclosure(fn_index, capture_count, bound_arg_count);
@@ -878,8 +931,10 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         }
     }
 
-    fn compile_define_prepare(&mut self, _: &Var) {
-        // TODO: for captured variables, allocate a cell.
+    fn compile_define_prepare(&mut self, var: &Var) {
+        if var.kind == VarKind::Capture {
+            self.asm().alloc(mem::size_of::<usize>() as u32);
+        }
     }
 
     fn compile_define(&mut self, var: &Var) {
@@ -890,7 +945,12 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // to the top of the stack. Since the value being assigned
                 // is already there, we don't need to emit an instruction.
             }
-            VarKind::Capture => unimplemented!(),
+            VarKind::Capture => {
+                // When a captured variable is defined, a cell should have
+                // been allocated earlier with compile_define_prepare.
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().store();
+            }
         }
     }
 
@@ -905,7 +965,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let var_use = &self.scope_set.var_uses[vuid.0];
                 match var_use.var {
                     Some(vid) => {
-                        self.compile_store_var(&self.scope_set.vars[vid.0]);
+                        let var = &self.scope_set.vars[vid.0];
+                        self.compile_store_var(var, var_use.cell);
                     }
                     None => {
                         self.asm().loadglobal(0); // _ENV
@@ -923,7 +984,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         // TODO: for captured variables, load the cell
     }
 
-    fn compile_store_var(&mut self, var: &Var) {
+    fn compile_store_var(&mut self, var: &Var, var_use_cell: Option<usize>) {
         match var.kind {
             VarKind::Global => {
                 // Assignment to _ENV has no effect.
@@ -936,15 +997,22 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm().storelocal(var.slot.try_into().unwrap());
             }
             VarKind::Capture => {
-                // TODO: implement assign to capture.
-                unimplemented!();
+                if let Some(cell) = var_use_cell {
+                    self.asm().capture(cell.try_into().unwrap());
+                } else {
+                    self.asm().loadlocal(var.cell_slot.try_into().unwrap());
+                }
+                self.asm().swap();
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().store();
             }
         }
     }
 
     fn compile_var_use(&mut self, name: &Token<'src>, var_use: &VarUse) {
         if let Some(vid) = var_use.var {
-            self.compile_load_var(&self.scope_set.vars[vid.0])
+            let var = &self.scope_set.vars[vid.0];
+            self.compile_load_var(var, var_use.cell);
         } else {
             self.asm().loadglobal(0); // _ENV
             let si = self.ensure_string(name.text.as_bytes(), name.pos());
@@ -953,14 +1021,18 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         }
     }
 
-    fn compile_load_var(&mut self, var: &Var) {
+    fn compile_load_var(&mut self, var: &Var, var_use_cell: Option<usize>) {
         match var.kind {
             VarKind::Global => self.asm().loadglobal(var.slot.try_into().unwrap()),
             VarKind::Parameter => self.asm().loadarg(var.slot.try_into().unwrap()),
             VarKind::Local => self.asm().loadlocal(var.slot.try_into().unwrap()),
             VarKind::Capture => {
-                // TODO: implement load from capture.
-                unimplemented!();
+                if let Some(cell) = var_use_cell {
+                    self.asm().capture(cell.try_into().unwrap());
+                } else {
+                    self.asm().loadlocal(var.cell_slot.try_into().unwrap());
+                }
+                self.asm().load();
             }
         }
     }
