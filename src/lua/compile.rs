@@ -2,7 +2,9 @@ use crate::data::{self, List, SetValue, Slice};
 use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
 use crate::lua::scope::{self, CaptureFrom, ScopeSet, Var, VarKind, VarUse};
-use crate::lua::syntax::{self, Call, Chunk, Expr, LValue, LabelID, Param, ScopeID, Stmt};
+use crate::lua::syntax::{
+    self, Call, Chunk, Expr, LValue, LabelID, Param, ScopeID, Stmt, TableField,
+};
 use crate::lua::token::{self, Number, Token};
 use crate::nanbox;
 use crate::package::{Function, Global, Object, Package, Type};
@@ -684,6 +686,49 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Expr::Call(call) => {
                 self.compile_call(call, ResultMode::Truncate);
             }
+            Expr::Table { fields, .. } => {
+                self.asm().alloc(mem::size_of::<Object>() as u32);
+                self.asm().mode(inst::MODE_OBJECT);
+                self.asm().nanbox();
+                let mut count: i64 = 1;
+                for field in fields {
+                    self.asm().dup();
+                    match field {
+                        TableField::NameField(key, value) => {
+                            self.compile_expr(value);
+                            let si = self.ensure_string(key.text.as_bytes(), key.pos());
+                            self.asm().mode(inst::MODE_LUA);
+                            self.asm().storenamedprop(si);
+                        }
+                        TableField::ExprField(key, value) => {
+                            self.compile_expr(key);
+                            self.compile_expr(value);
+                            self.asm().mode(inst::MODE_LUA);
+                            self.asm().storeindexprop();
+                        }
+                        TableField::CountField(value) => {
+                            self.asm().const_(count as u64);
+                            self.asm().nanbox();
+                            self.compile_expr(value);
+                            self.asm().mode(inst::MODE_LUA);
+                            self.asm().storeindexprop();
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            Expr::Dot { expr, name, .. } => {
+                self.compile_expr(expr);
+                let si = self.ensure_string(name.text.as_bytes(), name.pos());
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().loadnamedpropornil(si);
+            }
+            Expr::Index { expr, index, .. } => {
+                self.compile_expr(expr);
+                self.compile_expr(index);
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().loadindexpropornil();
+            }
         }
     }
 
@@ -777,8 +822,14 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
     fn compile_lvalue(&mut self, lval: &LValue<'src>) {
         self.line(lval.pos());
-        // TODO: evaluate expressions that produce tables into which we're
-        // storing fields. For now, no expression does that.
+        match lval {
+            LValue::Var { .. } => (),
+            LValue::Dot { expr, .. } => self.compile_expr(expr),
+            LValue::Index { expr, index, .. } => {
+                self.compile_expr(expr);
+                self.compile_expr(index);
+            }
+        }
     }
 
     fn compile_function(
@@ -976,6 +1027,15 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         self.asm().storenamedprop(si);
                     }
                 }
+            }
+            LValue::Dot { name, .. } => {
+                let si = self.ensure_string(name.text.as_bytes(), name.pos());
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().storenamedprop(si);
+            }
+            LValue::Index { .. } => {
+                self.asm().mode(inst::MODE_LUA);
+                self.asm().storeindexprop();
             }
         }
     }

@@ -3,7 +3,126 @@
 //! operations may be performed on NaN-boxed values.
 
 use crate::data;
+use crate::heap::{Set, HEAP};
 use crate::package::{Closure, Object};
+use std::fmt::{self, Debug, Display, Formatter};
+use std::hash::{Hash, Hasher};
+
+// TODO: convert everything to use NanBox type.
+#[derive(Clone, Copy)]
+pub struct NanBox(pub u64);
+
+impl NanBox {
+    pub fn from_nil() -> NanBox {
+        NanBox(from_nil())
+    }
+    pub fn from_string(s: &data::String) -> NanBox {
+        NanBox(from_string(s))
+    }
+    pub fn to_closure(&self) -> Option<*const Closure> {
+        to_closure(self.0)
+    }
+    pub fn to_object(&self) -> Option<*const Object> {
+        to_object(self.0)
+    }
+}
+
+impl Debug for NanBox {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str(debug_type(self.0))
+    }
+}
+
+impl Display for NanBox {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str(&debug_str(self.0))
+    }
+}
+
+impl PartialEq for NanBox {
+    fn eq(&self, other: &NanBox) -> bool {
+        if let (Some(li), Some(ri)) = (num_as_i64(self.0), num_as_i64(other.0)) {
+            li == ri
+        } else if let (Some(lf), Some(rf)) = (to_f64(self.0), to_f64(other.0)) {
+            lf == rf
+        } else if let (Some(ls), Some(rs)) = (to_string(self.0), to_string(other.0)) {
+            ls == rs
+        } else {
+            self.0 == other.0
+        }
+    }
+}
+
+impl Set for NanBox {
+    fn set(&mut self, v: &Self) {
+        self.0 = v.0;
+        HEAP.write_barrier_nanbox(self as *mut NanBox as usize, v.0);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct NanBoxKey(u64);
+
+impl TryFrom<NanBox> for NanBoxKey {
+    type Error = NanBoxKeyError;
+    fn try_from(v: NanBox) -> Result<NanBoxKey, Self::Error> {
+        if let Some(f) = to_f64(v.0) {
+            if f.is_nan() {
+                return Err(NanBoxKeyError {});
+            }
+            let i = f as i64;
+            if i as f64 == f && fits_in_small_int(i) {
+                return Ok(NanBoxKey(from_small_int(i)));
+            }
+        }
+        Ok(NanBoxKey(v.0))
+    }
+}
+
+impl Set for NanBoxKey {
+    fn set(&mut self, v: &Self) {
+        self.0 = v.0;
+        HEAP.write_barrier_nanbox(self as *mut NanBoxKey as usize, v.0);
+    }
+}
+
+impl Display for NanBoxKey {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        <NanBox as Display>::fmt(&NanBox(self.0), f)
+    }
+}
+
+impl PartialEq for NanBoxKey {
+    fn eq(&self, other: &NanBoxKey) -> bool {
+        NanBox(self.0) == NanBox(other.0)
+    }
+}
+
+impl Eq for NanBoxKey {}
+
+impl Hash for NanBoxKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        if let Some(i) = num_as_i64(self.0) {
+            i.hash(state)
+        } else if let Some(f) = to_f64(self.0) {
+            debug_assert!(!f.is_nan());
+            self.0.hash(state);
+        } else if let Some(s) = to_string(self.0) {
+            s.hash(state);
+        } else {
+            self.0.hash(state);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct NanBoxKeyError {}
+
+impl Display for NanBoxKeyError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str("NaN value can't be used as a property key")
+    }
+}
 
 /// Basic encoding for IEEE quiet NaN values. The exponent bits are all set, and
 /// the two high mantissa bits are set. The remaining 51 bits of the mantissa

@@ -1,5 +1,6 @@
 use crate::lua::syntax::{
-    Call, Chunk, Expr, LValue, LabelID, LabelUseID, Param, ScopeID, Stmt, VarID, VarUseID,
+    Call, Chunk, Expr, LValue, LabelID, LabelUseID, Param, ScopeID, Stmt, TableField, VarID,
+    VarUseID,
 };
 use crate::lua::token::Token;
 use crate::pos::{Error, LineMap, Pos};
@@ -577,6 +578,26 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                     self.resolve_expr(a);
                 }
             }
+            Expr::Table { fields, .. } => {
+                for field in fields {
+                    match field {
+                        TableField::NameField(_, value) | TableField::CountField(value) => {
+                            self.resolve_expr(value)
+                        }
+                        TableField::ExprField(key, value) => {
+                            self.resolve_expr(key);
+                            self.resolve_expr(value);
+                        }
+                    }
+                }
+            }
+            Expr::Dot { expr, .. } => {
+                self.resolve_expr(expr);
+            }
+            Expr::Index { expr, index, .. } => {
+                self.resolve_expr(expr);
+                self.resolve_expr(index);
+            }
         }
     }
 
@@ -598,6 +619,11 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                         );
                     }
                 }
+            }
+            LValue::Dot { expr, .. } => self.resolve_expr(expr),
+            LValue::Index { expr, index, .. } => {
+                self.resolve_expr(expr);
+                self.resolve_expr(index);
             }
         }
     }

@@ -431,6 +431,20 @@ pub enum Expr<'src> {
         pos: Pos,
     },
     Call(Call<'src>),
+    Table {
+        fields: Vec<TableField<'src>>,
+        pos: Pos,
+    },
+    Dot {
+        expr: Box<Expr<'src>>,
+        name: Token<'src>,
+        pos: Pos,
+    },
+    Index {
+        expr: Box<Expr<'src>>,
+        index: Box<Expr<'src>>,
+        pos: Pos,
+    },
 }
 
 impl<'src> Expr<'src> {
@@ -443,6 +457,9 @@ impl<'src> Expr<'src> {
             Expr::Group { pos, .. } => *pos,
             Expr::Function { pos, .. } => *pos,
             Expr::Call(Call { pos, .. }) => *pos,
+            Expr::Table { pos, .. } => *pos,
+            Expr::Dot { pos, .. } => *pos,
+            Expr::Index { pos, .. } => *pos,
         }
     }
 }
@@ -486,6 +503,26 @@ impl<'src> DisplayIndent for Expr<'src> {
                 write!(f, "end")
             }
             Expr::Call(call) => call.fmt_indent(f, level),
+            Expr::Table { fields, .. } => {
+                f.write_str("{")?;
+                let mut sep = "";
+                for field in fields {
+                    write!(f, "{}", sep)?;
+                    sep = ", ";
+                    field.fmt_indent(f, level + 1)?;
+                }
+                f.write_str("}")
+            }
+            Expr::Dot { expr, name, .. } => {
+                expr.fmt_indent(f, level)?;
+                write!(f, ".{}", name.text)
+            }
+            Expr::Index { expr, index, .. } => {
+                expr.fmt_indent(f, level)?;
+                f.write_str("[")?;
+                index.fmt_indent(f, level)?;
+                f.write_str("]")
+            }
         }
     }
 }
@@ -523,10 +560,43 @@ impl<'src> DisplayIndent for Call<'src> {
     }
 }
 
+pub enum TableField<'src> {
+    NameField(Token<'src>, Expr<'src>),
+    ExprField(Expr<'src>, Expr<'src>),
+    CountField(Expr<'src>),
+}
+
+impl<'src> DisplayIndent for TableField<'src> {
+    fn fmt_indent(&self, f: &mut Formatter, level: usize) -> fmt::Result {
+        match self {
+            TableField::NameField(name, value) => {
+                write!(f, "{} = ", name.text)?;
+                value.fmt_indent(f, level)
+            }
+            TableField::ExprField(key, value) => {
+                key.fmt_indent(f, level)?;
+                f.write_str(" = ")?;
+                value.fmt_indent(f, level)
+            }
+            TableField::CountField(value) => value.fmt_indent(f, level),
+        }
+    }
+}
+
 pub enum LValue<'src> {
     Var {
         name: Token<'src>,
         var_use: VarUseID,
+    },
+    Dot {
+        expr: Expr<'src>,
+        name: Token<'src>,
+        pos: Pos,
+    },
+    Index {
+        expr: Expr<'src>,
+        index: Expr<'src>,
+        pos: Pos,
     },
 }
 
@@ -534,6 +604,7 @@ impl<'src> LValue<'src> {
     pub fn pos(&self) -> Pos {
         match self {
             LValue::Var { name, .. } => name.pos(),
+            LValue::Dot { pos, .. } | LValue::Index { pos, .. } => *pos,
         }
     }
 }
@@ -542,6 +613,8 @@ impl<'src> Display for LValue<'src> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             LValue::Var { name, .. } => write!(f, "{}", name.text),
+            LValue::Dot { expr, name, .. } => write!(f, "{}.{}", expr, name.text),
+            LValue::Index { expr, index, .. } => write!(f, "{}[{}]", expr, index),
         }
     }
 }
@@ -1017,6 +1090,43 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         Ok(e)
     }
 
+    fn parse_table_expr(&mut self) -> Result<Expr<'src>, Error> {
+        let begin = self.expect(Kind::LBrace)?.pos();
+        let mut fields = Vec::new();
+        while self.peek() != Kind::RBrace {
+            fields.push(self.parse_table_field()?);
+            if self.peek() == Kind::Comma || self.peek() == Kind::Semi {
+                self.take();
+            }
+        }
+        let end = self.expect(Kind::RBrace)?.pos();
+        let pos = begin.combine(end);
+        Ok(Expr::Table { fields, pos })
+    }
+
+    fn parse_table_field(&mut self) -> Result<TableField<'src>, Error> {
+        match self.peek() {
+            Kind::Ident => {
+                let key = self.take();
+                self.expect(Kind::Eq)?;
+                let value = self.parse_expr()?;
+                Ok(TableField::NameField(key, value))
+            }
+            Kind::LBrack => {
+                self.take();
+                let key = self.parse_expr()?;
+                self.expect(Kind::RBrack)?;
+                self.expect(Kind::Eq)?;
+                let value = self.parse_expr()?;
+                Ok(TableField::ExprField(key, value))
+            }
+            _ => {
+                let value = self.parse_expr()?;
+                Ok(TableField::CountField(value))
+            }
+        }
+    }
+
     fn parse_call_expr(&mut self, callee: Expr<'src>) -> Result<Expr<'src>, Error> {
         let method_name = if self.peek() == Kind::Colon {
             self.take();
@@ -1057,6 +1167,31 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             arguments,
             pos,
         }))
+    }
+
+    fn parse_dot_expr(&mut self, expr: Expr<'src>) -> Result<Expr<'src>, Error> {
+        let begin = expr.pos();
+        self.expect(Kind::Dot)?;
+        let name = self.expect(Kind::Ident)?;
+        let pos = begin.combine(name.pos());
+        Ok(Expr::Dot {
+            expr: Box::new(expr),
+            name,
+            pos,
+        })
+    }
+
+    fn parse_index_expr(&mut self, expr: Expr<'src>) -> Result<Expr<'src>, Error> {
+        let begin = expr.pos();
+        self.expect(Kind::LBrack)?;
+        let index = self.parse_expr()?;
+        let end = self.expect(Kind::RBrack)?.pos();
+        let pos = begin.combine(end);
+        Ok(Expr::Index {
+            expr: Box::new(expr),
+            index: Box::new(index),
+            pos,
+        })
     }
 
     fn parse_group_expr(&mut self) -> Result<Expr<'src>, Error> {
@@ -1170,6 +1305,16 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     fn expr_to_lvalue(&self, e: Expr<'src>) -> Result<LValue<'src>, Error> {
         match e {
             Expr::Var { name, var_use, .. } => Ok(LValue::Var { name, var_use }),
+            Expr::Dot { expr, name, pos } => Ok(LValue::Dot {
+                expr: *expr,
+                name,
+                pos,
+            }),
+            Expr::Index { expr, index, pos } => Ok(LValue::Index {
+                expr: *expr,
+                index: *index,
+                pos,
+            }),
             _ => Err(self.error(format!(
                 "expected variable or table field expression on left side of assignment"
             ))),
@@ -1192,6 +1337,16 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
                 prefix: Some(&Parser::parse_function_expr),
                 infix: None,
                 precedence: PREC_NONE,
+            },
+            Kind::Dot => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_dot_expr),
+                precedence: PREC_PRIMARY,
+            },
+            Kind::LBrack => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_index_expr),
+                precedence: PREC_PRIMARY,
             },
             Kind::Lt | Kind::LtEq | Kind::Gt | Kind::GtEq | Kind::EqEq | Kind::TildeEq => {
                 ParseRule {
@@ -1261,7 +1416,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
                 precedence: PREC_PRIMARY,
             },
             Kind::LBrace => ParseRule {
-                prefix: None,
+                prefix: Some(&Parser::parse_table_expr),
                 infix: Some(&Parser::parse_call_expr),
                 precedence: PREC_PRIMARY,
             },

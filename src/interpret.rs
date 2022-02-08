@@ -1,7 +1,7 @@
 use crate::data;
 use crate::heap::HEAP;
 use crate::inst;
-use crate::nanbox;
+use crate::nanbox::{self, NanBox};
 use crate::package::{Closure, Function, Object, PropertyKind};
 use crate::pos::Error;
 
@@ -659,6 +659,7 @@ impl<'w> Interpreter<'w> {
                 (inst::CALLNAMEDPROP, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
+                    let key = NanBox(nanbox::from_string(name)).try_into().unwrap();
                     let arg_count = read_imm!(u16, 5) as usize;
                     let receiver_addr = sp + arg_count * 8;
                     let receiver = *(receiver_addr as *const u64);
@@ -669,11 +670,11 @@ impl<'w> Interpreter<'w> {
                             nanbox::debug_type(receiver)
                         ),
                     };
-                    let prop = match receiver_obj.property(name) {
+                    let prop = match receiver_obj.property(key) {
                         Some(p) => p,
                         _ => return_errorf!("property {} is not defined", name),
                     };
-                    let callee = match nanbox::to_closure(prop.value) {
+                    let callee = match prop.value.to_closure() {
                         Some(c) => c.as_ref().unwrap(),
                         _ => return_errorf!("property {} is not a function", name),
                     };
@@ -697,6 +698,7 @@ impl<'w> Interpreter<'w> {
                 (inst::CALLNAMEDPROPWITHPROTOTYPE, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
+                    let key = NanBox::from_string(name).try_into().unwrap();
                     let arg_count = read_imm!(u16, 5) as usize;
                     let prototype_addr = sp + arg_count * 8;
                     let prototype = *(prototype_addr as *const u64);
@@ -707,11 +709,11 @@ impl<'w> Interpreter<'w> {
                             nanbox::debug_type(prototype)
                         ),
                     };
-                    let prop = match prototype_obj.property(name) {
+                    let prop = match prototype_obj.property(key) {
                         Some(p) => p,
-                        _ => return_errorf!("property {} is not defined", name),
+                        _ => return_errorf!("property {} is not defined", key),
                     };
-                    let callee = match nanbox::to_closure(prop.value) {
+                    let callee = match prop.value.to_closure() {
                         Some(c) => c.as_ref().unwrap(),
                         _ => return_errorf!("property {} is not a function", name),
                     };
@@ -1072,6 +1074,23 @@ impl<'w> Interpreter<'w> {
                     push!(v);
                     inst::size(inst::LOADGLOBAL)
                 }
+                (inst::LOADINDEXPROPORNIL, inst::MODE_LUA) => {
+                    let index = NanBox(pop!());
+                    let raw_receiver = NanBox(pop!());
+                    let receiver = match raw_receiver.to_object() {
+                        Some(o) => o.as_ref().unwrap(),
+                        None => return_errorf!("value is not an object: {:?}", raw_receiver),
+                    };
+                    let v = match index.try_into() {
+                        Err(_) => NanBox::from_nil(),
+                        Ok(key) => match receiver.property(key) {
+                            None => NanBox::from_nil(),
+                            Some(p) => receiver.property_value(p),
+                        },
+                    };
+                    push!(v.0);
+                    inst::size(inst::LOADINDEXPROPORNIL)
+                }
                 (inst::LOADLOCAL, inst::MODE_I64) => {
                     let i = read_imm!(u16, 1) as usize;
                     let v = *((fp as usize - (i + 1) * 8) as *const u64);
@@ -1081,25 +1100,27 @@ impl<'w> Interpreter<'w> {
                 (inst::LOADNAMEDPROP, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
-                    let receiver = pop!();
-                    let receiver_obj = match nanbox::to_object(receiver) {
+                    let key = NanBox::from_string(name).try_into().unwrap();
+                    let raw_receiver = pop!();
+                    let receiver = match nanbox::to_object(raw_receiver) {
                         Some(o) => o.as_ref().unwrap(),
                         None => return_errorf!(
                             "value is not an object: {}",
-                            nanbox::debug_type(receiver)
+                            nanbox::debug_type(raw_receiver)
                         ),
                     };
-                    let prop = match receiver_obj.property(name) {
+                    let prop = match receiver.property(key) {
                         Some(p) => p,
-                        None => return_errorf!("object does not have property {}", name),
+                        None => return_errorf!("object does not have property {}", key),
                     };
-                    let value = receiver_obj.property_value(prop);
-                    push!(value);
+                    let value = receiver.property_value(prop);
+                    push!(value.0);
                     inst::size(inst::LOADNAMEDPROP)
                 }
                 (inst::LOADNAMEDPROPORNIL, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
+                    let key = NanBox::from_string(name).try_into().unwrap();
                     let receiver = pop!();
                     let receiver_obj = match nanbox::to_object(receiver) {
                         Some(o) => o.as_ref().unwrap(),
@@ -1108,11 +1129,11 @@ impl<'w> Interpreter<'w> {
                             nanbox::debug_type(receiver)
                         ),
                     };
-                    let value = match receiver_obj.property(name) {
+                    let value = match receiver_obj.property(key) {
                         Some(p) => receiver_obj.property_value(p),
-                        None => nanbox::from_nil(),
+                        None => NanBox::from_nil(),
                     };
-                    push!(value);
+                    push!(value.0);
                     inst::size(inst::LOADNAMEDPROPORNIL)
                 }
                 (inst::LOADPROTOTYPE, inst::MODE_OBJECT) => {
@@ -1597,6 +1618,21 @@ impl<'w> Interpreter<'w> {
                     self.global_slots[i] = v;
                     inst::size(inst::STOREGLOBAL)
                 }
+                (inst::STOREINDEXPROP, inst::MODE_LUA) => {
+                    let v = NanBox(pop!());
+                    let i = NanBox(pop!());
+                    let raw_receiver = NanBox(pop!());
+                    let receiver = match raw_receiver.to_object() {
+                        Some(o) => (o as *mut Object).as_mut().unwrap(),
+                        None => return_errorf!("value is not an object: {:?}", raw_receiver),
+                    };
+                    let key = match i.try_into() {
+                        Ok(key) => key,
+                        Err(_) => return_errorf!("cannot use NaN as table key"),
+                    };
+                    receiver.set_property(key, PropertyKind::Field, v);
+                    inst::size(inst::STOREINDEXPROP)
+                }
                 (inst::STORELOCAL, inst::MODE_I64) => {
                     let i = read_imm!(u16, 1) as usize;
                     let v = pop!();
@@ -1606,37 +1642,30 @@ impl<'w> Interpreter<'w> {
                 (inst::STOREMETHOD, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
-                    let raw_method = pop!();
-                    if nanbox::to_closure(raw_method).is_none() {
-                        return_errorf!(
-                            "method value is not a function: {}",
-                            nanbox::debug_type(raw_method)
-                        );
+                    let key = NanBox::from_string(name).try_into().unwrap();
+                    let raw_method = NanBox(pop!());
+                    if raw_method.to_closure().is_none() {
+                        return_errorf!("method value is not a function: {}", raw_method);
                     }
                     let raw_receiver = pop!();
                     let receiver = match nanbox::to_object(raw_receiver) {
                         Some(o) => (o as usize as *mut Object).as_mut().unwrap(),
-                        None => return_errorf!(
-                            "value is not an object: {}",
-                            nanbox::debug_type(raw_receiver)
-                        ),
+                        None => return_errorf!("value is not an object: {:?}", raw_receiver),
                     };
-                    receiver.set_own_property(name, PropertyKind::Method, raw_method);
+                    receiver.set_own_property(key, PropertyKind::Method, raw_method);
                     inst::size(inst::STOREMETHOD)
                 }
                 (inst::STORENAMEDPROP, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
-                    let v = pop!();
-                    let raw_receiver = pop!();
-                    let receiver = match nanbox::to_object(raw_receiver) {
+                    let key = NanBox::from_string(name).try_into().unwrap();
+                    let v = NanBox(pop!());
+                    let raw_receiver = NanBox(pop!());
+                    let receiver = match raw_receiver.to_object() {
                         Some(o) => (o as usize as *mut Object).as_mut().unwrap(),
-                        None => return_errorf!(
-                            "value is not an object: {}",
-                            nanbox::debug_type(raw_receiver)
-                        ),
+                        None => return_errorf!("value is not an object: {:?}", raw_receiver),
                     };
-                    receiver.set_property(name, PropertyKind::Field, v);
+                    receiver.set_property(key, PropertyKind::Field, v);
                     inst::size(inst::STORENAMEDPROP)
                 }
                 (inst::STOREPROTOTYPE, inst::MODE_I64) => {

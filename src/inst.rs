@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 71.
+// Next opcode: 73.
 pub const ADD: u8 = 20;
 pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
@@ -34,6 +34,7 @@ pub const LE: u8 = 16;
 pub const LOAD: u8 = 36;
 pub const LOADARG: u8 = 29;
 pub const LOADGLOBAL: u8 = 9;
+pub const LOADINDEXPROPORNIL: u8 = 72;
 pub const LOADLOCAL: u8 = 11;
 pub const LOADNAMEDPROP: u8 = 42;
 pub const LOADNAMEDPROPORNIL: u8 = 50;
@@ -66,6 +67,7 @@ pub const STORELOCAL: u8 = 12;
 pub const STOREMETHOD: u8 = 46;
 pub const STORENAMEDPROP: u8 = 43;
 pub const STOREPROTOTYPE: u8 = 41;
+pub const STOREINDEXPROP: u8 = 71;
 pub const STRCAT: u8 = 57;
 pub const STRING: u8 = 26;
 pub const SUB: u8 = 21;
@@ -111,9 +113,9 @@ pub fn size_at(insts: &[u8]) -> usize {
 pub const fn size(op: u8) -> usize {
     match op {
         ADD | AND | CALLVALUEV | CONSTZERO | DIV | DUP | EQ | EXP | FLOORDIV | GE | GT | LT
-        | LE | LOAD | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR
-        | PANIC | POP | PROTOTYPE | RET | RETV | SHL | SHR | STORE | STOREPROTOTYPE | STRCAT
-        | SUB | SWAP | TOFLOAT | TYPEOF | XOR => 1,
+        | LE | LOAD | LOADINDEXPROPORNIL | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP
+        | NOT | NOTB | OR | PANIC | POP | PROTOTYPE | RET | RETV | SHL | SHR | STORE
+        | STOREINDEXPROP | STOREPROTOTYPE | STRCAT | SUB | SWAP | TOFLOAT | TYPEOF | XOR => 1,
         SWAPN | SYS => 2,
         ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETV | STOREARG
         | STORELOCAL => 3,
@@ -153,6 +155,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         LOAD => "load",
         LOADARG => "loadarg",
         LOADGLOBAL => "loadglobal",
+        LOADINDEXPROPORNIL => "loadindexpropornil",
         LOADLOCAL => "loadlocal",
         LOADNAMEDPROP => "loadnamedprop",
         LOADNAMEDPROPORNIL => "loadnamedpropornil",
@@ -178,6 +181,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         SHR => "shr",
         STORE => "store",
         STOREARG => "storearg",
+        STOREINDEXPROP => "storeindexprop",
         STOREGLOBAL => "storeglobal",
         STORELOCAL => "storelocal",
         STOREMETHOD => "storemethod",
@@ -402,6 +406,10 @@ impl Assembler {
         self.write_u32(index);
     }
 
+    pub fn loadindexpropornil(&mut self) {
+        self.write_u8(LOADINDEXPROPORNIL);
+    }
+
     pub fn loadlocal(&mut self, index: u16) {
         self.write_u8(LOADLOCAL);
         self.write_u16(index);
@@ -513,6 +521,10 @@ impl Assembler {
     pub fn storeglobal(&mut self, index: u32) {
         self.write_u8(STOREGLOBAL);
         self.write_u32(index);
+    }
+
+    pub fn storeindexprop(&mut self) {
+        self.write_u8(STOREINDEXPROP);
     }
 
     pub fn storelocal(&mut self, index: u16) {
@@ -694,9 +706,9 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "  {}{}", mnemonic(insts[p]), mode)?;
         match insts[p] {
             ADD | AND | CALLVALUEV | CONSTZERO | DIV | DUP | EXP | EQ | FLOORDIV | GE | GT | LT
-            | LE | LOAD | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP | NOT | NOTB | OR
-            | PANIC | POP | PROTOTYPE | RET | RETV | SHL | SHR | STORE | STOREPROTOTYPE
-            | STRCAT | SUB | SWAP | TOFLOAT | TYPEOF | XOR => {
+            | LE | LOAD | LOADINDEXPROPORNIL | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG
+            | NOP | NOT | NOTB | OR | PANIC | POP | PROTOTYPE | RET | RETV | SHL | SHR | STORE
+            | STOREINDEXPROP | STOREPROTOTYPE | STRCAT | SUB | SWAP | TOFLOAT | TYPEOF | XOR => {
                 f.write_str("\n")?;
             }
             B | BIF => {

@@ -1,7 +1,7 @@
 use crate::data::{self, Slice};
 use crate::heap::{self, Handle, Ptr, Set, HEAP};
 use crate::inst;
-use crate::nanbox;
+use crate::nanbox::{self, NanBox, NanBoxKey};
 use crate::pos::{FunctionLineMap, PackageLineMap};
 
 use std::error::Error;
@@ -250,18 +250,19 @@ pub struct Object {
     /// Prototypes provide a form of inheritance.
     pub prototype: Ptr<Object>,
 
-    /// A set of "own" properties belonging to this object.
-    pub properties: data::HashMap<data::String, Property>,
+    /// A set of "own" properties belonging to this object. Keys are arbitrary
+    /// nanboxed values.
+    pub properties: data::HashMap<NanBoxKey, Property>,
 }
 
 impl Object {
     /// Looks up and returns a property, which may be in this object or the
     /// prototype chain.
-    pub fn property(&self, name: &data::String) -> Option<&Property> {
+    pub fn property(&self, key: NanBoxKey) -> Option<&Property> {
         unsafe {
             let mut o = self;
             loop {
-                let prop = o.properties.get(name);
+                let prop = o.properties.get(&key);
                 if prop.is_some() {
                     return prop;
                 }
@@ -280,12 +281,12 @@ impl Object {
     /// Sets a property. If the property exists in this object or in the
     /// prototype chain, the existing property is written. Otherwise, a new
     /// property is added to this object.
-    pub fn set_property(&mut self, name: &data::String, kind: PropertyKind, value: u64) {
+    pub fn set_property(&mut self, key: NanBoxKey, kind: PropertyKind, value: NanBox) {
         unsafe {
             let mut o = (self as *mut Object).as_mut().unwrap();
             let prop = Property { kind, value };
             loop {
-                let existing = o.properties.get_mut(name);
+                let existing = o.properties.get_mut(&key);
                 if let Some(existing) = existing {
                     existing.set(&prop);
                     return;
@@ -295,7 +296,7 @@ impl Object {
                         o = p;
                     }
                     None => {
-                        self.properties.insert(name, &prop);
+                        self.properties.insert(&key, &prop);
                         return;
                     }
                 }
@@ -307,22 +308,22 @@ impl Object {
     /// the existing property is written. Otherwise, a new property is added
     /// to this object, even if a property of the same name exists in the
     /// prototype chain.
-    pub fn set_own_property(&mut self, name: &data::String, kind: PropertyKind, value: u64) {
+    pub fn set_own_property(&mut self, key: NanBoxKey, kind: PropertyKind, value: NanBox) {
         let prop = Property { kind, value };
-        if let Some(existing) = self.properties.get_mut(name) {
+        if let Some(existing) = self.properties.get_mut(&key) {
             existing.set(&prop);
         } else {
-            self.properties.insert(name, &prop);
+            self.properties.insert(&key, &prop);
         }
     }
 
     /// Loads the value of a property. For methods, this allocates a
     /// bound method closure.
-    pub unsafe fn property_value(&self, prop: &Property) -> u64 {
+    pub unsafe fn property_value(&self, prop: &Property) -> NanBox {
         match prop.kind {
             PropertyKind::Field => prop.value,
             PropertyKind::Method => {
-                let method = nanbox::to_closure(prop.value).unwrap().as_ref().unwrap();
+                let method = nanbox::to_closure(prop.value.0).unwrap().as_ref().unwrap();
                 let raw = Closure::alloc(method.capture_count, method.bound_arg_count + 1);
                 let bm = raw.as_mut().unwrap();
                 bm.function.set(&method.function);
@@ -334,7 +335,7 @@ impl Object {
                 }
                 let r = nanbox::from_object(self as *const Object);
                 bm.set_bound_arg(method.bound_arg_count, r);
-                nanbox::from_closure(bm)
+                NanBox(nanbox::from_closure(bm))
             }
         }
     }
@@ -343,14 +344,13 @@ impl Object {
 /// A value held by an object.
 pub struct Property {
     pub kind: PropertyKind,
-    pub value: u64,
+    pub value: NanBox,
 }
 
 impl Property {
-    pub fn init(&mut self, kind: PropertyKind, value: u64) {
+    pub fn init(&mut self, kind: PropertyKind, value: NanBox) {
         self.kind = kind;
-        self.value = value;
-        HEAP.write_barrier_nanbox(&self.value as *const u64 as usize, value);
+        self.value.set(&value);
     }
 }
 
