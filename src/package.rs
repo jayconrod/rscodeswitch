@@ -1,7 +1,7 @@
 use crate::data::{self, Slice};
 use crate::heap::{self, Handle, Ptr, Set, HEAP};
 use crate::inst;
-use crate::nanbox::{self, NanBox, NanBoxKey};
+use crate::nanbox::{NanBox, NanBoxKey};
 use crate::pos::{FunctionLineMap, PackageLineMap};
 
 use std::error::Error;
@@ -323,7 +323,7 @@ impl Object {
         match prop.kind {
             PropertyKind::Field => prop.value,
             PropertyKind::Method => {
-                let method = nanbox::to_closure(prop.value.0).unwrap().as_ref().unwrap();
+                let method: &Closure = prop.value.try_into().unwrap();
                 let raw = Closure::alloc(method.capture_count, method.bound_arg_count + 1);
                 let bm = raw.as_mut().unwrap();
                 bm.function.set(&method.function);
@@ -333,9 +333,9 @@ impl Object {
                 for i in 0..method.bound_arg_count {
                     bm.set_bound_arg(i, method.bound_arg(i));
                 }
-                let r = nanbox::from_object(self as *const Object);
-                bm.set_bound_arg(method.bound_arg_count, r);
-                NanBox(nanbox::from_closure(bm))
+                let r = NanBox::from(self);
+                bm.set_bound_arg(method.bound_arg_count, r.0);
+                NanBox::from(bm)
             }
         }
     }

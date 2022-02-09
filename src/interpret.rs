@@ -111,7 +111,7 @@ impl<'w> Interpreter<'w> {
         // push! adds a given value to the top of the stack.
         macro_rules! push {
             ($e:expr) => {{
-                let v = $e;
+                let v: u64 = $e;
                 sp -= 8;
                 *(sp as *mut u64) = v;
             }};
@@ -170,30 +170,10 @@ impl<'w> Interpreter<'w> {
                 push!(v);
             }};
             ($op:tt, lua) => {{
-                let r = pop!();
-                let l = pop!();
-                let v = if let Some(li) = nanbox::to_int(l) {
-                    if let Some(ri) = nanbox::to_int(r) {
-                        li $op ri
-                    } else if let Some(rf) = nanbox::to_f64(r) {
-                        (li as f64) $op rf
-                    } else {
-                        true $op false
-                    }
-                } else if let Some(lf) = nanbox::to_f64(l) {
-                    if let Some(ri) = nanbox::to_int(r) {
-                        lf $op (ri as f64)
-                    } else if let Some(rf) = nanbox::to_f64(r) {
-                        lf $op rf
-                    } else {
-                        true $op false
-                    }
-                } else if let (Some(ls), Some(rs)) = (nanbox::to_string(l), nanbox::to_string(r)) {
-                    ls $op rs
-                } else {
-                    l $op r
-                };
-                push!(nanbox::from_bool(v));
+                let r = NanBox(pop!());
+                let l = NanBox(pop!());
+                let v = NanBox::from(l $op r);
+                push!(v.0);
             }};
             ($op:tt, $ty:ty) => {{
                 let r = pop!() as $ty;
@@ -217,23 +197,15 @@ impl<'w> Interpreter<'w> {
                 let v = (l $op r) as u64;
                 push!(v);
             }};
-            ($op:tt, lua) => {{
-                let r = pop!();
-                let l = pop!();
-                let v = if let (Some(li), Some(ri)) = (nanbox::to_int(l), nanbox::to_int(r)) {
-                    li $op ri
-                } else if let (Some(li), Some(rf)) = (nanbox::to_int(l), nanbox::to_f64(r)) {
-                    (li as f64) $op rf
-                } else if let (Some(lf), Some(ri)) = (nanbox::to_f64(l), nanbox::to_int(r)) {
-                    lf $op (ri as f64)
-                } else if let (Some(lf), Some(rf)) = (nanbox::to_f64(l), nanbox::to_f64(r)) {
-                    lf $op rf
-                } else if let (Some(ls), Some(rs)) = (nanbox::to_string(l), nanbox::to_string(r)) {
-                    ls $op rs
+            ($ordmethod:ident, lua) => {{
+                let r = NanBox(pop!());
+                let l = NanBox(pop!());
+                let v = if let Some(c) = l.partial_cmp(&r) {
+                    NanBox::from(c.$ordmethod())
                 } else {
-                    return_errorf!("can't compare values: {} and {}", nanbox::debug_type(l), nanbox::debug_type(r))
+                    return_errorf!("can't compare values: {:?} and {:?}", l, r);
                 };
-                push!(nanbox::from_bool(v));
+                push!(v.0)
             }};
             ($op:tt, $ty:ty) => {{
                 let r = pop!() as $ty;
@@ -259,19 +231,19 @@ impl<'w> Interpreter<'w> {
                 push_float!(v, f64);
             }};
             ($op:tt, $checked:ident, lua) => {{
-                let r = pop!();
-                let l = pop!();
-                let v = if let (Some(li), Some(ri)) = (nanbox::to_int(l), nanbox::to_int(r)) {
+                let r = NanBox(pop!());
+                let l = NanBox(pop!());
+                let v = if let (Ok(li), Ok(ri)) = (<NanBox as TryInto<i64>>::try_into(l), <NanBox as TryInto<i64>>::try_into(r)) {
                     match li.$checked(ri) {
                         Some(vi) => maybe_box_int!(vi),
-                        None => nanbox::from_f64((li as f64) $op (ri as f64))
+                        None => NanBox::from((li as f64) $op (ri as f64))
                     }
-                } else if let (Some(lf), Some(rf)) = (nanbox::num_as_f64(l), nanbox::num_as_f64(r)) {
-                    nanbox::from_f64(lf $op rf)
+                } else if let (Ok(lf), Ok(rf)) = (l.as_f64(), r.as_f64()) {
+                    NanBox::from(lf $op rf)
                 } else {
-                    return_errorf!("arithmetic operands must both be numbers: {} and {}", nanbox::debug_type(l), nanbox::debug_type(r))
+                    return_errorf!("arithmetic operands must both be numbers: {:?} and {:?}", l, r)
                 };
-                push!(v);
+                push!(v.0);
             }};
             ($wrapping:ident, $ty:ty) => {{
                 let r = pop!() as $ty;
@@ -295,16 +267,15 @@ impl<'w> Interpreter<'w> {
                 push_float!(r, f64);
             }};
             ($op:tt, lua) => {{
-                let o = pop!();
-                let v = if let Some(vi) = nanbox::to_int(o) {
-                    let r = $op vi;
-                    maybe_box_int!(r)
-                } else if let Some(vf) = nanbox::to_f64(o) {
-                    nanbox::from_f64($op vf)
+                let o = NanBox(pop!());
+                let v = if let Ok(i) = <NanBox as TryInto<i64>>::try_into(o) {
+                    maybe_box_int!($op i)
+                } else if let Ok(f) = o.as_f64() {
+                    NanBox::from($op f)
                 } else {
-                    return_errorf!("arithmetic operand must be number: {}", nanbox::debug_type(o))
+                    return_errorf!("arithmetic operand must be number: {:?}", o)
                 };
-                push!(v);
+                push!(v.0);
             }};
             ($op:tt, $ty:ty) => {{
                 let o = pop!() as $ty;
@@ -390,14 +361,12 @@ impl<'w> Interpreter<'w> {
         // allocated.
         macro_rules! maybe_box_int {
             ($i:expr) => {{
-                let i = $i;
-                if nanbox::fits_in_small_int(i) {
-                    nanbox::from_small_int(i)
-                } else {
+                let i: i64 = $i;
+                NanBox::try_from(i).unwrap_or_else(|_| {
                     let bi = HEAP.allocate(mem::size_of::<i64>()) as *mut i64;
                     *bi = i;
-                    nanbox::from_big_int(bi)
-                }
+                    NanBox::from(bi)
+                })
             }};
         }
 
@@ -406,8 +375,8 @@ impl<'w> Interpreter<'w> {
         // all other values are true.
         macro_rules! lua_value_as_bool {
             ($v:expr) => {{
-                let v = $v;
-                v != nanbox::from_bool(false) && v != nanbox::from_nil()
+                let v: NanBox = $v;
+                !v.is_nil() && <NanBox as TryInto<bool>>::try_into(v).unwrap_or(true)
             }};
         }
 
@@ -417,16 +386,13 @@ impl<'w> Interpreter<'w> {
         // any other value.
         macro_rules! lua_value_as_int {
             ($v:expr) => {{
-                let v = $v;
-                if let Some(i) = nanbox::num_as_i64(v) {
+                let v: NanBox = $v;
+                if let Ok(i) = v.as_i64() {
                     i
-                } else if nanbox::is_number(v) {
+                } else if v.is_number() {
                     return_errorf!("number has no integer representation")
                 } else {
-                    return_errorf!(
-                        "cannot perform numeric operation on {} value",
-                        nanbox::debug_type(v)
-                    )
+                    return_errorf!("cannot perform numeric operation on {:?} value", v)
                 }
             }};
         }
@@ -436,20 +402,17 @@ impl<'w> Interpreter<'w> {
         // values cause errors.
         macro_rules! lua_concat_op_as_string {
             ($v:expr) => {{
-                let v = $v;
-                if let Some(s) = nanbox::to_string(v) {
+                let v: NanBox = $v;
+                if let Ok(s) = <NanBox as TryInto<&data::String>>::try_into(v) {
                     s
-                } else if let Some(n) = nanbox::to_int(v) {
-                    let s = n.to_string();
-                    data::String::from_bytes(s.as_bytes())
-                } else if let Some(n) = nanbox::to_f64(v) {
-                    let s = n.to_string();
-                    data::String::from_bytes(s.as_bytes())
+                } else if let Ok(i) = <NanBox as TryInto<i64>>::try_into(v) {
+                    let s = i.to_string();
+                    data::String::from_bytes(s.as_bytes()).as_ref().unwrap()
+                } else if let Ok(f) = <NanBox as TryInto<f64>>::try_into(v) {
+                    let s = f.to_string();
+                    data::String::from_bytes(s.as_bytes()).as_ref().unwrap()
                 } else {
-                    return_errorf!(
-                        "can't convert concatenation operand to string: {}",
-                        nanbox::debug_type(v)
-                    )
+                    return_errorf!("can't convert concatenation operand to string: {:?}", v)
                 }
             }};
         }
@@ -460,12 +423,12 @@ impl<'w> Interpreter<'w> {
         // boxes, and pushes the result.
         macro_rules! lua_binop_bit {
             ($op:tt) => {{
-                let r = pop!();
-                let l = pop!();
+                let r = NanBox(pop!());
+                let l = NanBox(pop!());
                 let li = lua_value_as_int!(l);
                 let ri = lua_value_as_int!(r);
                 let v = li $op ri;
-                push!(maybe_box_int!(v));
+                push!(maybe_box_int!(v).0);
             }};
         }
 
@@ -473,7 +436,7 @@ impl<'w> Interpreter<'w> {
             ($callee:expr, $arg_count:expr) => {{
                 // TODO: support variadic functions
                 // TODO: support metatable calls
-                let callee = $callee;
+                let callee: &Closure = $callee;
                 let arg_count = ($arg_count) as usize;
                 let callee_func = callee.function.unwrap_ref();
 
@@ -504,7 +467,7 @@ impl<'w> Interpreter<'w> {
                     sp += (total_arg_count - param_count) * 8;
                 } else if total_arg_count < param_count {
                     for _ in 0..(param_count - total_arg_count) {
-                        push!(nanbox::from_nil());
+                        push!(NanBox::from_nil().0);
                     }
                 }
 
@@ -578,40 +541,38 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_LUA) => {
-                    let r = pop!();
-                    let l = pop!();
-                    let v = if let (Some(li), Some(ri)) = (nanbox::to_int(l), nanbox::to_int(r)) {
+                    let r = NanBox(pop!());
+                    let l = NanBox(pop!());
+                    let v = if let (Ok(li), Ok(ri)) = (
+                        <NanBox as TryInto<i64>>::try_into(l),
+                        <NanBox as TryInto<i64>>::try_into(r),
+                    ) {
                         match li.checked_add(ri) {
                             Some(vi) => maybe_box_int!(vi),
-                            None => nanbox::from_f64((li as f64) + (ri as f64)),
+                            None => NanBox::from((li as f64) + (ri as f64)),
                         }
-                    } else if let (Some(li), Some(rf)) = (nanbox::to_int(l), nanbox::to_f64(r)) {
-                        nanbox::from_f64((li as f64) + rf)
-                    } else if let (Some(lf), Some(ri)) = (nanbox::to_f64(l), nanbox::to_int(r)) {
-                        nanbox::from_f64(lf + (ri as f64))
-                    } else if let (Some(lf), Some(rf)) = (nanbox::to_f64(l), nanbox::to_f64(r)) {
-                        nanbox::from_f64(lf + rf)
-                    } else if let (Some(ls), Some(rs)) =
-                        (nanbox::to_string(l), nanbox::to_string(r))
-                    {
-                        let ls = ls.as_ref().unwrap();
-                        let rs = rs.as_ref().unwrap();
-                        nanbox::from_string(ls + rs)
+                    } else if let (Ok(lf), Ok(rf)) = (l.as_f64(), r.as_f64()) {
+                        NanBox::from(lf + rf)
+                    } else if let (Ok(ls), Ok(rs)) = (
+                        <NanBox as TryInto<&data::String>>::try_into(l),
+                        <NanBox as TryInto<&data::String>>::try_into(r),
+                    ) {
+                        NanBox::from(ls + rs)
                     } else {
                         return_errorf!(
-                            "arithmetic operands must both be numbers: {} and {}",
-                            nanbox::debug_type(l),
-                            nanbox::debug_type(r)
+                            "arithmetic operands must both be numbers: {:?} and {:?}",
+                            l,
+                            r
                         )
                     };
-                    push!(v);
+                    push!(v.0);
                     inst::size(inst::ADD)
                 }
                 (inst::ADJUSTV, inst::MODE_LUA) => {
                     let value_count = read_imm!(u16, 1) as usize;
                     if vc < value_count {
                         for _ in 0..(value_count - vc) {
-                            push!(nanbox::from_nil());
+                            push!(NanBox::from_nil().0);
                         }
                     } else {
                         sp += (vc - value_count) as usize * 8;
@@ -649,7 +610,7 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::BIF, inst::MODE_LUA) => {
                     let delta = read_imm!(i32, 1) as usize;
-                    if lua_value_as_bool!(pop!()) {
+                    if lua_value_as_bool!(NanBox(pop!())) {
                         ip = ((ip as isize) + (delta as isize) + 1) as *const u8;
                         continue;
                     }
@@ -659,23 +620,20 @@ impl<'w> Interpreter<'w> {
                 (inst::CALLNAMEDPROP, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
-                    let key = NanBox(nanbox::from_string(name)).try_into().unwrap();
+                    let key = NanBox::from(name).try_into().unwrap();
                     let arg_count = read_imm!(u16, 5) as usize;
                     let receiver_addr = sp + arg_count * 8;
-                    let receiver = *(receiver_addr as *const u64);
-                    let receiver_obj = match nanbox::to_object(receiver) {
-                        Some(o) => o.as_ref().unwrap(),
-                        _ => return_errorf!(
-                            "receiver is not an object: {}",
-                            nanbox::debug_type(receiver)
-                        ),
+                    let receiver = NanBox(*(receiver_addr as *const u64));
+                    let receiver_obj: &Object = match receiver.try_into() {
+                        Ok(o) => o,
+                        _ => return_errorf!("receiver is not an object: {:?}", receiver),
                     };
                     let prop = match receiver_obj.property(key) {
                         Some(p) => p,
                         _ => return_errorf!("property {} is not defined", name),
                     };
-                    let callee = match prop.value.to_closure() {
-                        Some(c) => c.as_ref().unwrap(),
+                    let callee: &Closure = match prop.value.try_into() {
+                        Ok(c) => c,
                         _ => return_errorf!("property {} is not a function", name),
                     };
                     let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
@@ -698,23 +656,20 @@ impl<'w> Interpreter<'w> {
                 (inst::CALLNAMEDPROPWITHPROTOTYPE, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
-                    let key = NanBox::from_string(name).try_into().unwrap();
+                    let key = NanBox::from(name).try_into().unwrap();
                     let arg_count = read_imm!(u16, 5) as usize;
                     let prototype_addr = sp + arg_count * 8;
-                    let prototype = *(prototype_addr as *const u64);
-                    let prototype_obj = match nanbox::to_object(prototype) {
-                        Some(p) => p.as_ref().unwrap(),
-                        _ => return_errorf!(
-                            "prototype is not an object: {}",
-                            nanbox::debug_type(prototype)
-                        ),
+                    let prototype = NanBox(*(prototype_addr as *const u64));
+                    let prototype_obj: &Object = match prototype.try_into() {
+                        Ok(p) => p,
+                        _ => return_errorf!("prototype is not an object: {:?}", prototype),
                     };
                     let prop = match prototype_obj.property(key) {
                         Some(p) => p,
                         _ => return_errorf!("property {} is not defined", key),
                     };
-                    let callee = match prop.value.to_closure() {
-                        Some(c) => c.as_ref().unwrap(),
+                    let callee: &Closure = match prop.value.try_into() {
+                        Ok(c) => c,
                         _ => return_errorf!("property {} is not a function", name),
                     };
                     let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
@@ -734,13 +689,10 @@ impl<'w> Interpreter<'w> {
                 (inst::CALLVALUE, inst::MODE_LUA) => {
                     let arg_count = read_imm!(u16, 1) as usize;
                     let callee_addr = sp + arg_count * 8;
-                    let raw_callee = *(callee_addr as *const u64);
-                    let callee = match nanbox::to_closure(raw_callee) {
-                        Some(c) => c.as_ref().unwrap(),
-                        _ => return_errorf!(
-                            "called value is not a function: {}",
-                            nanbox::debug_type(raw_callee)
-                        ),
+                    let raw_callee = NanBox(*(callee_addr as *const u64));
+                    let callee = match raw_callee.try_into() {
+                        Ok(c) => c,
+                        _ => return_errorf!("called value is not a function: {:?}", raw_callee),
                     };
                     // Remove the callee from the stack before the call.
                     // CALLNAMEDPROP does this too when the called property
@@ -752,13 +704,10 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::CALLVALUEV, inst::MODE_LUA) => {
                     let callee_addr = sp + vc * 8;
-                    let raw_callee = *(callee_addr as *const u64);
-                    let callee = match nanbox::to_closure(raw_callee) {
-                        Some(c) => c.as_ref().unwrap(),
-                        _ => return_errorf!(
-                            "called value is not a function: {}",
-                            nanbox::debug_type(raw_callee)
-                        ),
+                    let raw_callee = NanBox(*(callee_addr as *const u64));
+                    let callee = match raw_callee.try_into() {
+                        Ok(c) => c,
+                        _ => return_errorf!("called value is not a function: {:?}", raw_callee),
                     };
                     shift_args!(vc, 1);
                     lua_call_closure!(callee, vc);
@@ -821,20 +770,18 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_LUA) => {
-                    let r = pop!();
-                    let l = pop!();
-                    let v = if let (Some(lf), Some(rf)) =
-                        (nanbox::num_as_f64(l), nanbox::num_as_f64(r))
-                    {
-                        lf / rf
+                    let r = NanBox(pop!());
+                    let l = NanBox(pop!());
+                    let v = if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
+                        NanBox::from(lf / rf)
                     } else {
                         return_errorf!(
-                            "arithmetic operands must both be numbers: {} and {}",
-                            nanbox::debug_type(l),
-                            nanbox::debug_type(r)
+                            "arithmetic operands must both be numbers: {:?} and {:?}",
+                            l,
+                            r
                         )
                     };
-                    push!(nanbox::from_f64(v));
+                    push!(v.0);
                     inst::size(inst::DIV)
                 }
                 (inst::DUP, inst::MODE_I64) => {
@@ -859,36 +806,35 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::EQ)
                 }
                 (inst::EXP, inst::MODE_LUA) => {
-                    let r = pop!();
-                    let l = pop!();
-                    let v = match (nanbox::num_as_f64(l), nanbox::num_as_f64(r)) {
-                        (Some(lf), Some(rf)) => nanbox::from_f64(f64::powf(lf, rf)),
-                        _ => return_errorf!(
-                            "arithmetic operands must both be numbers: {} and {}",
-                            nanbox::debug_type(l),
-                            nanbox::debug_type(r)
-                        ),
+                    let r = NanBox(pop!());
+                    let l = NanBox(pop!());
+                    let v = if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
+                        NanBox::from(f64::powf(lf, rf))
+                    } else {
+                        return_errorf!(
+                            "arithmetic operands must both be numbers: {:?} and {:?}",
+                            l,
+                            r
+                        )
                     };
-                    push!(v);
+                    push!(v.0);
                     inst::size(inst::EXP)
                 }
                 (inst::FLOORDIV, inst::MODE_LUA) => {
-                    let r = pop!();
-                    let l = pop!();
-                    let v = if let (Some(li), Some(ri)) = (nanbox::to_int(l), nanbox::to_int(r)) {
+                    let r = NanBox(pop!());
+                    let l = NanBox(pop!());
+                    let v = if let (Ok(li), Ok(ri)) = (l.as_i64(), r.as_i64()) {
                         maybe_box_int!(li / ri)
-                    } else if let (Some(lf), Some(rf)) =
-                        (nanbox::num_as_f64(l), nanbox::num_as_f64(r))
-                    {
-                        nanbox::from_f64(lf.floor() / rf.floor())
+                    } else if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
+                        NanBox::from(lf.floor() / rf.floor())
                     } else {
                         return_errorf!(
-                            "arithmetic operands must both be numbers: {} and {}",
-                            nanbox::debug_type(l),
-                            nanbox::debug_type(r)
+                            "arithmetic operands must both be numbers: {:?} and {:?}",
+                            l,
+                            r
                         )
                     };
-                    push!(v);
+                    push!(v.0);
                     inst::size(inst::FLOORDIV)
                 }
                 (inst::FUNCTION, inst::MODE_I64) => {
@@ -938,7 +884,7 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::GE)
                 }
                 (inst::GE, inst::MODE_LUA) => {
-                    binop_cmp!(>=, lua);
+                    binop_cmp!(is_ge, lua);
                     inst::size(inst::GE)
                 }
                 (inst::GT, inst::MODE_I64) => {
@@ -982,7 +928,7 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::GT)
                 }
                 (inst::GT, inst::MODE_LUA) => {
-                    binop_cmp!(>, lua);
+                    binop_cmp!(is_gt, lua);
                     inst::size(inst::GT)
                 }
                 (inst::LE, inst::MODE_I64) => {
@@ -1026,7 +972,7 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_LUA) => {
-                    binop_cmp!(<=, lua);
+                    binop_cmp!(is_le, lua);
                     inst::size(inst::LE)
                 }
                 (inst::LOAD, inst::MODE_I64) => {
@@ -1077,9 +1023,9 @@ impl<'w> Interpreter<'w> {
                 (inst::LOADINDEXPROPORNIL, inst::MODE_LUA) => {
                     let index = NanBox(pop!());
                     let raw_receiver = NanBox(pop!());
-                    let receiver = match raw_receiver.to_object() {
-                        Some(o) => o.as_ref().unwrap(),
-                        None => return_errorf!("value is not an object: {:?}", raw_receiver),
+                    let receiver: &Object = match raw_receiver.try_into() {
+                        Ok(o) => o,
+                        _ => return_errorf!("value is not an object: {:?}", raw_receiver),
                     };
                     let v = match index.try_into() {
                         Err(_) => NanBox::from_nil(),
@@ -1100,14 +1046,11 @@ impl<'w> Interpreter<'w> {
                 (inst::LOADNAMEDPROP, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
-                    let key = NanBox::from_string(name).try_into().unwrap();
-                    let raw_receiver = pop!();
-                    let receiver = match nanbox::to_object(raw_receiver) {
-                        Some(o) => o.as_ref().unwrap(),
-                        None => return_errorf!(
-                            "value is not an object: {}",
-                            nanbox::debug_type(raw_receiver)
-                        ),
+                    let key = NanBox::from(name).try_into().unwrap();
+                    let raw_receiver = NanBox(pop!());
+                    let receiver: &Object = match raw_receiver.try_into() {
+                        Ok(o) => o,
+                        _ => return_errorf!("value is not an object: {:?}", raw_receiver),
                     };
                     let prop = match receiver.property(key) {
                         Some(p) => p,
@@ -1120,14 +1063,11 @@ impl<'w> Interpreter<'w> {
                 (inst::LOADNAMEDPROPORNIL, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
-                    let key = NanBox::from_string(name).try_into().unwrap();
-                    let receiver = pop!();
-                    let receiver_obj = match nanbox::to_object(receiver) {
-                        Some(o) => o.as_ref().unwrap(),
-                        None => return_errorf!(
-                            "value is not an object: {}",
-                            nanbox::debug_type(receiver)
-                        ),
+                    let key = NanBox::from(name).try_into().unwrap();
+                    let receiver = NanBox(pop!());
+                    let receiver_obj: &Object = match receiver.try_into() {
+                        Ok(o) => o,
+                        _ => return_errorf!("value is not an object: {:?}", receiver),
                     };
                     let value = match receiver_obj.property(key) {
                         Some(p) => receiver_obj.property_value(p),
@@ -1144,13 +1084,13 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::LOADPROTOTYPE)
                 }
                 (inst::LOADPROTOTYPE, inst::MODE_LUA) => {
-                    let v = pop!();
-                    let p = if let Some(o) = nanbox::to_object(v) {
-                        o.as_ref().unwrap().prototype.unwrap()
-                    } else if let Some(c) = nanbox::to_closure(v) {
-                        c.as_ref().unwrap().prototype.unwrap()
+                    let v = NanBox(pop!());
+                    let p = if let Ok(o) = <NanBox as TryInto<&Object>>::try_into(v) {
+                        o.prototype.unwrap()
+                    } else if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(v) {
+                        c.prototype.unwrap()
                     } else {
-                        return_errorf!("value is not an object: {}", nanbox::debug_type(v))
+                        return_errorf!("value is not an object: {:?}", v)
                     };
                     push!(p as *const Object as u64);
                     inst::size(inst::LOADPROTOTYPE)
@@ -1196,7 +1136,7 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_LUA) => {
-                    binop_cmp!(<, lua);
+                    binop_cmp!(is_lt, lua);
                     inst::size(inst::LT)
                 }
                 (inst::MOD, inst::MODE_I64) => {
@@ -1240,26 +1180,24 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_LUA) => {
-                    let r = pop!();
-                    let l = pop!();
-                    let v = if let (Some(li), Some(ri)) = (nanbox::to_int(l), nanbox::to_int(r)) {
+                    let r = NanBox(pop!());
+                    let l = NanBox(pop!());
+                    let v = if let (Ok(li), Ok(ri)) = (l.as_i64(), r.as_i64()) {
                         if ri == 0 {
                             return_errorf!("attempt to perform n%0");
                         }
                         let vi = li.wrapping_rem(ri);
                         maybe_box_int!(vi)
-                    } else if let (Some(lf), Some(rf)) =
-                        (nanbox::num_as_f64(l), nanbox::num_as_f64(r))
-                    {
-                        nanbox::from_f64(lf.floor() % rf.floor())
+                    } else if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
+                        NanBox::from(lf.floor() % rf.floor())
                     } else {
                         return_errorf!(
-                            "arithmetic operands must both be numbers: {} and {}",
-                            nanbox::debug_type(l),
-                            nanbox::debug_type(r)
+                            "arithmetic operands must both be numbers: {:?} and {:?}",
+                            l,
+                            r
                         )
                     };
-                    push!(v);
+                    push!(v.0);
                     inst::size(inst::MOD)
                 }
                 (inst::MUL, inst::MODE_I64) => {
@@ -1309,63 +1247,63 @@ impl<'w> Interpreter<'w> {
                 (inst::NANBOX, inst::MODE_I64) | (inst::NANBOX, inst::MODE_U64) => {
                     let i = pop!() as i64;
                     let v = maybe_box_int!(i);
-                    push!(v);
+                    push!(v.0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_I32) => {
-                    push!(nanbox::from_small_int(pop!() as i32 as i64));
+                    push!(NanBox::try_from(pop!() as i32 as i64).unwrap().0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_I16) => {
-                    push!(nanbox::from_small_int(pop!() as i16 as i64));
+                    push!(NanBox::try_from(pop!() as i16 as i64).unwrap().0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_I8) => {
-                    push!(nanbox::from_small_int(pop!() as i8 as i64));
+                    push!(NanBox::try_from(pop!() as i8 as i64).unwrap().0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_U32) => {
-                    push!(nanbox::from_small_int(pop!() as u32 as i64));
+                    push!(NanBox::try_from(pop!() as u32 as i64).unwrap().0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_U16) => {
-                    push!(nanbox::from_small_int(pop!() as u16 as i64));
+                    push!(NanBox::try_from(pop!() as u16 as i64).unwrap().0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_U8) => {
-                    push!(nanbox::from_small_int(pop!() as u8 as i64));
+                    push!(NanBox::try_from(pop!() as u8 as i64).unwrap().0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_F64) => {
-                    push!(nanbox::from_f64(f64::from_bits(pop!())));
+                    push!(NanBox::from(f64::from_bits(pop!())).0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_F32) => {
-                    push!(nanbox::from_f64(f32::from_bits(pop!() as u32) as f64));
+                    push!(NanBox::from(f32::from_bits(pop!() as u32) as f64).0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_BOOL) => {
                     let v = pop!();
-                    push!(nanbox::from_bool(v != 0));
+                    push!(NanBox::from(v != 0).0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_PTR) => {
                     if pop!() != 0 {
                         return_errorf!("can't box non-zero value as nil");
                     }
-                    push!(nanbox::from_nil());
+                    push!(NanBox::from_nil().0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_STRING) => {
-                    push!(nanbox::from_string(pop!() as usize as *const data::String));
+                    push!(NanBox::from(pop!() as usize as *const data::String).0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_CLOSURE) => {
-                    push!(nanbox::from_closure(pop!() as usize as *const Closure));
+                    push!(NanBox::from(pop!() as usize as *const Closure).0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NANBOX, inst::MODE_OBJECT) => {
-                    push!(nanbox::from_object(pop!() as usize as *const Object));
+                    push!(NanBox::from(pop!() as usize as *const Object).0);
                     inst::size(inst::NANBOX)
                 }
                 (inst::NE, inst::MODE_I64) => {
@@ -1445,10 +1383,10 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::NOT)
                 }
                 (inst::NOT, inst::MODE_LUA) => {
-                    let o = pop!();
+                    let o = NanBox(pop!());
                     let b = lua_value_as_bool!(o);
-                    let n = nanbox::from_bool(!b);
-                    push!(n);
+                    let n = NanBox::from(!b);
+                    push!(n.0);
                     inst::size(inst::NOT)
                 }
                 (inst::NOTB, inst::MODE_I64) => {
@@ -1468,10 +1406,10 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::NOTB)
                 }
                 (inst::NOTB, inst::MODE_LUA) => {
-                    let v = pop!();
+                    let v = NanBox(pop!());
                     let vi = lua_value_as_int!(v);
                     let b = !vi;
-                    push!(maybe_box_int!(b));
+                    push!(maybe_box_int!(b).0);
                     inst::size(inst::NOTB)
                 }
                 (inst::OR, inst::MODE_LUA) => {
@@ -1532,8 +1470,8 @@ impl<'w> Interpreter<'w> {
                     continue;
                 }
                 (inst::SHL, inst::MODE_LUA) => {
-                    let r = pop!();
-                    let l = pop!();
+                    let r = NanBox(pop!());
+                    let l = NanBox(pop!());
                     let li = lua_value_as_int!(l) as u64;
                     let ri = lua_value_as_int!(r);
                     let vi = if ri >= 64 {
@@ -1545,12 +1483,12 @@ impl<'w> Interpreter<'w> {
                     } else {
                         0
                     };
-                    push!(maybe_box_int!(vi as i64));
+                    push!(maybe_box_int!(vi as i64).0);
                     inst::size(inst::SHL)
                 }
                 (inst::SHR, inst::MODE_LUA) => {
-                    let r = pop!();
-                    let l = pop!();
+                    let r = NanBox(pop!());
+                    let l = NanBox(pop!());
                     let li = lua_value_as_int!(l) as u64;
                     let ri = lua_value_as_int!(r);
                     let vi = if ri >= 64 {
@@ -1562,7 +1500,7 @@ impl<'w> Interpreter<'w> {
                     } else {
                         0
                     };
-                    push!(maybe_box_int!(vi as i64));
+                    push!(maybe_box_int!(vi as i64).0);
                     inst::size(inst::SHR)
                 }
                 (inst::SETV, inst::MODE_LUA) => {
@@ -1622,9 +1560,9 @@ impl<'w> Interpreter<'w> {
                     let v = NanBox(pop!());
                     let i = NanBox(pop!());
                     let raw_receiver = NanBox(pop!());
-                    let receiver = match raw_receiver.to_object() {
-                        Some(o) => (o as *mut Object).as_mut().unwrap(),
-                        None => return_errorf!("value is not an object: {:?}", raw_receiver),
+                    let receiver: &mut Object = match raw_receiver.try_into() {
+                        Ok(o) => o,
+                        _ => return_errorf!("value is not an object: {:?}", raw_receiver),
                     };
                     let key = match i.try_into() {
                         Ok(key) => key,
@@ -1642,15 +1580,15 @@ impl<'w> Interpreter<'w> {
                 (inst::STOREMETHOD, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
-                    let key = NanBox::from_string(name).try_into().unwrap();
+                    let key = NanBox::from(name).try_into().unwrap();
                     let raw_method = NanBox(pop!());
-                    if raw_method.to_closure().is_none() {
-                        return_errorf!("method value is not a function: {}", raw_method);
+                    if raw_method.type_tag() != nanbox::TAG_CLOSURE {
+                        return_errorf!("method value is not a function: {:?}", raw_method);
                     }
-                    let raw_receiver = pop!();
-                    let receiver = match nanbox::to_object(raw_receiver) {
-                        Some(o) => (o as usize as *mut Object).as_mut().unwrap(),
-                        None => return_errorf!("value is not an object: {:?}", raw_receiver),
+                    let raw_receiver = NanBox(pop!());
+                    let receiver: &mut Object = match raw_receiver.try_into() {
+                        Ok(o) => o,
+                        _ => return_errorf!("value is not an object: {:?}", raw_receiver),
                     };
                     receiver.set_own_property(key, PropertyKind::Method, raw_method);
                     inst::size(inst::STOREMETHOD)
@@ -1658,12 +1596,12 @@ impl<'w> Interpreter<'w> {
                 (inst::STORENAMEDPROP, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
-                    let key = NanBox::from_string(name).try_into().unwrap();
+                    let key = NanBox::from(name).try_into().unwrap();
                     let v = NanBox(pop!());
                     let raw_receiver = NanBox(pop!());
-                    let receiver = match raw_receiver.to_object() {
-                        Some(o) => (o as usize as *mut Object).as_mut().unwrap(),
-                        None => return_errorf!("value is not an object: {:?}", raw_receiver),
+                    let receiver: &mut Object = match raw_receiver.try_into() {
+                        Ok(o) => o,
+                        _ => return_errorf!("value is not an object: {:?}", raw_receiver),
                     };
                     receiver.set_property(key, PropertyKind::Field, v);
                     inst::size(inst::STORENAMEDPROP)
@@ -1681,12 +1619,12 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::STOREPROTOTYPE)
                 }
                 (inst::STRCAT, inst::MODE_LUA) => {
-                    let r = pop!();
-                    let l = pop!();
-                    let ls = lua_concat_op_as_string!(l).as_ref().unwrap();
-                    let rs = lua_concat_op_as_string!(r).as_ref().unwrap();
+                    let r = NanBox(pop!());
+                    let l = NanBox(pop!());
+                    let ls = lua_concat_op_as_string!(l);
+                    let rs = lua_concat_op_as_string!(r);
                     let cs = ls + rs;
-                    push!(nanbox::from_string(cs));
+                    push!(NanBox::from(cs).0);
                     inst::size(inst::STRCAT)
                 }
                 (inst::STRING, inst::MODE_I64) => {
@@ -1772,19 +1710,16 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::SYS)
                 }
                 (inst::TOFLOAT, inst::MODE_LUA) => {
-                    let i = pop!();
-                    match nanbox::num_as_f64(i) {
-                        Some(o) => push!(o.to_bits()),
-                        None => return_errorf!(
-                            "could not convert value of type {} to float",
-                            nanbox::debug_type(i)
-                        ),
+                    let i = NanBox(pop!());
+                    match i.as_f64_imprecise() {
+                        Ok(o) => push!(o.to_bits()),
+                        _ => return_errorf!("could not convert value of type {:?} to float", i),
                     }
-                    inst::size(inst::TYPEOF)
+                    inst::size(inst::TOFLOAT)
                 }
                 (inst::TYPEOF, inst::MODE_LUA) => {
-                    let i = pop!();
-                    let o = nanbox::type_tag(i);
+                    let i = NanBox(pop!());
+                    let o = i.type_tag();
                     push!(o);
                     inst::size(inst::TYPEOF)
                 }
@@ -1824,7 +1759,7 @@ impl<'w> Interpreter<'w> {
     fn sys_print(&mut self, vs: &[u64]) -> Result<(), Error> {
         let mut sep = "";
         for v in vs {
-            let _ = write!(self.w, "{}{}", sep, nanbox::debug_str(*v));
+            let _ = write!(self.w, "{}{}", sep, NanBox(*v));
             sep = " ";
         }
         let _ = write!(self.w, "\n");

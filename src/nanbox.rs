@@ -5,50 +5,156 @@
 use crate::data;
 use crate::heap::{Set, HEAP};
 use crate::package::{Closure, Object};
+use std::cmp::{Ordering, PartialOrd};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 
-// TODO: convert everything to use NanBox type.
+/// NanBox encodes various types within the unused bits of IEEE-754 QNaN values
+/// that are not naturally produced by supported processors. This is useful for
+/// representing values in dynamically typed languages. Most operations may
+/// be performed on NaN-boxed values.
 #[derive(Clone, Copy)]
 pub struct NanBox(pub u64);
 
 impl NanBox {
+    /// Returns a 3-bit tag indicating what kind of value is boxed.
+    pub fn type_tag(&self) -> u64 {
+        if self.0 & QNAN == QNAN {
+            self.0 & TAG_MASK
+        } else {
+            TAG_FLOAT
+        }
+    }
+
     pub fn from_nil() -> NanBox {
-        NanBox(from_nil())
+        NanBox(QNAN | TAG_NIL)
     }
-    pub fn from_string(s: &data::String) -> NanBox {
-        NanBox(from_string(s))
+
+    pub fn is_nil(&self) -> bool {
+        self.0 == QNAN | TAG_NIL
     }
-    pub fn to_closure(&self) -> Option<*const Closure> {
-        to_closure(self.0)
+
+    pub fn as_i64(&self) -> ConvertResult<i64> {
+        <NanBox as TryInto<i64>>::try_into(*self).or_else(|_| {
+            match <NanBox as TryInto<f64>>::try_into(*self) {
+                Ok(f) if (f as i64) as f64 == f => Ok(f as i64),
+                _ => Err(ConvertError {}),
+            }
+        })
     }
-    pub fn to_object(&self) -> Option<*const Object> {
-        to_object(self.0)
+
+    pub fn as_i64_rounded(&self) -> ConvertResult<i64> {
+        <NanBox as TryInto<i64>>::try_into(*self).or_else(|_| {
+            match <NanBox as TryInto<f64>>::try_into(*self) {
+                Ok(f) => Ok(f as i64),
+                _ => Err(ConvertError {}),
+            }
+        })
+    }
+
+    pub fn as_f64(&self) -> ConvertResult<f64> {
+        <NanBox as TryInto<f64>>::try_into(*self).or_else(|_| {
+            match <NanBox as TryInto<i64>>::try_into(*self) {
+                Ok(i) if (i as f64) as i64 == i => Ok(i as f64),
+                _ => Err(ConvertError {}),
+            }
+        })
+    }
+
+    pub fn as_f64_imprecise(&self) -> ConvertResult<f64> {
+        <NanBox as TryInto<f64>>::try_into(*self).or_else(|_| {
+            match <NanBox as TryInto<i64>>::try_into(*self) {
+                Ok(i) => Ok(i as f64),
+                _ => Err(ConvertError {}),
+            }
+        })
+    }
+
+    pub fn is_number(&self) -> bool {
+        match self.type_tag() {
+            TAG_SMALL_INT | TAG_BIG_INT | TAG_FLOAT => true,
+            _ => false,
+        }
     }
 }
 
 impl Debug for NanBox {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.write_str(debug_type(self.0))
+        let s = match self.type_tag() {
+            TAG_NIL => "nil",
+            TAG_BOOL => "bool",
+            TAG_SMALL_INT | TAG_BIG_INT => "integer",
+            TAG_STRING => "string",
+            TAG_CLOSURE => "function",
+            TAG_OBJECT => "object",
+            TAG_FLOAT => "float",
+            _ => "unknown",
+        };
+        f.write_str(s)
     }
 }
 
 impl Display for NanBox {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.write_str(&debug_str(self.0))
+        let s = match self.type_tag() {
+            TAG_NIL => String::from("nil"),
+            TAG_BOOL => {
+                let b: bool = (*self).try_into().unwrap();
+                format!("{}", b)
+            }
+            TAG_SMALL_INT | TAG_BIG_INT => {
+                let i: i64 = (*self).try_into().unwrap();
+                format!("{}", i)
+            }
+            TAG_STRING => unsafe {
+                let s: *const data::String = (*self).try_into().unwrap();
+                format!("{}", s.as_ref().unwrap())
+            },
+            TAG_CLOSURE => String::from("<function>"),
+            TAG_OBJECT => String::from("<object>"),
+            TAG_FLOAT => {
+                let f: f64 = (*self).try_into().unwrap();
+                format!("{}", f)
+            }
+            _ => String::from("<unknown>"),
+        };
+        f.write_str(&s)
     }
 }
 
 impl PartialEq for NanBox {
     fn eq(&self, other: &NanBox) -> bool {
-        if let (Some(li), Some(ri)) = (num_as_i64(self.0), num_as_i64(other.0)) {
+        if let (Ok(li), Ok(ri)) = (self.as_i64(), other.as_i64()) {
             li == ri
-        } else if let (Some(lf), Some(rf)) = (to_f64(self.0), to_f64(other.0)) {
+        } else if let (Ok(lf), Ok(rf)) = (self.as_f64(), other.as_f64()) {
             lf == rf
-        } else if let (Some(ls), Some(rs)) = (to_string(self.0), to_string(other.0)) {
+        } else if let (Ok(ls), Ok(rs)) = (
+            <NanBox as TryInto<*const data::String>>::try_into(*self),
+            <NanBox as TryInto<*const data::String>>::try_into(*other),
+        ) {
             ls == rs
         } else {
             self.0 == other.0
+        }
+    }
+}
+
+impl PartialOrd for NanBox {
+    fn partial_cmp(&self, other: &NanBox) -> Option<Ordering> {
+        if let (Ok(li), Ok(ri)) = (
+            <NanBox as TryInto<i64>>::try_into(*self),
+            <NanBox as TryInto<i64>>::try_into(*other),
+        ) {
+            li.partial_cmp(&ri)
+        } else if let (Ok(lf), Ok(rf)) = (self.as_f64(), other.as_f64()) {
+            lf.partial_cmp(&rf)
+        } else if let (Ok(ls), Ok(rs)) = (
+            <NanBox as TryInto<&data::String>>::try_into(*self),
+            <NanBox as TryInto<&data::String>>::try_into(*other),
+        ) {
+            ls.partial_cmp(rs)
+        } else {
+            None
         }
     }
 }
@@ -60,22 +166,221 @@ impl Set for NanBox {
     }
 }
 
+impl From<bool> for NanBox {
+    fn from(b: bool) -> NanBox {
+        NanBox(QNAN | TAG_BOOL | (b as u64) << TAG_SIZE)
+    }
+}
+
+impl TryInto<bool> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<bool> {
+        if self.type_tag() == TAG_BOOL {
+            Ok(((self.0 >> TAG_SIZE) & 1) != 0)
+        } else {
+            Err(ConvertError {})
+        }
+    }
+}
+
+impl From<f64> for NanBox {
+    fn from(f: f64) -> NanBox {
+        NanBox(f.to_bits())
+    }
+}
+
+impl TryInto<f64> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<f64> {
+        if self.0 & QNAN != QNAN {
+            Ok(f64::from_bits(self.0))
+        } else {
+            Err(ConvertError {})
+        }
+    }
+}
+
+impl TryFrom<i64> for NanBox {
+    type Error = SmallIntError;
+    fn try_from(i: i64) -> Result<NanBox, Self::Error> {
+        if fits_in_small_int(i) {
+            let mask = (1 << SMALL_INT_BITS) - 1;
+            let ui = i as u64 & mask;
+            Ok(NanBox(QNAN | TAG_SMALL_INT | (ui << TAG_SIZE)))
+        } else {
+            Err(SmallIntError {})
+        }
+    }
+}
+
+impl TryInto<i64> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<i64> {
+        match self.type_tag() {
+            TAG_SMALL_INT => {
+                let bits = (self.0 & VALUE_MASK) as i64;
+                let shift_left = (64 - SMALL_INT_BITS) as i64;
+                let shift_right = shift_left + TAG_SIZE as i64;
+                Ok(bits << shift_left >> shift_right)
+            }
+            TAG_BIG_INT => {
+                let bi = (self.0 & !QNAN & !TAG_MASK) as usize as *const i64;
+                Ok(unsafe { *bi })
+            }
+            _ => Err(ConvertError {}),
+        }
+    }
+}
+
+impl From<*mut i64> for NanBox {
+    fn from(bi: *mut i64) -> NanBox {
+        NanBox(QNAN | TAG_BIG_INT | (bi as u64))
+    }
+}
+
+impl From<*const data::String> for NanBox {
+    fn from(s: *const data::String) -> NanBox {
+        assert!(!s.is_null());
+        NanBox(QNAN | TAG_STRING | s as u64)
+    }
+}
+
+impl TryInto<*const data::String> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<*const data::String> {
+        if self.0 & (QNAN | TAG_MASK) == QNAN | TAG_STRING {
+            Ok((self.0 & !QNAN & !TAG_MASK) as usize as *const data::String)
+        } else {
+            Err(ConvertError {})
+        }
+    }
+}
+
+impl From<&data::String> for NanBox {
+    fn from(s: &data::String) -> NanBox {
+        NanBox::from(s as *const data::String)
+    }
+}
+
+impl TryInto<&data::String> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<&'static data::String> {
+        self.try_into()
+            .map(|s: *const data::String| unsafe { s.as_ref().unwrap() })
+    }
+}
+
+impl From<*mut Closure> for NanBox {
+    fn from(c: *mut Closure) -> NanBox {
+        assert!(!c.is_null());
+        NanBox(QNAN | TAG_CLOSURE | c as u64)
+    }
+}
+
+impl From<*const Closure> for NanBox {
+    fn from(c: *const Closure) -> NanBox {
+        assert!(!c.is_null());
+        NanBox(QNAN | TAG_CLOSURE | c as u64)
+    }
+}
+
+impl TryInto<*mut Closure> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<*mut Closure> {
+        if self.0 & (QNAN | TAG_MASK) == QNAN | TAG_CLOSURE {
+            Ok((self.0 & !QNAN & !TAG_MASK) as usize as *mut Closure)
+        } else {
+            Err(ConvertError {})
+        }
+    }
+}
+
+impl From<&mut Closure> for NanBox {
+    fn from(c: &mut Closure) -> NanBox {
+        NanBox::from(c as *mut Closure)
+    }
+}
+
+impl TryInto<&Closure> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<&'static Closure> {
+        self.try_into()
+            .map(|c: *mut Closure| unsafe { c.as_ref().unwrap() })
+    }
+}
+
+impl TryInto<&mut Closure> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<&'static mut Closure> {
+        self.try_into()
+            .map(|c: *mut Closure| unsafe { c.as_mut().unwrap() })
+    }
+}
+
+impl From<*const Object> for NanBox {
+    fn from(o: *const Object) -> NanBox {
+        assert!(!o.is_null());
+        NanBox(QNAN | TAG_OBJECT | o as u64)
+    }
+}
+
+impl TryInto<*mut Object> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<*mut Object> {
+        if self.0 & (QNAN | TAG_MASK) == QNAN | TAG_OBJECT {
+            Ok((self.0 & !QNAN & !TAG_MASK) as usize as *mut Object)
+        } else {
+            Err(ConvertError {})
+        }
+    }
+}
+
+impl From<&mut Object> for NanBox {
+    fn from(c: &mut Object) -> NanBox {
+        NanBox::from(c as *const Object)
+    }
+}
+
+impl TryInto<&mut Object> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<&'static mut Object> {
+        self.try_into()
+            .map(|c: *mut Object| unsafe { c.as_mut().unwrap() })
+    }
+}
+
+impl From<&Object> for NanBox {
+    fn from(c: &Object) -> NanBox {
+        NanBox::from(c as *const Object)
+    }
+}
+
+impl TryInto<&Object> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<&'static Object> {
+        self.try_into()
+            .map(|c: *mut Object| unsafe { c.as_ref().unwrap() })
+    }
+}
+
+/// A NaN-boxed value that may be used as a hash table key. Actual NaN values
+/// are not allowed, since they don't compare equal to themselves.
+///
+/// NaNBoxKey implements Eq and Hash. Like NanBox, two numbers are equal if
+/// they are numerically equal, even if they have different representations.
+/// For example, a small integer 0 is equal to a big integer 0 as well as
+/// float 0.0 and -0.0
 #[derive(Clone, Copy, Debug)]
 pub struct NanBoxKey(u64);
 
 impl TryFrom<NanBox> for NanBoxKey {
     type Error = NanBoxKeyError;
     fn try_from(v: NanBox) -> Result<NanBoxKey, Self::Error> {
-        if let Some(f) = to_f64(v.0) {
-            if f.is_nan() {
-                return Err(NanBoxKeyError {});
-            }
-            let i = f as i64;
-            if i as f64 == f && fits_in_small_int(i) {
-                return Ok(NanBoxKey(from_small_int(i)));
-            }
+        let fr: ConvertResult<f64> = v.try_into();
+        match fr {
+            Ok(f) if f.is_nan() => Err(NanBoxKeyError {}),
+            _ => Ok(NanBoxKey(v.0)),
         }
-        Ok(NanBoxKey(v.0))
     }
 }
 
@@ -102,15 +407,13 @@ impl Eq for NanBoxKey {}
 
 impl Hash for NanBoxKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        if let Some(i) = num_as_i64(self.0) {
-            i.hash(state)
-        } else if let Some(f) = to_f64(self.0) {
-            debug_assert!(!f.is_nan());
-            self.0.hash(state);
-        } else if let Some(s) = to_string(self.0) {
-            s.hash(state);
+        let d = NanBox(self.0);
+        if let Ok(i) = d.as_i64() {
+            i.hash(state);
+        } else if let Ok(s) = <NanBox as TryInto<&data::String>>::try_into(d) {
+            s.hash(state)
         } else {
-            self.0.hash(state);
+            self.0.hash(state)
         }
     }
 }
@@ -124,13 +427,33 @@ impl Display for NanBoxKeyError {
     }
 }
 
+#[derive(Debug)]
+pub struct ConvertError {}
+
+impl Display for ConvertError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str("could not convert nanboxed value to desired type")
+    }
+}
+
+type ConvertResult<T> = std::result::Result<T, ConvertError>;
+
+#[derive(Debug)]
+pub struct SmallIntError {}
+
+impl Display for SmallIntError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str("integer is too big to be represented as a NaN-boxed small int")
+    }
+}
+
 /// Basic encoding for IEEE quiet NaN values. The exponent bits are all set, and
 /// the two high mantissa bits are set. The remaining 51 bits of the mantissa
 /// may be used to encode boxed values. The sign bit is unused.
 const QNAN: u64 = 0x7ffc_0000_0000_0000;
 
 /// The low three bits of the mantissa indicate what kind of value is boxed.
-const TAG_MASK: u64 = 7;
+pub const TAG_MASK: u64 = 7;
 pub const TAG_SIZE: u64 = 3;
 pub const TAG_NIL: u64 = 0;
 pub const TAG_BOOL: u64 = 1;
@@ -144,206 +467,8 @@ pub const TAG_FLOAT: u64 = 8;
 const VALUE_MASK: u64 = 0x0003_ffff_ffff_ffff;
 const SMALL_INT_BITS: u64 = 47;
 
-pub fn type_tag(v: u64) -> u64 {
-    if v & QNAN == QNAN {
-        v & TAG_MASK
-    } else {
-        TAG_FLOAT
-    }
-}
-
-pub fn from_nil() -> u64 {
-    QNAN | TAG_NIL
-}
-
-pub fn is_nil(v: u64) -> bool {
-    v == QNAN | TAG_NIL
-}
-
-pub fn from_bool(b: bool) -> u64 {
-    QNAN | TAG_BOOL | (b as u64) << TAG_SIZE
-}
-
-pub fn to_bool(v: u64) -> Option<bool> {
-    if v & (QNAN | TAG_MASK) == QNAN | TAG_BOOL {
-        Some(v & VALUE_MASK & !TAG_MASK != 0)
-    } else {
-        None
-    }
-}
-
-pub fn from_f64(n: f64) -> u64 {
-    n.to_bits()
-}
-
-pub fn to_f64(v: u64) -> Option<f64> {
-    if v & QNAN == QNAN {
-        None
-    } else {
-        Some(f64::from_bits(v))
-    }
-}
-
-pub fn num_as_f64(v: u64) -> Option<f64> {
-    if let Some(i) = to_int(v) {
-        Some(i as f64)
-    } else if let Some(f) = to_f64(v) {
-        Some(f)
-    } else {
-        None
-    }
-}
-
 pub fn fits_in_small_int(n: i64) -> bool {
     let mask = !((1 << SMALL_INT_BITS) - 1);
     let high = (n as u64) & mask;
     high == mask || high == 0
-}
-
-pub fn from_small_int(n: i64) -> u64 {
-    assert!(fits_in_small_int(n));
-    let mask = (1 << SMALL_INT_BITS) - 1;
-    let un = n as u64 & mask;
-    QNAN | TAG_SMALL_INT | (un << TAG_SIZE)
-}
-
-pub fn to_small_int(v: u64) -> Option<i64> {
-    if v & (QNAN | TAG_MASK) == QNAN | TAG_SMALL_INT {
-        let bits = (v & VALUE_MASK) as i64;
-        let shift_left = (64 - SMALL_INT_BITS) as i64;
-        let shift_right = shift_left + TAG_SIZE as i64;
-        Some(bits << shift_left >> shift_right)
-    } else {
-        None
-    }
-}
-
-pub fn from_big_int(n: *const i64) -> u64 {
-    QNAN | TAG_BIG_INT | n as u64
-}
-
-pub fn to_big_int(v: u64) -> Option<*const i64> {
-    if v & (QNAN | TAG_MASK) == QNAN | TAG_BIG_INT {
-        Some((v & !QNAN & !TAG_MASK) as usize as *const i64)
-    } else {
-        None
-    }
-}
-
-pub fn to_int(v: u64) -> Option<i64> {
-    if let Some(n) = to_small_int(v) {
-        Some(n)
-    } else if let Some(n) = to_big_int(v) {
-        Some(unsafe { *n })
-    } else {
-        None
-    }
-}
-
-pub fn is_number(v: u64) -> bool {
-    (v & QNAN) != QNAN || v & TAG_MASK == TAG_SMALL_INT || v & TAG_MASK == TAG_BIG_INT
-}
-
-pub fn num_as_i64(v: u64) -> Option<i64> {
-    if let Some(i) = to_int(v) {
-        Some(i)
-    } else if let Some(f) = to_f64(v) {
-        let i = f as i64;
-        if i as f64 == f {
-            Some(i)
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-}
-
-pub fn from_string(s: *const data::String) -> u64 {
-    assert!(!s.is_null());
-    QNAN | TAG_STRING | s as u64
-}
-
-pub fn to_string(v: u64) -> Option<*const data::String> {
-    if v & (QNAN | TAG_MASK) == QNAN | TAG_STRING {
-        Some((v & !QNAN & !TAG_MASK) as usize as *const data::String)
-    } else {
-        None
-    }
-}
-
-pub fn from_closure(f: *const Closure) -> u64 {
-    assert!(!f.is_null());
-    QNAN | TAG_CLOSURE | f as u64
-}
-
-pub fn to_closure(v: u64) -> Option<*const Closure> {
-    if v & (QNAN | TAG_MASK) == QNAN | TAG_CLOSURE {
-        Some((v & !QNAN & !TAG_MASK) as usize as *const Closure)
-    } else {
-        None
-    }
-}
-
-pub fn from_object(f: *const Object) -> u64 {
-    assert!(!f.is_null());
-    QNAN | TAG_OBJECT | f as u64
-}
-
-pub fn to_object(v: u64) -> Option<*const Object> {
-    if v & (QNAN | TAG_MASK) == QNAN | TAG_OBJECT {
-        Some((v & !QNAN & !TAG_MASK) as usize as *const Object)
-    } else {
-        None
-    }
-}
-
-pub fn debug_str(v: u64) -> String {
-    if is_nil(v) {
-        return String::from("nil");
-    }
-    if let Some(b) = to_bool(v) {
-        return format!("{}", b);
-    }
-    if let Some(n) = to_small_int(v) {
-        return format!("{}", n);
-    }
-    if let Some(np) = to_big_int(v) {
-        return format!("{}", unsafe { *np.as_ref().unwrap() });
-    }
-    if let Some(n) = to_f64(v) {
-        return format!("{}", n);
-    }
-    if let Some(s) = to_string(v) {
-        unsafe {
-            return format!("{}", s.as_ref().unwrap());
-        }
-    }
-    if let Some(_) = to_closure(v) {
-        return String::from("<function>");
-    }
-    if let Some(_) = to_object(v) {
-        return String::from("<object>");
-    }
-    return format!("Nanbox {:?}", v);
-}
-
-pub fn debug_type(v: u64) -> &'static str {
-    if is_nil(v) {
-        "nil"
-    } else if to_bool(v).is_some() {
-        "bool"
-    } else if to_small_int(v).is_some() || to_big_int(v).is_some() {
-        "integer"
-    } else if to_f64(v).is_some() {
-        "float"
-    } else if to_string(v).is_some() {
-        "string"
-    } else if to_closure(v).is_some() {
-        "function"
-    } else if to_object(v).is_some() {
-        "object"
-    } else {
-        "invalid value"
-    }
 }
