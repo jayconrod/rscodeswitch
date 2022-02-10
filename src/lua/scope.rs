@@ -1,6 +1,6 @@
 use crate::lua::syntax::{
-    Call, Chunk, Expr, LValue, LabelID, LabelUseID, Param, ScopeID, Stmt, TableField, VarID,
-    VarUseID,
+    Call, Chunk, Expr, LValue, LabelID, LabelUseID, MethodName, Param, ScopeID, Stmt, TableField,
+    VarID, VarUseID,
 };
 use crate::lua::token::Token;
 use crate::pos::{Error, LineMap, Pos};
@@ -498,9 +498,22 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             } => {
                 self.resolve_label(*name, *label_use, *pos);
             }
-            Stmt::Function { .. } => {
-                // TODO: implement non-local functions
-                unimplemented!();
+            Stmt::Function {
+                name,
+                parameters,
+                body,
+                param_scope,
+                body_scope,
+                ..
+            } => {
+                self.resolve(name.name, name.var_use);
+                self.resolve_function_parameters_and_body(
+                    name.method_name,
+                    *param_scope,
+                    parameters,
+                    *body_scope,
+                    body,
+                );
             }
             Stmt::LocalFunction {
                 name,
@@ -513,6 +526,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             } => {
                 self.declare(*var, name.text, VarKind::Local, Attr::None, name.pos());
                 self.resolve_function_parameters_and_body(
+                    None,
                     *param_scope,
                     parameters,
                     *body_scope,
@@ -564,6 +578,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 ..
             } => {
                 self.resolve_function_parameters_and_body(
+                    None,
                     *param_scope,
                     parameters,
                     *body_scope,
@@ -630,12 +645,22 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
 
     fn resolve_function_parameters_and_body(
         &mut self,
+        method_name: Option<MethodName<'src>>,
         param_scope: ScopeID,
         parameters: &[Param<'src>],
         body_scope: ScopeID,
         body: &[Stmt<'src>],
     ) {
         self.enter(param_scope, ScopeKind::Function);
+        if let Some(m) = method_name {
+            self.declare(
+                m.receiver_var,
+                "self",
+                VarKind::Parameter,
+                Attr::None,
+                m.name.pos(),
+            );
+        }
         for p in parameters {
             self.declare(
                 p.var,

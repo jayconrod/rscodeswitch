@@ -376,38 +376,31 @@ impl<'src> Display for NameAttr<'src> {
     }
 }
 
+#[derive(Debug)]
 pub struct FunctionName<'src> {
-    pub names: Vec<Token<'src>>,
-    pub is_method: bool,
-}
-
-impl<'src> FunctionName<'src> {
-    pub fn pos(&self) -> Pos {
-        if self.names.len() == 1 {
-            self.names[0].pos()
-        } else {
-            self.names
-                .first()
-                .unwrap()
-                .pos()
-                .combine(self.names.last().unwrap().pos())
-        }
-    }
+    pub name: Token<'src>,
+    pub fields: Vec<Token<'src>>,
+    pub method_name: Option<MethodName<'src>>,
+    pub var_use: VarUseID,
 }
 
 impl<'src> Display for FunctionName<'src> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let mut sep = "";
-        for (i, t) in self.names.iter().enumerate() {
-            write!(f, "{}{}", sep, t.text)?;
-            if i == self.names.len() - 2 && self.is_method {
-                sep = ":";
-            } else {
-                sep = ".";
-            }
+        f.write_str(self.name.text)?;
+        for t in &self.fields {
+            write!(f, ".{}", t.text)?;
+        }
+        if let Some(m) = &self.method_name {
+            write!(f, ":{}", m.name.text)?;
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MethodName<'src> {
+    pub name: Token<'src>,
+    pub receiver_var: VarID,
 }
 
 pub enum Expr<'src> {
@@ -624,19 +617,19 @@ pub struct Param<'src> {
     pub var: VarID,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ScopeID(pub usize);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VarID(pub usize);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct VarUseID(pub usize);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct LabelID(pub usize);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct LabelUseID(pub usize);
 
 pub fn parse<'src>(tokens: &[Token<'src>], lmap: &LineMap, errors: &mut Vec<Error>) -> Chunk<'src> {
@@ -999,19 +992,27 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     }
 
     fn parse_function_name(&mut self) -> Result<FunctionName<'src>, Error> {
-        let mut names = Vec::new();
-        names.push(self.expect(Kind::Ident)?);
+        let name = self.expect(Kind::Ident)?;
+        let var_use = self.next_var_use();
+        let mut fields = Vec::new();
         while self.peek() == Kind::Dot {
             self.take();
-            names.push(self.expect(Kind::Ident)?);
+            fields.push(self.expect(Kind::Ident)?);
         }
-        let mut is_method = false;
-        if self.peek() == Kind::Colon {
-            is_method = true;
+        let method_name = if self.peek() == Kind::Colon {
             self.take();
-            names.push(self.expect(Kind::Ident)?);
-        }
-        Ok(FunctionName { names, is_method })
+            let receiver_var = self.next_var();
+            let name = self.expect(Kind::Ident)?;
+            Some(MethodName { name, receiver_var })
+        } else {
+            None
+        };
+        Ok(FunctionName {
+            name,
+            fields,
+            method_name,
+            var_use,
+        })
     }
 
     fn parse_return_stmt(&mut self) -> Result<Stmt<'src>, Error> {

@@ -3,7 +3,7 @@ use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
 use crate::lua::scope::{self, CaptureFrom, ScopeSet, Var, VarKind, VarUse};
 use crate::lua::syntax::{
-    self, Call, Chunk, Expr, LValue, LabelID, Param, ScopeID, Stmt, TableField,
+    self, Call, Chunk, Expr, LValue, LabelID, Param, ScopeID, Stmt, TableField, VarID,
 };
 use crate::lua::token::{self, Number, Token};
 use crate::nanbox;
@@ -504,9 +504,90 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     self.asm.b(&mut self.named_labels[lid.0]);
                 }
             }
-            Stmt::Function { .. } => {
-                // TODO: implement non-local functions
-                unimplemented!();
+            Stmt::Function {
+                name,
+                is_variadic,
+                parameters,
+                param_scope,
+                body,
+                pos,
+                ..
+            } => {
+                // A function statement is essentially an assignment with a
+                // complicated L-value that doesn't appear in any context.
+                // Prepare to assign the function to a field or capture cell
+                // by loading whatever we need to load.
+                let is_method_assign = !name.fields.is_empty() || name.method_name.is_some();
+                let var_use = &self.scope_set.var_uses[name.var_use.0];
+                if let Some(vid) = var_use.var {
+                    // First part of name is a known variable.
+                    let var = &self.scope_set.vars[vid.0];
+                    if is_method_assign {
+                        let si = self.check_slot(var.slot, name.name.pos(), "variables");
+                        match var.kind {
+                            VarKind::Global => (),
+                            VarKind::Parameter => self.asm.loadarg(si),
+                            VarKind::Local => self.asm.loadlocal(si),
+                            VarKind::Capture => {
+                                let slot = var_use.cell.unwrap_or(var.cell_slot);
+                                let si = self.check_slot(slot, name.name.pos(), "captures");
+                                self.asm.capture(si);
+                                self.asm.load();
+                            }
+                        }
+                    }
+                } else {
+                    // First part of name is unknown. May or may not be in _ENV.
+                    self.asm.loadglobal(0);
+                    if is_method_assign {
+                        let si = self.ensure_string(name.name.text.as_bytes(), name.name.pos());
+                        self.asm.mode(inst::MODE_LUA);
+                        self.asm.loadnamedprop(si);
+                    }
+                }
+                let last_field_index = if name.method_name.is_some() || name.fields.is_empty() {
+                    name.fields.len()
+                } else {
+                    name.fields.len() - 1
+                };
+                for i in 0..last_field_index {
+                    let f = name.fields[i];
+                    let si = self.ensure_string(f.text.as_bytes(), f.pos());
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.loadnamedprop(si);
+                }
+
+                // Compile the function and create a closure.
+                let receiver_vid = name.method_name.map(|m| m.receiver_var);
+                let fn_index = self.compile_function(
+                    name.to_string(),
+                    receiver_vid,
+                    parameters,
+                    *is_variadic,
+                    body,
+                    *pos,
+                );
+                self.compile_closure(fn_index, *param_scope, *pos);
+
+                // Assign the closure value wherever it needs to go.
+                if is_method_assign {
+                    let last_name = name
+                        .method_name
+                        .map(|m| m.name)
+                        .unwrap_or_else(|| *name.fields.last().unwrap());
+                    let si = self.ensure_string(last_name.text.as_bytes(), last_name.pos());
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.storenamedprop(si);
+                } else if let Some(vid) = var_use.var {
+                    // Assignment to known variable, possibly captured.
+                    let var = &self.scope_set.vars[vid.0];
+                    self.compile_store_var(var, var_use.cell);
+                } else {
+                    // Assignment to property in _ENV.
+                    let si = self.ensure_string(name.name.text.as_bytes(), name.name.pos());
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.storenamedprop(si);
+                }
             }
             Stmt::LocalFunction {
                 name: name_tok,
@@ -521,7 +602,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let var = &self.scope_set.vars[vid.0];
                 self.compile_define_prepare(var);
                 let name = String::from(name_tok.text);
-                let fn_index = self.compile_function(name, parameters, *is_variadic, body, *pos);
+                let fn_index =
+                    self.compile_function(name, None, parameters, *is_variadic, body, *pos);
                 self.compile_closure(fn_index, *param_scope, *pos);
                 self.compile_define(var);
             }
@@ -699,7 +781,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 ..
             } => {
                 let name = String::from("·anonymous");
-                let fn_index = self.compile_function(name, parameters, *is_variadic, body, *pos);
+                let fn_index =
+                    self.compile_function(name, None, parameters, *is_variadic, body, *pos);
                 self.compile_closure(fn_index, *param_scope, *pos);
             }
             Expr::Call(call) => {
@@ -855,6 +938,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     fn compile_function(
         &mut self,
         name: String,
+        receiver: Option<VarID>,
         parameters: &[Param<'src>],
         is_variadic: bool,
         body: &[Stmt<'src>],
@@ -871,8 +955,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
         // Move captured parameters into cells.
         let mut cell_slot = 0;
-        for p in parameters {
-            let var = &self.scope_set.vars[p.var.0];
+        let mut move_captured_param = |vid: VarID| {
+            let var = &self.scope_set.vars[vid.0];
             if var.kind == VarKind::Capture {
                 self.asm.alloc(mem::size_of::<usize>() as u32); // pointer to nanbox
                 self.asm.dup();
@@ -889,6 +973,12 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 assert_eq!(var.cell_slot, cell_slot);
                 cell_slot += 1;
             }
+        };
+        if let Some(vid) = receiver {
+            move_captured_param(vid);
+        }
+        for p in parameters {
+            move_captured_param(p.var);
         }
 
         // Compile the function body.
@@ -911,7 +1001,12 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 return !0;
             }
         };
-        let param_types = vec![Type::Nanbox; parameters.len()];
+        let param_count = if receiver.is_some() {
+            parameters.len() + 1
+        } else {
+            parameters.len()
+        };
+        let param_types = vec![Type::Nanbox; param_count];
         let fn_index = match self.functions.len().try_into() {
             Ok(i) => i,
             Err(_) => {
@@ -1149,6 +1244,13 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             self.named_labels.resize_with(lid.0 + 1, || Label::new());
         }
         &mut self.named_labels[lid.0]
+    }
+
+    fn check_slot(&mut self, index: usize, pos: Pos, kinds: &str) -> u16 {
+        index.try_into().unwrap_or_else(|_| {
+            self.error(pos, format!("too many {}", kinds));
+            !0
+        })
     }
 
     fn bind_named_label(&mut self, lid: LabelID) {
