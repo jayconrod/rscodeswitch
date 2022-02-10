@@ -151,7 +151,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
                 // Compile the expressions on the right, then adjust the number
                 // of values to match the number of expressions on the left.
-                let len_known = self.compile_expr_list(right);
+                let len_known = self.compile_expr_list(right, 0);
                 self.compile_adjust(right.len(), len_known, left.len(), stmt.pos());
 
                 // Perform the actual assignment, right to left.
@@ -165,7 +165,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Stmt::Local {
                 left, right, pos, ..
             } => {
-                let len_known = self.compile_expr_list(right);
+                let len_known = self.compile_expr_list(right, 0);
                 self.compile_adjust(right.len(), len_known, left.len(), *pos);
 
                 for l in left {
@@ -537,7 +537,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // vc register for us. If we do statically know, we need to
                 // use setv explicitly. In either case, vc is set to the number
                 // of returned values, so the caller knows what to do with them.
-                match self.compile_expr_list(exprs) {
+                match self.compile_expr_list(exprs, 0) {
                     ExprListLen::Static => {
                         let n = match exprs.len().try_into() {
                             Ok(n) => n,
@@ -555,7 +555,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm.retv();
             }
             Stmt::Print { exprs, .. } => {
-                match self.compile_expr_list(exprs) {
+                match self.compile_expr_list(exprs, 0) {
                     ExprListLen::Static => {
                         self.asm.mode(inst::MODE_LUA);
                         let n = match exprs.len().try_into() {
@@ -762,16 +762,17 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     /// If the last expression produces a dynamic number of values, they're
     /// all pushed and ExprListLen::Dynamic is returned. In this case, the
     /// vc (value count) register will be set to the total number of values
-    /// pushed by all expressions. If the last expression statically produces
+    /// pushed by all expressions plus extra (which may be 1 to account for an
+    /// implicit receiver). If the last expression statically produces
     /// one value, or if there are no expressions, ExprListLen::Static is
     /// returned. The caller may choose to run setv to set vc, if needed.
-    fn compile_expr_list(&mut self, exprs: &[Expr<'src>]) -> ExprListLen {
+    fn compile_expr_list(&mut self, exprs: &[Expr<'src>], extra: usize) -> ExprListLen {
         if exprs.len() >= 2 {
             for expr in exprs.iter().take(exprs.len() - 1) {
                 self.compile_expr(expr);
             }
         }
-        let static_expr_count = match exprs.len().try_into() {
+        let static_expr_count = match (exprs.len() + extra).try_into() {
             Ok(n) => n,
             Err(_) => {
                 self.error(
@@ -964,12 +965,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     }
 
     fn compile_call(&mut self, call: &Call<'src>, rmode: ResultMode) {
-        // TODO: support method
-        if call.method_name.is_some() {
-            unimplemented!();
-        }
-
         let static_arg_count = match call.arguments.len().try_into() {
+            Ok(i) if call.method_name.is_some() => i + 1,
             Ok(i) => i,
             Err(_) => {
                 self.error(call.pos, String::from("too many arguments"));
@@ -977,14 +974,26 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             }
         };
         self.compile_expr(&call.callee);
-        match self.compile_expr_list(&call.arguments) {
-            ExprListLen::Static => {
-                self.asm.mode(inst::MODE_LUA);
-                self.asm.callvalue(static_arg_count);
+        let extra = if call.method_name.is_some() {
+            // Lua doesn't have methods. A call like a:b(c) just copies the
+            // receiver on the stack.
+            self.asm.dup();
+            1
+        } else {
+            0
+        };
+        let arg_len = self.compile_expr_list(&call.arguments, extra);
+        self.asm.mode(inst::MODE_LUA);
+        if let Some(name) = call.method_name {
+            let si = self.ensure_string(name.text.as_bytes(), name.pos());
+            match arg_len {
+                ExprListLen::Static => self.asm.callnamedprop(si, static_arg_count),
+                ExprListLen::Dynamic => self.asm.callnamedpropv(si),
             }
-            ExprListLen::Dynamic => {
-                self.asm.mode(inst::MODE_LUA);
-                self.asm.callvaluev();
+        } else {
+            match arg_len {
+                ExprListLen::Static => self.asm.callvalue(static_arg_count),
+                ExprListLen::Dynamic => self.asm.callvaluev(),
             }
         }
 

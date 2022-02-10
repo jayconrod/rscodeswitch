@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 74.
+// Next opcode: 75.
 pub const ADD: u8 = 20;
 pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
@@ -13,6 +13,7 @@ pub const APPENDV: u8 = 70;
 pub const B: u8 = 27;
 pub const BIF: u8 = 28;
 pub const CALLNAMEDPROP: u8 = 45;
+pub const CALLNAMEDPROPV: u8 = 74;
 pub const CALLNAMEDPROPWITHPROTOTYPE: u8 = 47;
 pub const CALLVALUE: u8 = 32;
 pub const CALLVALUEV: u8 = 69;
@@ -120,8 +121,8 @@ pub const fn size(op: u8) -> usize {
         SWAPN | SYS => 2,
         ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETV | STOREARG
         | STORELOCAL => 3,
-        ALLOC | B | BIF | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | LOADNAMEDPROPORNIL
-        | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP | STRING => 5,
+        ALLOC | B | BIF | CALLNAMEDPROPV | FUNCTION | LOADGLOBAL | LOADNAMEDPROP
+        | LOADNAMEDPROPORNIL | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP | STRING => 5,
         CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE => 7,
         CONST | NEWCLOSURE => 9,
         _ => 255,
@@ -138,6 +139,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         B => "b",
         BIF => "bif",
         CALLNAMEDPROP => "callnamedprop",
+        CALLNAMEDPROPV => "callnamedpropv",
         CALLNAMEDPROPWITHPROTOTYPE => "callnamedpropwithprototype",
         CALLVALUE => "callvalue",
         CALLVALUEV => "callvaluev",
@@ -326,6 +328,11 @@ impl Assembler {
         self.write_u8(CALLNAMEDPROP);
         self.write_u32(name_index);
         self.write_u16(arg_count);
+    }
+
+    pub fn callnamedpropv(&mut self, name_index: u32) {
+        self.write_u8(CALLNAMEDPROPV);
+        self.write_u32(name_index);
     }
 
     pub fn callnamedpropwithprototype(&mut self, name_index: u32, arg_count: u16) {
@@ -749,8 +756,8 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let n = u16::from_le_bytes(insts[p + 1..p + 3].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
-            ALLOC | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | LOADNAMEDPROPORNIL | STOREGLOBAL
-            | STOREMETHOD | STORENAMEDPROP | STRING => {
+            ALLOC | CALLNAMEDPROPV | FUNCTION | LOADGLOBAL | LOADNAMEDPROP | LOADNAMEDPROPORNIL
+            | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP | STRING => {
                 if p + 5 > insts.len() {
                     return Err(fmt::Error);
                 }

@@ -623,12 +623,12 @@ impl<'w> Interpreter<'w> {
                     let key = NanBox::from(name).try_into().unwrap();
                     let arg_count = read_imm!(u16, 5) as usize;
                     let receiver_addr = sp + arg_count * 8;
-                    let receiver = NanBox(*(receiver_addr as *const u64));
-                    let receiver_obj: &Object = match receiver.try_into() {
+                    let raw_receiver = NanBox(*(receiver_addr as *const u64));
+                    let receiver: &Object = match raw_receiver.try_into() {
                         Ok(o) => o,
-                        _ => return_errorf!("receiver is not an object: {:?}", receiver),
+                        _ => return_errorf!("receiver is not an object: {:?}", raw_receiver),
                     };
-                    let prop = match receiver_obj.property(key) {
+                    let prop = match receiver.property(key) {
                         Some(p) => p,
                         _ => return_errorf!("property {} is not defined", name),
                     };
@@ -649,6 +649,41 @@ impl<'w> Interpreter<'w> {
                         arg_count
                     } else {
                         arg_count + 1
+                    };
+                    call_closure!(callee, arg_count_including_receiver);
+                    continue;
+                }
+                (inst::CALLNAMEDPROPV, inst::MODE_LUA) => {
+                    let name_index = read_imm!(u32, 1) as usize;
+                    let name = &pp.strings[name_index];
+                    let key = NanBox::from(name).try_into().unwrap();
+                    let receiver_addr = sp + vc * 8;
+                    let raw_receiver = NanBox(*(receiver_addr as *const u64));
+                    let receiver: &Object = match raw_receiver.try_into() {
+                        Ok(o) => o,
+                        _ => return_errorf!("receiver is not an object: {:?}", raw_receiver),
+                    };
+                    let prop = match receiver.property(key) {
+                        Some(p) => p,
+                        _ => return_errorf!("property {} is not defined", name),
+                    };
+                    let callee: &Closure = match prop.value.try_into() {
+                        Ok(c) => c,
+                        _ => return_errorf!("property {} is not a function", name),
+                    };
+                    let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
+                        // If this is not a method but a regular field that
+                        // happens to contain a function, shift the
+                        // arguments back to remove the receiver from the
+                        // stack. A method will pop the receiver (and so it
+                        // remains on the stack in that case), but a
+                        // function won't.
+                        // TODO: this is horrendously inefficient. Come up
+                        // with something better.
+                        shift_args!(vc, 1);
+                        vc
+                    } else {
+                        vc + 1
                     };
                     call_closure!(callee, arg_count_including_receiver);
                     continue;
