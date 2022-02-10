@@ -1405,6 +1405,16 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
                 infix: Some(&Parser::parse_binop_expr),
                 precedence: PREC_EXP,
             },
+            Kind::And => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_AND,
+            },
+            Kind::Or => ParseRule {
+                prefix: None,
+                infix: Some(&Parser::parse_binop_expr),
+                precedence: PREC_OR,
+            },
             Kind::LParen => ParseRule {
                 prefix: Some(&Parser::parse_group_expr),
                 infix: Some(&Parser::parse_call_expr),
@@ -1524,7 +1534,7 @@ type Precedence = u8;
 
 const PREC_NONE: Precedence = 0;
 const PREC_OR: Precedence = 1;
-const _PREC_AND: Precedence = 2;
+const PREC_AND: Precedence = 2;
 const PREC_COMPARE: Precedence = 3;
 const PREC_BINOR: Precedence = 4;
 const PREC_BINAND: Precedence = 5;

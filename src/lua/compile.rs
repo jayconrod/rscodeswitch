@@ -643,29 +643,48 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             }
             Expr::Binary(left, op, right) => {
                 self.compile_expr(left);
-                self.compile_expr(right);
-                self.asm().mode(inst::MODE_LUA);
-                match op.kind {
-                    token::Kind::Lt => self.asm().lt(),
-                    token::Kind::LtEq => self.asm().le(),
-                    token::Kind::Gt => self.asm().gt(),
-                    token::Kind::GtEq => self.asm().ge(),
-                    token::Kind::EqEq => self.asm().eq(),
-                    token::Kind::TildeEq => self.asm().ne(),
-                    token::Kind::Pipe => self.asm().or(),
-                    token::Kind::Tilde => self.asm().xor(),
-                    token::Kind::Amp => self.asm().and(),
-                    token::Kind::LtLt => self.asm().shl(),
-                    token::Kind::GtGt => self.asm().shr(),
-                    token::Kind::DotDot => self.asm().strcat(),
-                    token::Kind::Plus => self.asm().add(),
-                    token::Kind::Minus => self.asm().sub(),
-                    token::Kind::Star => self.asm().mul(),
-                    token::Kind::Slash => self.asm().div(),
-                    token::Kind::SlashSlash => self.asm().floordiv(),
-                    token::Kind::Percent => self.asm().mod_(),
-                    token::Kind::Caret => self.asm().exp(),
-                    _ => panic!("unexpected operator: {:?}", op.kind),
+                if op.kind == token::Kind::And {
+                    let mut after_label = Label::new();
+                    self.asm().dup();
+                    self.asm().mode(inst::MODE_LUA);
+                    self.asm().not();
+                    self.asm().mode(inst::MODE_LUA);
+                    self.asm().bif(&mut after_label);
+                    self.asm().pop();
+                    self.compile_expr(right);
+                    self.asm().bind(&mut after_label);
+                } else if op.kind == token::Kind::Or {
+                    let mut after_label = Label::new();
+                    self.asm().dup();
+                    self.asm().mode(inst::MODE_LUA);
+                    self.asm().bif(&mut after_label);
+                    self.compile_expr(right);
+                    self.asm().bind(&mut after_label);
+                } else {
+                    self.compile_expr(right);
+                    self.asm().mode(inst::MODE_LUA);
+                    match op.kind {
+                        token::Kind::Lt => self.asm().lt(),
+                        token::Kind::LtEq => self.asm().le(),
+                        token::Kind::Gt => self.asm().gt(),
+                        token::Kind::GtEq => self.asm().ge(),
+                        token::Kind::EqEq => self.asm().eq(),
+                        token::Kind::TildeEq => self.asm().ne(),
+                        token::Kind::Pipe => self.asm().or(),
+                        token::Kind::Tilde => self.asm().xor(),
+                        token::Kind::Amp => self.asm().and(),
+                        token::Kind::LtLt => self.asm().shl(),
+                        token::Kind::GtGt => self.asm().shr(),
+                        token::Kind::DotDot => self.asm().strcat(),
+                        token::Kind::Plus => self.asm().add(),
+                        token::Kind::Minus => self.asm().sub(),
+                        token::Kind::Star => self.asm().mul(),
+                        token::Kind::Slash => self.asm().div(),
+                        token::Kind::SlashSlash => self.asm().floordiv(),
+                        token::Kind::Percent => self.asm().mod_(),
+                        token::Kind::Caret => self.asm().exp(),
+                        _ => panic!("unexpected operator: {:?}", op.kind),
+                    }
                 }
             }
             Expr::Group { expr, .. } => {
