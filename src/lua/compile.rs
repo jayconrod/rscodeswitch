@@ -52,6 +52,7 @@ struct Compiler<'src, 'ss, 'lm, 'err> {
     strings: Handle<List<data::String>>,
     string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
     named_labels: Vec<inst::Label>,
+    asm: Assembler,
     asm_stack: Vec<Assembler>,
     errors: &'err mut Vec<Error>,
 }
@@ -70,17 +71,18 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             strings: Handle::new(List::alloc()),
             string_index: Handle::new(data::HashMap::alloc()),
             named_labels: Vec::new(),
-            asm_stack: vec![Assembler::new()],
+            asm: Assembler::new(),
+            asm_stack: Vec::new(),
             errors,
         }
     }
 
     fn finish(mut self) -> Option<Box<Package>> {
-        self.asm().mode(inst::MODE_LUA);
-        self.asm().setv(0);
-        self.asm().mode(inst::MODE_LUA);
-        self.asm().retv();
-        match self.asm_stack.pop().unwrap().finish() {
+        self.asm.mode(inst::MODE_LUA);
+        self.asm.setv(0);
+        self.asm.mode(inst::MODE_LUA);
+        self.asm.retv();
+        match self.asm.finish() {
             Ok((insts, line_map)) => {
                 self.functions.push(Function {
                     name: String::from("·init"),
@@ -123,10 +125,10 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             name: String::from("_ENV"),
         });
         let object_size = mem::size_of::<Object>() as u32;
-        self.asm().alloc(object_size);
-        self.asm().mode(inst::MODE_OBJECT);
-        self.asm().nanbox();
-        self.asm().storeglobal(env_var.slot as u32);
+        self.asm.alloc(object_size);
+        self.asm.mode(inst::MODE_OBJECT);
+        self.asm.nanbox();
+        self.asm.storeglobal(env_var.slot as u32);
 
         // Compile statements.
         for stmt in &chunk.stmts {
@@ -180,12 +182,12 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                             // go. Allocate a cell, store the value, and put
                             // the cell in that slot.
                             assert_eq!(var.slot, var.cell_slot);
-                            self.asm().alloc(mem::size_of::<usize>() as u32);
-                            self.asm().dup();
-                            self.asm().loadlocal(var.slot as u16);
-                            self.asm().mode(inst::MODE_LUA);
-                            self.asm().store();
-                            self.asm().storelocal(var.slot as u16);
+                            self.asm.alloc(mem::size_of::<usize>() as u32);
+                            self.asm.dup();
+                            self.asm.loadlocal(var.slot as u16);
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.store();
+                            self.asm.storelocal(var.slot as u16);
                         }
                     }
                 }
@@ -205,18 +207,18 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 for (cond, stmt) in cond_stmts {
                     let mut next_label = Label::new();
                     self.compile_expr(cond);
-                    self.asm().mode(inst::MODE_LUA);
-                    self.asm().not();
-                    self.asm().mode(inst::MODE_LUA);
-                    self.asm().bif(&mut next_label);
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.not();
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.bif(&mut next_label);
                     self.compile_stmt(stmt);
-                    self.asm().b(&mut end_label);
-                    self.asm().bind(&mut next_label);
+                    self.asm.b(&mut end_label);
+                    self.asm.bind(&mut next_label);
                 }
                 if let Some(false_stmt) = false_stmt {
                     self.compile_stmt(false_stmt);
                 }
-                self.asm().bind(&mut end_label);
+                self.asm.bind(&mut end_label);
             }
             Stmt::While {
                 cond,
@@ -227,16 +229,16 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             } => {
                 let mut cond_label = Label::new();
                 let mut body_label = Label::new();
-                self.asm().b(&mut cond_label);
-                self.asm().bind(&mut body_label);
+                self.asm.b(&mut cond_label);
+                self.asm.bind(&mut body_label);
                 for stmt in body {
                     self.compile_stmt(stmt);
                 }
                 self.pop_block(*scope);
-                self.asm().bind(&mut cond_label);
+                self.asm.bind(&mut cond_label);
                 self.compile_expr(cond);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().bif(&mut body_label);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.bif(&mut body_label);
                 self.bind_named_label(*break_lid);
             }
             Stmt::Repeat {
@@ -247,20 +249,20 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 ..
             } => {
                 let mut body_label = Label::new();
-                self.asm().bind(&mut body_label);
+                self.asm.bind(&mut body_label);
                 for stmt in body {
                     self.compile_stmt(stmt);
                 }
                 self.compile_expr(cond);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().not();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.not();
                 let slot_count = self.scope_set.scopes[scope.0].slot_count;
                 for _ in 0..slot_count {
-                    self.asm().swap();
-                    self.asm().pop();
+                    self.asm.swap();
+                    self.asm.pop();
                 }
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().bif(&mut body_label);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.bif(&mut body_label);
                 self.bind_named_label(*break_lid);
             }
             Stmt::For {
@@ -298,20 +300,20 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     Some(step) => {
                         let mut step_ok_label = Label::new();
                         self.compile_expr(step);
-                        self.asm().dup();
-                        self.asm().const_(0);
-                        self.asm().nanbox();
-                        self.asm().ne();
-                        self.asm().bif(&mut step_ok_label);
+                        self.asm.dup();
+                        self.asm.const_(0);
+                        self.asm.nanbox();
+                        self.asm.ne();
+                        self.asm.bif(&mut step_ok_label);
                         let si = self.ensure_string(b"'for' step is zero", step.pos());
-                        self.asm().string(si);
-                        self.asm().mode(inst::MODE_STRING);
-                        self.asm().panic();
-                        self.asm().bind(&mut step_ok_label);
+                        self.asm.string(si);
+                        self.asm.mode(inst::MODE_STRING);
+                        self.asm.panic();
+                        self.asm.bind(&mut step_ok_label);
                     }
                     None => {
-                        self.asm().const_(1);
-                        self.asm().nanbox();
+                        self.asm.const_(1);
+                        self.asm.nanbox();
                     }
                 }
                 self.compile_define(step_var);
@@ -325,87 +327,87 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let mut limit_ok_label = Label::new();
                 self.line(init.pos());
                 self.compile_load_var(ind_var, None);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().typeof_();
-                self.asm().dup();
-                self.asm().const_(nanbox::TAG_SMALL_INT);
-                self.asm().eq();
-                self.asm().bif(&mut ind_is_int_label);
-                self.asm().dup();
-                self.asm().const_(nanbox::TAG_BIG_INT);
-                self.asm().ne();
-                self.asm().bif(&mut convert_float_label);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.typeof_();
+                self.asm.dup();
+                self.asm.const_(nanbox::TAG_SMALL_INT);
+                self.asm.eq();
+                self.asm.bif(&mut ind_is_int_label);
+                self.asm.dup();
+                self.asm.const_(nanbox::TAG_BIG_INT);
+                self.asm.ne();
+                self.asm.bif(&mut convert_float_label);
 
-                self.asm().bind(&mut ind_is_int_label);
+                self.asm.bind(&mut ind_is_int_label);
                 if let Some(step) = step {
                     self.line(step.pos());
-                    self.asm().pop(); // type of ind
+                    self.asm.pop(); // type of ind
                     self.compile_load_var(step_var, None);
-                    self.asm().mode(inst::MODE_LUA);
-                    self.asm().typeof_();
-                    self.asm().dup();
-                    self.asm().const_(nanbox::TAG_SMALL_INT);
-                    self.asm().eq();
-                    self.asm().bif(&mut ind_and_step_are_int_label);
-                    self.asm().dup();
-                    self.asm().const_(nanbox::TAG_BIG_INT);
-                    self.asm().ne();
-                    self.asm().bif(&mut convert_float_label);
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.typeof_();
+                    self.asm.dup();
+                    self.asm.const_(nanbox::TAG_SMALL_INT);
+                    self.asm.eq();
+                    self.asm.bif(&mut ind_and_step_are_int_label);
+                    self.asm.dup();
+                    self.asm.const_(nanbox::TAG_BIG_INT);
+                    self.asm.ne();
+                    self.asm.bif(&mut convert_float_label);
                     // TODO: panic on zero step
                 }
 
-                self.asm().bind(&mut ind_and_step_are_int_label);
-                self.asm().pop(); // type of step or ind
-                self.asm().b(&mut check_limit_label);
+                self.asm.bind(&mut ind_and_step_are_int_label);
+                self.asm.pop(); // type of step or ind
+                self.asm.b(&mut check_limit_label);
 
                 self.line(init.pos());
-                self.asm().bind(&mut convert_float_label);
-                self.asm().pop(); // type of step or ind
+                self.asm.bind(&mut convert_float_label);
+                self.asm.pop(); // type of step or ind
                 self.compile_store_var_prepare(ind_var);
                 self.compile_load_var(ind_var, None);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().tofloat();
-                self.asm().mode(inst::MODE_F64);
-                self.asm().nanbox();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.tofloat();
+                self.asm.mode(inst::MODE_F64);
+                self.asm.nanbox();
                 self.compile_store_var(ind_var, None);
                 self.compile_store_var_prepare(step_var);
                 self.compile_load_var(step_var, None);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().tofloat();
-                self.asm().mode(inst::MODE_F64);
-                self.asm().nanbox();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.tofloat();
+                self.asm.mode(inst::MODE_F64);
+                self.asm.nanbox();
                 self.compile_store_var(step_var, None);
 
                 // Also check that limit is a number. We don't convert it
                 // to a float if init and step were floats though.
-                self.asm().bind(&mut check_limit_label);
+                self.asm.bind(&mut check_limit_label);
                 self.compile_load_var(limit_var, None);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().typeof_();
-                self.asm().dup();
-                self.asm().const_(nanbox::TAG_SMALL_INT);
-                self.asm().eq();
-                self.asm().bif(&mut limit_ok_label);
-                self.asm().dup();
-                self.asm().const_(nanbox::TAG_BIG_INT);
-                self.asm().eq();
-                self.asm().bif(&mut limit_ok_label);
-                self.asm().dup();
-                self.asm().const_(nanbox::TAG_FLOAT);
-                self.asm().eq();
-                self.asm().bif(&mut limit_ok_label);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.typeof_();
+                self.asm.dup();
+                self.asm.const_(nanbox::TAG_SMALL_INT);
+                self.asm.eq();
+                self.asm.bif(&mut limit_ok_label);
+                self.asm.dup();
+                self.asm.const_(nanbox::TAG_BIG_INT);
+                self.asm.eq();
+                self.asm.bif(&mut limit_ok_label);
+                self.asm.dup();
+                self.asm.const_(nanbox::TAG_FLOAT);
+                self.asm.eq();
+                self.asm.bif(&mut limit_ok_label);
                 let si = self.ensure_string(b"'for' limit is not a number", limit.pos());
-                self.asm().string(si);
-                self.asm().mode(inst::MODE_STRING);
-                self.asm().panic();
-                self.asm().bind(&mut limit_ok_label);
-                self.asm().pop(); // typeof limit
-                self.asm().b(&mut cond_label);
+                self.asm.string(si);
+                self.asm.mode(inst::MODE_STRING);
+                self.asm.panic();
+                self.asm.bind(&mut limit_ok_label);
+                self.asm.pop(); // typeof limit
+                self.asm.b(&mut cond_label);
 
                 // Compile the loop body. The condition is checked at the
                 // bottom, so the body comes first. We copy the hidden induction
                 // variable to the visible variable first.
-                self.asm().bind(&mut body_label);
+                self.asm.bind(&mut body_label);
                 self.compile_define_prepare(body_var);
                 self.compile_load_var(ind_var, None);
                 self.compile_define(body_var);
@@ -422,23 +424,23 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.compile_store_var_prepare(ind_var);
                 self.compile_load_var(ind_var, None);
                 self.compile_load_var(step_var, None);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().add();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.add();
                 self.compile_load_var(step_var, None);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().typeof_();
-                self.asm().const_(nanbox::TAG_FLOAT);
-                self.asm().eq();
-                self.asm().bif(&mut step_inc_ok_label);
-                self.asm().dup();
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().typeof_();
-                self.asm().const_(nanbox::TAG_FLOAT);
-                self.asm().ne();
-                self.asm().bif(&mut step_inc_ok_label);
-                self.asm().pop();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.typeof_();
+                self.asm.const_(nanbox::TAG_FLOAT);
+                self.asm.eq();
+                self.asm.bif(&mut step_inc_ok_label);
+                self.asm.dup();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.typeof_();
+                self.asm.const_(nanbox::TAG_FLOAT);
+                self.asm.ne();
+                self.asm.bif(&mut step_inc_ok_label);
+                self.asm.pop();
                 self.b_named_label(*break_lid);
-                self.asm().bind(&mut step_inc_ok_label);
+                self.asm.bind(&mut step_inc_ok_label);
                 self.compile_store_var(ind_var, None);
 
                 // Check the condition.
@@ -446,26 +448,26 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // Otherwise, we check ind >= limit.
                 let mut negative_cond_label = Label::new();
                 self.line(limit.pos());
-                self.asm().bind(&mut cond_label);
+                self.asm.bind(&mut cond_label);
                 self.compile_load_var(ind_var, None);
                 self.compile_load_var(limit_var, None);
                 self.compile_load_var(step_var, None);
-                self.asm().constzero();
-                self.asm().nanbox();
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().lt();
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().bif(&mut negative_cond_label);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().le();
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().bif(&mut body_label);
+                self.asm.constzero();
+                self.asm.nanbox();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.lt();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.bif(&mut negative_cond_label);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.le();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.bif(&mut body_label);
                 self.b_named_label(*break_lid);
-                self.asm().bind(&mut negative_cond_label);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().ge();
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().bif(&mut body_label);
+                self.asm.bind(&mut negative_cond_label);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.ge();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.bif(&mut body_label);
 
                 // End of the loop.
                 self.bind_named_label(*break_lid);
@@ -478,11 +480,10 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 if let Some(lid) = label_use.label {
                     let label = &self.scope_set.labels[lid.0];
                     for _ in 0..(label_use.slot_count - label.slot_count) {
-                        self.asm().pop();
+                        self.asm.pop();
                     }
                     self.ensure_label(lid);
-                    let last_asm_index = self.asm_stack.len() - 1;
-                    self.asm_stack[last_asm_index].b(&mut self.named_labels[lid.0]);
+                    self.asm.b(&mut self.named_labels[lid.0]);
                 }
             }
             Stmt::Label { label: lid, .. } => {
@@ -496,12 +497,11 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     let label = &self.scope_set.labels[lid.0];
                     if label.slot_count < label_use.slot_count {
                         for _ in 0..(label_use.slot_count - label.slot_count) {
-                            self.asm().pop();
+                            self.asm.pop();
                         }
                     }
                     self.ensure_label(lid);
-                    let last_asm_index = self.asm_stack.len() - 1;
-                    self.asm_stack[last_asm_index].b(&mut self.named_labels[lid.0]);
+                    self.asm.b(&mut self.named_labels[lid.0]);
                 }
             }
             Stmt::Function { .. } => {
@@ -546,18 +546,18 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                                 !0
                             }
                         };
-                        self.asm().mode(inst::MODE_LUA);
-                        self.asm().setv(n);
+                        self.asm.mode(inst::MODE_LUA);
+                        self.asm.setv(n);
                     }
                     ExprListLen::Dynamic => (),
                 }
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().retv();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.retv();
             }
             Stmt::Print { exprs, .. } => {
                 match self.compile_expr_list(exprs) {
                     ExprListLen::Static => {
-                        self.asm().mode(inst::MODE_LUA);
+                        self.asm.mode(inst::MODE_LUA);
                         let n = match exprs.len().try_into() {
                             Ok(n) => n,
                             Err(_) => {
@@ -565,12 +565,12 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                                 !0
                             }
                         };
-                        self.asm().setv(n);
+                        self.asm.setv(n);
                     }
                     ExprListLen::Dynamic => (),
                 };
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().sys(inst::SYS_PRINT);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.sys(inst::SYS_PRINT);
             }
         }
     }
@@ -581,27 +581,27 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Expr::Literal(t) => {
                 match t.kind {
                     token::Kind::Nil => {
-                        self.asm().constzero();
-                        self.asm().mode(inst::MODE_PTR);
+                        self.asm.constzero();
+                        self.asm.mode(inst::MODE_PTR);
                     }
                     token::Kind::True => {
-                        self.asm().const_(1);
-                        self.asm().mode(inst::MODE_BOOL);
+                        self.asm.const_(1);
+                        self.asm.mode(inst::MODE_BOOL);
                     }
                     token::Kind::False => {
-                        self.asm().constzero();
-                        self.asm().mode(inst::MODE_BOOL);
+                        self.asm.constzero();
+                        self.asm.mode(inst::MODE_BOOL);
                     }
                     token::Kind::Number => match token::convert_number(t.text) {
                         Number::Int(n) if n == 0 => {
-                            self.asm().constzero();
+                            self.asm.constzero();
                         }
                         Number::Int(n) => {
-                            self.asm().const_(n as u64);
+                            self.asm.const_(n as u64);
                         }
                         Number::Float(n) => {
-                            self.asm().const_(n.to_bits());
-                            self.asm().mode(inst::MODE_F64);
+                            self.asm.const_(n.to_bits());
+                            self.asm.mode(inst::MODE_F64);
                         }
                         Number::Malformed => {
                             self.error(t.pos(), format!("malformed number"));
@@ -616,12 +616,12 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                             }
                         };
                         let si = self.ensure_string(&s, t.pos());
-                        self.asm().string(si);
-                        self.asm().mode(inst::MODE_STRING);
+                        self.asm.string(si);
+                        self.asm.mode(inst::MODE_STRING);
                     }
                     _ => unreachable!(),
                 }
-                self.asm().nanbox();
+                self.asm.nanbox();
             }
             Expr::Var {
                 name,
@@ -632,12 +632,12 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             }
             Expr::Unary(op, expr) => {
                 self.compile_expr(expr);
-                self.asm().mode(inst::MODE_LUA);
+                self.asm.mode(inst::MODE_LUA);
                 match op.kind {
-                    token::Kind::Not => self.asm().not(),
-                    token::Kind::Minus => self.asm().neg(),
-                    token::Kind::Tilde => self.asm().notb(),
-                    token::Kind::Hash => self.asm().len(),
+                    token::Kind::Not => self.asm.not(),
+                    token::Kind::Minus => self.asm.neg(),
+                    token::Kind::Tilde => self.asm.notb(),
+                    token::Kind::Hash => self.asm.len(),
                     _ => panic!("unexpected operator: {:?}", op.kind),
                 }
             }
@@ -645,44 +645,44 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.compile_expr(left);
                 if op.kind == token::Kind::And {
                     let mut after_label = Label::new();
-                    self.asm().dup();
-                    self.asm().mode(inst::MODE_LUA);
-                    self.asm().not();
-                    self.asm().mode(inst::MODE_LUA);
-                    self.asm().bif(&mut after_label);
-                    self.asm().pop();
+                    self.asm.dup();
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.not();
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.bif(&mut after_label);
+                    self.asm.pop();
                     self.compile_expr(right);
-                    self.asm().bind(&mut after_label);
+                    self.asm.bind(&mut after_label);
                 } else if op.kind == token::Kind::Or {
                     let mut after_label = Label::new();
-                    self.asm().dup();
-                    self.asm().mode(inst::MODE_LUA);
-                    self.asm().bif(&mut after_label);
+                    self.asm.dup();
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.bif(&mut after_label);
                     self.compile_expr(right);
-                    self.asm().bind(&mut after_label);
+                    self.asm.bind(&mut after_label);
                 } else {
                     self.compile_expr(right);
-                    self.asm().mode(inst::MODE_LUA);
+                    self.asm.mode(inst::MODE_LUA);
                     match op.kind {
-                        token::Kind::Lt => self.asm().lt(),
-                        token::Kind::LtEq => self.asm().le(),
-                        token::Kind::Gt => self.asm().gt(),
-                        token::Kind::GtEq => self.asm().ge(),
-                        token::Kind::EqEq => self.asm().eq(),
-                        token::Kind::TildeEq => self.asm().ne(),
-                        token::Kind::Pipe => self.asm().or(),
-                        token::Kind::Tilde => self.asm().xor(),
-                        token::Kind::Amp => self.asm().and(),
-                        token::Kind::LtLt => self.asm().shl(),
-                        token::Kind::GtGt => self.asm().shr(),
-                        token::Kind::DotDot => self.asm().strcat(),
-                        token::Kind::Plus => self.asm().add(),
-                        token::Kind::Minus => self.asm().sub(),
-                        token::Kind::Star => self.asm().mul(),
-                        token::Kind::Slash => self.asm().div(),
-                        token::Kind::SlashSlash => self.asm().floordiv(),
-                        token::Kind::Percent => self.asm().mod_(),
-                        token::Kind::Caret => self.asm().exp(),
+                        token::Kind::Lt => self.asm.lt(),
+                        token::Kind::LtEq => self.asm.le(),
+                        token::Kind::Gt => self.asm.gt(),
+                        token::Kind::GtEq => self.asm.ge(),
+                        token::Kind::EqEq => self.asm.eq(),
+                        token::Kind::TildeEq => self.asm.ne(),
+                        token::Kind::Pipe => self.asm.or(),
+                        token::Kind::Tilde => self.asm.xor(),
+                        token::Kind::Amp => self.asm.and(),
+                        token::Kind::LtLt => self.asm.shl(),
+                        token::Kind::GtGt => self.asm.shr(),
+                        token::Kind::DotDot => self.asm.strcat(),
+                        token::Kind::Plus => self.asm.add(),
+                        token::Kind::Minus => self.asm.sub(),
+                        token::Kind::Star => self.asm.mul(),
+                        token::Kind::Slash => self.asm.div(),
+                        token::Kind::SlashSlash => self.asm.floordiv(),
+                        token::Kind::Percent => self.asm.mod_(),
+                        token::Kind::Caret => self.asm.exp(),
                         _ => panic!("unexpected operator: {:?}", op.kind),
                     }
                 }
@@ -706,31 +706,31 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.compile_call(call, ResultMode::Truncate);
             }
             Expr::Table { fields, .. } => {
-                self.asm().alloc(mem::size_of::<Object>() as u32);
-                self.asm().mode(inst::MODE_OBJECT);
-                self.asm().nanbox();
+                self.asm.alloc(mem::size_of::<Object>() as u32);
+                self.asm.mode(inst::MODE_OBJECT);
+                self.asm.nanbox();
                 let mut count: i64 = 1;
                 for field in fields {
-                    self.asm().dup();
+                    self.asm.dup();
                     match field {
                         TableField::NameField(key, value) => {
                             self.compile_expr(value);
                             let si = self.ensure_string(key.text.as_bytes(), key.pos());
-                            self.asm().mode(inst::MODE_LUA);
-                            self.asm().storenamedprop(si);
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.storenamedprop(si);
                         }
                         TableField::ExprField(key, value) => {
                             self.compile_expr(key);
                             self.compile_expr(value);
-                            self.asm().mode(inst::MODE_LUA);
-                            self.asm().storeindexprop();
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.storeindexprop();
                         }
                         TableField::CountField(value) => {
-                            self.asm().const_(count as u64);
-                            self.asm().nanbox();
+                            self.asm.const_(count as u64);
+                            self.asm.nanbox();
                             self.compile_expr(value);
-                            self.asm().mode(inst::MODE_LUA);
-                            self.asm().storeindexprop();
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.storeindexprop();
                             count += 1;
                         }
                     }
@@ -739,14 +739,14 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Expr::Dot { expr, name, .. } => {
                 self.compile_expr(expr);
                 let si = self.ensure_string(name.text.as_bytes(), name.pos());
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().loadnamedpropornil(si);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.loadnamedpropornil(si);
             }
             Expr::Index { expr, index, .. } => {
                 self.compile_expr(expr);
                 self.compile_expr(index);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().loadindexpropornil();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.loadindexpropornil();
             }
         }
     }
@@ -785,8 +785,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Some(Expr::Call(call)) => {
                 self.compile_call(call, ResultMode::Append);
                 if static_expr_count > 1 {
-                    self.asm().mode(inst::MODE_LUA);
-                    self.asm().appendv(static_expr_count - 1);
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.appendv(static_expr_count - 1);
                 }
                 ExprListLen::Dynamic
             }
@@ -813,15 +813,15 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         match len_known {
             ExprListLen::Static => {
                 if want > expr_count {
-                    self.asm().constzero();
-                    self.asm().mode(inst::MODE_PTR);
-                    self.asm().nanbox();
+                    self.asm.constzero();
+                    self.asm.mode(inst::MODE_PTR);
+                    self.asm.nanbox();
                     for _ in 0..(want - expr_count - 1) {
-                        self.asm().dup();
+                        self.asm.dup();
                     }
                 } else {
                     for _ in 0..(expr_count - want) {
-                        self.asm().pop();
+                        self.asm.pop();
                     }
                 }
             }
@@ -833,8 +833,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         !0
                     }
                 };
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().adjustv(want_narrow);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.adjustv(want_narrow);
             }
         }
     }
@@ -865,7 +865,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         }
 
         // Start compiling the function.
-        self.asm_stack.push(Assembler::new());
+        self.push_asm();
         self.line(pos);
 
         // Move captured parameters into cells.
@@ -873,8 +873,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         for p in parameters {
             let var = &self.scope_set.vars[p.var.0];
             if var.kind == VarKind::Capture {
-                self.asm().alloc(mem::size_of::<usize>() as u32); // pointer to nanbox
-                self.asm().dup();
+                self.asm.alloc(mem::size_of::<usize>() as u32); // pointer to nanbox
+                self.asm.dup();
                 let param_slot = match var.slot.try_into() {
                     Ok(n) => n,
                     Err(_) => {
@@ -882,9 +882,9 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         !0
                     }
                 };
-                self.asm().loadarg(param_slot);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().store();
+                self.asm.loadarg(param_slot);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.store();
                 assert_eq!(var.cell_slot, cell_slot);
                 cell_slot += 1;
             }
@@ -897,13 +897,13 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
         // If the function didn't end with a return statement,
         // return nothing.
-        self.asm().mode(inst::MODE_LUA);
-        self.asm().setv(0);
-        self.asm().mode(inst::MODE_LUA);
-        self.asm().retv();
+        self.asm.mode(inst::MODE_LUA);
+        self.asm.setv(0);
+        self.asm.mode(inst::MODE_LUA);
+        self.asm.retv();
 
         // Finish building the function and add it to the package.
-        let (insts, line_map) = match self.asm_stack.pop().unwrap().finish() {
+        let (insts, line_map) = match self.pop_asm().finish() {
             Ok(res) => res,
             Err(err) => {
                 self.errors.push(Error::wrap(self.lmap.position(pos), &err));
@@ -940,10 +940,10 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         .cell_slot
                         .try_into()
                         .unwrap();
-                    self.asm().loadlocal(slot);
+                    self.asm.loadlocal(slot);
                 }
                 CaptureFrom::Closure(slot) => {
-                    self.asm().capture(slot.try_into().unwrap());
+                    self.asm.capture(slot.try_into().unwrap());
                 }
             }
         }
@@ -957,10 +957,10 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             }
         };
         let bound_arg_count = 0;
-        self.asm()
+        self.asm
             .newclosure(fn_index, capture_count, bound_arg_count);
-        self.asm().mode(inst::MODE_CLOSURE);
-        self.asm().nanbox();
+        self.asm.mode(inst::MODE_CLOSURE);
+        self.asm.nanbox();
     }
 
     fn compile_call(&mut self, call: &Call<'src>, rmode: ResultMode) {
@@ -979,23 +979,23 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         self.compile_expr(&call.callee);
         match self.compile_expr_list(&call.arguments) {
             ExprListLen::Static => {
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().callvalue(static_arg_count);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.callvalue(static_arg_count);
             }
             ExprListLen::Dynamic => {
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().callvaluev();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.callvaluev();
             }
         }
 
         match rmode {
             ResultMode::Drop => {
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().adjustv(0);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.adjustv(0);
             }
             ResultMode::Truncate => {
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().adjustv(1);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.adjustv(1);
             }
             ResultMode::Append => (),
         }
@@ -1003,7 +1003,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
     fn compile_define_prepare(&mut self, var: &Var) {
         if var.kind == VarKind::Capture {
-            self.asm().alloc(mem::size_of::<usize>() as u32);
+            self.asm.alloc(mem::size_of::<usize>() as u32);
         }
     }
 
@@ -1018,8 +1018,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             VarKind::Capture => {
                 // When a captured variable is defined, a cell should have
                 // been allocated earlier with compile_define_prepare.
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().store();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.store();
             }
         }
     }
@@ -1039,22 +1039,22 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         self.compile_store_var(var, var_use.cell);
                     }
                     None => {
-                        self.asm().loadglobal(0); // _ENV
-                        self.asm().swap();
+                        self.asm.loadglobal(0); // _ENV
+                        self.asm.swap();
                         let si = self.ensure_string(name.text.as_bytes(), name.pos());
-                        self.asm().mode(inst::MODE_LUA);
-                        self.asm().storenamedprop(si);
+                        self.asm.mode(inst::MODE_LUA);
+                        self.asm.storenamedprop(si);
                     }
                 }
             }
             LValue::Dot { name, .. } => {
                 let si = self.ensure_string(name.text.as_bytes(), name.pos());
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().storenamedprop(si);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.storenamedprop(si);
             }
             LValue::Index { .. } => {
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().storeindexprop();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.storeindexprop();
             }
         }
     }
@@ -1067,23 +1067,23 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         match var.kind {
             VarKind::Global => {
                 // Assignment to _ENV has no effect.
-                self.asm().pop();
+                self.asm.pop();
             }
             VarKind::Parameter => {
-                self.asm().storearg(var.slot.try_into().unwrap());
+                self.asm.storearg(var.slot.try_into().unwrap());
             }
             VarKind::Local => {
-                self.asm().storelocal(var.slot.try_into().unwrap());
+                self.asm.storelocal(var.slot.try_into().unwrap());
             }
             VarKind::Capture => {
                 if let Some(cell) = var_use_cell {
-                    self.asm().capture(cell.try_into().unwrap());
+                    self.asm.capture(cell.try_into().unwrap());
                 } else {
-                    self.asm().loadlocal(var.cell_slot.try_into().unwrap());
+                    self.asm.loadlocal(var.cell_slot.try_into().unwrap());
                 }
-                self.asm().swap();
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().store();
+                self.asm.swap();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.store();
             }
         }
     }
@@ -1093,25 +1093,25 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             let var = &self.scope_set.vars[vid.0];
             self.compile_load_var(var, var_use.cell);
         } else {
-            self.asm().loadglobal(0); // _ENV
+            self.asm.loadglobal(0); // _ENV
             let si = self.ensure_string(name.text.as_bytes(), name.pos());
-            self.asm().mode(inst::MODE_LUA);
-            self.asm().loadnamedpropornil(si);
+            self.asm.mode(inst::MODE_LUA);
+            self.asm.loadnamedpropornil(si);
         }
     }
 
     fn compile_load_var(&mut self, var: &Var, var_use_cell: Option<usize>) {
         match var.kind {
-            VarKind::Global => self.asm().loadglobal(var.slot.try_into().unwrap()),
-            VarKind::Parameter => self.asm().loadarg(var.slot.try_into().unwrap()),
-            VarKind::Local => self.asm().loadlocal(var.slot.try_into().unwrap()),
+            VarKind::Global => self.asm.loadglobal(var.slot.try_into().unwrap()),
+            VarKind::Parameter => self.asm.loadarg(var.slot.try_into().unwrap()),
+            VarKind::Local => self.asm.loadlocal(var.slot.try_into().unwrap()),
             VarKind::Capture => {
                 if let Some(cell) = var_use_cell {
-                    self.asm().capture(cell.try_into().unwrap());
+                    self.asm.capture(cell.try_into().unwrap());
                 } else {
-                    self.asm().loadlocal(var.cell_slot.try_into().unwrap());
+                    self.asm.loadlocal(var.cell_slot.try_into().unwrap());
                 }
-                self.asm().load();
+                self.asm.load();
             }
         }
     }
@@ -1144,30 +1144,34 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
     fn bind_named_label(&mut self, lid: LabelID) {
         self.ensure_label(lid);
-        let last_asm_index = self.asm_stack.len() - 1;
-        self.asm_stack[last_asm_index].bind(&mut self.named_labels[lid.0]);
+        self.asm.bind(&mut self.named_labels[lid.0]);
     }
 
     fn b_named_label(&mut self, lid: LabelID) {
         self.ensure_label(lid);
-        let last_asm_index = self.asm_stack.len() - 1;
-        self.asm_stack[last_asm_index].b(&mut self.named_labels[lid.0]);
+        self.asm.b(&mut self.named_labels[lid.0]);
     }
 
     fn pop_block(&mut self, sid: ScopeID) {
         let scope = &self.scope_set.scopes[sid.0];
         for _ in 0..scope.slot_count {
-            self.asm().pop();
+            self.asm.pop();
         }
     }
 
-    fn asm(&mut self) -> &mut Assembler {
-        self.asm_stack.last_mut().unwrap()
+    fn push_asm(&mut self) {
+        self.asm_stack.push(Assembler::new());
+        mem::swap(self.asm_stack.last_mut().unwrap(), &mut self.asm);
+    }
+
+    fn pop_asm(&mut self) -> Assembler {
+        mem::swap(self.asm_stack.last_mut().unwrap(), &mut self.asm);
+        self.asm_stack.pop().unwrap()
     }
 
     fn line(&mut self, pos: Pos) {
         let e = self.lmap.encode_line(pos);
-        self.asm().line(e);
+        self.asm.line(e);
     }
 
     fn error(&mut self, pos: Pos, message: String) {
