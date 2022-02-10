@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 73.
+// Next opcode: 74.
 pub const ADD: u8 = 20;
 pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
@@ -31,6 +31,7 @@ pub const GE: u8 = 18;
 pub const GT: u8 = 19;
 // pub const INT64: u8 = 49;
 pub const LE: u8 = 16;
+pub const LEN: u8 = 73;
 pub const LOAD: u8 = 36;
 pub const LOADARG: u8 = 29;
 pub const LOADGLOBAL: u8 = 9;
@@ -113,8 +114,8 @@ pub fn size_at(insts: &[u8]) -> usize {
 pub const fn size(op: u8) -> usize {
     match op {
         ADD | AND | CALLVALUEV | CONSTZERO | DIV | DUP | EQ | EXP | FLOORDIV | GE | GT | LT
-        | LE | LOAD | LOADINDEXPROPORNIL | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG | NOP
-        | NOT | NOTB | OR | PANIC | POP | PROTOTYPE | RET | RETV | SHL | SHR | STORE
+        | LE | LEN | LOAD | LOADINDEXPROPORNIL | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG
+        | NOP | NOT | NOTB | OR | PANIC | POP | PROTOTYPE | RET | RETV | SHL | SHR | STORE
         | STOREINDEXPROP | STOREPROTOTYPE | STRCAT | SUB | SWAP | TOFLOAT | TYPEOF | XOR => 1,
         SWAPN | SYS => 2,
         ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETV | STOREARG
@@ -152,6 +153,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         GE => "ge",
         GT => "gt",
         LE => "le",
+        LEN => "len",
         LOAD => "load",
         LOADARG => "loadarg",
         LOADGLOBAL => "loadglobal",
@@ -390,6 +392,10 @@ impl Assembler {
 
     pub fn le(&mut self) {
         self.write_u8(LE);
+    }
+
+    pub fn len(&mut self) {
+        self.write_u8(LEN);
     }
 
     pub fn load(&mut self) {
@@ -706,9 +712,10 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "  {}{}", mnemonic(insts[p]), mode)?;
         match insts[p] {
             ADD | AND | CALLVALUEV | CONSTZERO | DIV | DUP | EXP | EQ | FLOORDIV | GE | GT | LT
-            | LE | LOAD | LOADINDEXPROPORNIL | LOADPROTOTYPE | MOD | MUL | NANBOX | NE | NEG
-            | NOP | NOT | NOTB | OR | PANIC | POP | PROTOTYPE | RET | RETV | SHL | SHR | STORE
-            | STOREINDEXPROP | STOREPROTOTYPE | STRCAT | SUB | SWAP | TOFLOAT | TYPEOF | XOR => {
+            | LE | LEN | LOAD | LOADINDEXPROPORNIL | LOADPROTOTYPE | MOD | MUL | NANBOX | NE
+            | NEG | NOP | NOT | NOTB | OR | PANIC | POP | PROTOTYPE | RET | RETV | SHL | SHR
+            | STORE | STOREINDEXPROP | STOREPROTOTYPE | STRCAT | SUB | SWAP | TOFLOAT | TYPEOF
+            | XOR => {
                 f.write_str("\n")?;
             }
             B | BIF => {

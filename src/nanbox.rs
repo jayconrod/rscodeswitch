@@ -373,6 +373,15 @@ impl TryInto<&Object> for NanBox {
 #[derive(Clone, Copy, Debug)]
 pub struct NanBoxKey(u64);
 
+impl NanBoxKey {
+    pub fn as_array_key(&self) -> ConvertResult<i64> {
+        match NanBox(self.0).as_i64() {
+            Ok(i) if i < i64::MAX => Ok(i),
+            _ => Err(ConvertError {}),
+        }
+    }
+}
+
 impl TryFrom<NanBox> for NanBoxKey {
     type Error = NanBoxKeyError;
     fn try_from(v: NanBox) -> Result<NanBoxKey, Self::Error> {

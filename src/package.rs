@@ -1,4 +1,4 @@
-use crate::data::{self, Slice};
+use crate::data::{self, SetValue, Slice};
 use crate::heap::{self, Handle, Ptr, Set, HEAP};
 use crate::inst;
 use crate::nanbox::{NanBox, NanBoxKey};
@@ -251,8 +251,16 @@ pub struct Object {
     pub prototype: Ptr<Object>,
 
     /// A set of "own" properties belonging to this object. Keys are arbitrary
-    /// nanboxed values.
+    /// nanboxed values, except for array keys.
     pub properties: data::HashMap<NanBoxKey, Property>,
+
+    /// A set of "own" properties belonging to this object. Keys are
+    /// non-negative integers, less than i64::MAX.
+    pub array_properties: data::HashMap<SetValue<i64>, Property>,
+
+    /// If the object has no array properties, len is 0. Otherwise, len is the
+    /// greatest array property key plus 1.
+    pub len: i64,
 }
 
 impl Object {
@@ -262,7 +270,7 @@ impl Object {
         unsafe {
             let mut o = self;
             loop {
-                let prop = o.properties.get(&key);
+                let prop = o.own_property(key);
                 if prop.is_some() {
                     return prop;
                 }
@@ -278,6 +286,22 @@ impl Object {
         }
     }
 
+    /// Looks up and returns a property stored in the object itself, not in
+    /// its prototype chain.
+    pub fn own_property(&self, key: NanBoxKey) -> Option<&Property> {
+        if let Ok(i) = key.as_array_key() {
+            self.own_array_property(i)
+        } else {
+            self.properties.get(&key)
+        }
+    }
+
+    /// Looks up and returns an array property stored in the object itself, not
+    /// in its prototype chain.
+    pub fn own_array_property(&self, key: i64) -> Option<&Property> {
+        self.array_properties.get(&SetValue { value: key })
+    }
+
     /// Sets a property. If the property exists in this object or in the
     /// prototype chain, the existing property is written. Otherwise, a new
     /// property is added to this object.
@@ -286,7 +310,11 @@ impl Object {
             let mut o = (self as *mut Object).as_mut().unwrap();
             let prop = Property { kind, value };
             loop {
-                let existing = o.properties.get_mut(&key);
+                let existing = if let Ok(i) = key.as_array_key() {
+                    o.array_properties.get_mut(&SetValue { value: i })
+                } else {
+                    o.properties.get_mut(&key)
+                };
                 if let Some(existing) = existing {
                     existing.set(&prop);
                     return;
@@ -296,7 +324,7 @@ impl Object {
                         o = p;
                     }
                     None => {
-                        self.properties.insert(&key, &prop);
+                        self.set_own_property(key, kind, value);
                         return;
                     }
                 }
@@ -310,10 +338,22 @@ impl Object {
     /// prototype chain.
     pub fn set_own_property(&mut self, key: NanBoxKey, kind: PropertyKind, value: NanBox) {
         let prop = Property { kind, value };
-        if let Some(existing) = self.properties.get_mut(&key) {
-            existing.set(&prop);
+        if let Ok(i) = key.as_array_key() {
+            let ikey = SetValue { value: i };
+            if let Some(existing) = self.array_properties.get_mut(&ikey) {
+                existing.set(&prop);
+            } else {
+                self.array_properties.insert(&ikey, &prop);
+                if i >= self.len {
+                    self.len = i + 1;
+                }
+            }
         } else {
-            self.properties.insert(&key, &prop);
+            if let Some(existing) = self.properties.get_mut(&key) {
+                existing.set(&prop);
+            } else {
+                self.properties.insert(&key, &prop);
+            }
         }
     }
 

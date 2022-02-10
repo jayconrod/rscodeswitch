@@ -2,7 +2,7 @@ use crate::data;
 use crate::heap::HEAP;
 use crate::inst;
 use crate::nanbox::{self, NanBox};
-use crate::package::{Closure, Function, Object, PropertyKind};
+use crate::package::{Closure, Function, Object, Property, PropertyKind};
 use crate::pos::Error;
 
 use std::io::Write;
@@ -974,6 +974,37 @@ impl<'w> Interpreter<'w> {
                 (inst::LE, inst::MODE_LUA) => {
                     binop_cmp!(is_le, lua);
                     inst::size(inst::LE)
+                }
+                (inst::LEN, inst::MODE_LUA) => {
+                    let o = NanBox(pop!());
+                    let v = if let Ok(s) = <NanBox as TryInto<&data::String>>::try_into(o) {
+                        s.len() as i64
+                    } else if let Ok(o) = <NanBox as TryInto<&Object>>::try_into(o) {
+                        // We want to return the index of the last non-nil
+                        // property with a positive integer key in the table.
+                        // Object::len is not quite that: it's one plus the
+                        // index of the property with the highest non-negative
+                        // integer key. If that property is nil, we walk back
+                        // until we find a non-nil value.
+                        // TODO: find a faster solution. The spec requires
+                        // O(log n) time, but this is O(n).
+                        let mut n = o.len;
+                        if n > 0 {
+                            n -= 1;
+                        }
+                        while n > 0 {
+                            match o.own_array_property(n) {
+                                Some(Property { value, .. }) if !value.is_nil() => break,
+                                _ => (),
+                            }
+                            n -= 1;
+                        }
+                        n
+                    } else {
+                        return_errorf!("value is not an object: {:?}", o);
+                    };
+                    push!(maybe_box_int!(v).0);
+                    inst::size(inst::LEN)
                 }
                 (inst::LOAD, inst::MODE_I64) => {
                     push!(load!(i64, pop!(), 0, 0) as u64);

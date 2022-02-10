@@ -21,6 +21,20 @@ impl<T: Copy> Set for SetValue<T> {
     }
 }
 
+impl<T: PartialEq + Copy> PartialEq for SetValue<T> {
+    fn eq(&self, other: &SetValue<T>) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<T: Eq + Copy> Eq for SetValue<T> {}
+
+impl<T: Hash + Copy> Hash for SetValue<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.value.hash(state)
+    }
+}
+
 #[derive(Debug)]
 pub struct Array<T> {
     _data: PhantomData<T>,

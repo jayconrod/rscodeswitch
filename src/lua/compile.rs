@@ -637,7 +637,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     token::Kind::Not => self.asm().not(),
                     token::Kind::Minus => self.asm().neg(),
                     token::Kind::Tilde => self.asm().notb(),
-                    token::Kind::Hash => unimplemented!(),
+                    token::Kind::Hash => self.asm().len(),
                     _ => panic!("unexpected operator: {:?}", op.kind),
                 }
             }
