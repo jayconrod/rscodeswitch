@@ -118,7 +118,7 @@ pub enum Type {
     Function,
     Closure,
     Object,
-    Nanbox,
+    NanBox,
     Pointer(Box<Type>),
 }
 
@@ -129,7 +129,7 @@ impl Type {
             Type::Bool => 1,
             Type::Int64 => 8,
             Type::Float64 => 8,
-            Type::Nanbox => 8,
+            Type::NanBox => 8,
             Type::Object => mem::size_of::<Object>(),
             Type::String | Type::Function | Type::Closure | Type::Pointer(_) => {
                 mem::size_of::<usize>()
@@ -140,7 +140,7 @@ impl Type {
     pub fn is_pointer(&self) -> bool {
         match self {
             // TODO: String should be data::String, not *const data::String
-            Type::String | Type::Function | Type::Closure | Type::Nanbox | Type::Pointer(_) => true,
+            Type::String | Type::Function | Type::Closure | Type::NanBox | Type::Pointer(_) => true,
             _ => false,
         }
     }
@@ -162,7 +162,7 @@ impl fmt::Display for Type {
                     Type::Function => "function",
                     Type::Closure => "closure",
                     Type::Object => "object",
-                    Type::Nanbox => "nanbox",
+                    Type::NanBox => "nanbox",
                     _ => unreachable!(),
                 };
                 f.write_str(s)
@@ -233,7 +233,7 @@ impl Closure {
             let addr = self.cell_addr(self.capture_count as u32 + i as u32) as *mut u64;
             *addr = arg;
             let ty = &self.function.unwrap_ref().param_types[i as usize];
-            if *ty == Type::Nanbox {
+            if *ty == Type::NanBox {
                 HEAP.write_barrier_nanbox(addr as usize, arg);
             } else if ty.is_pointer() {
                 HEAP.write_barrier(addr as usize, arg as usize);

@@ -205,7 +205,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     name: format!("·{}·constructor", name.text),
                     insts: ctor_insts,
                     package: 0 as *mut Package,
-                    param_types: vec![Type::Nanbox; init_param_count.unwrap_or(0) as usize],
+                    param_types: vec![Type::NanBox; init_param_count.unwrap_or(0) as usize],
                     cell_types: Vec::new(),
                     line_map,
                 };
@@ -347,10 +347,10 @@ impl<'a, 'b> Compiler<'a, 'b> {
         };
         let param_count = params.len() + (if is_method { 1 } else { 0 });
         let mut param_types = Vec::new();
-        param_types.resize_with(param_count, || Type::Nanbox);
+        param_types.resize_with(param_count, || Type::NanBox);
         let mut cell_types = Vec::new();
         cell_types.resize_with(self.scopes.scopes[arg_scope].captures.len(), || {
-            Type::Pointer(Box::new(Type::Nanbox))
+            Type::Pointer(Box::new(Type::NanBox))
         });
         let f = Function {
             name: String::from(name.text),

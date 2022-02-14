@@ -1006,7 +1006,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         } else {
             parameters.len()
         };
-        let param_types = vec![Type::Nanbox; param_count];
+        let param_types = vec![Type::NanBox; param_count];
         let fn_index = match self.functions.len().try_into() {
             Ok(i) => i,
             Err(_) => {
