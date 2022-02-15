@@ -53,8 +53,16 @@ struct Compiler<'src, 'ss, 'lm, 'err> {
     string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
     named_labels: Vec<inst::Label>,
     asm: Assembler,
-    asm_stack: Vec<Assembler>,
+    param_count: u16,
+    is_variadic: bool,
+    func_stack: Vec<FuncState>,
     errors: &'err mut Vec<Error>,
+}
+
+struct FuncState {
+    asm: Assembler,
+    param_count: u16,
+    is_variadic: bool,
 }
 
 impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
@@ -72,7 +80,9 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             string_index: Handle::new(data::HashMap::alloc()),
             named_labels: Vec::new(),
             asm: Assembler::new(),
-            asm_stack: Vec::new(),
+            param_count: 0,
+            is_variadic: false,
+            func_stack: Vec::new(),
             errors,
         }
     }
@@ -89,6 +99,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     insts,
                     package: 0 as *mut Package,
                     param_types: Vec::new(),
+                    var_param_type: None,
                     cell_types: Vec::new(),
                     line_map,
                 });
@@ -788,6 +799,18 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Expr::Call(call) => {
                 self.compile_call(call, ResultMode::Truncate);
             }
+            Expr::VarArgs(t) => {
+                if !self.is_variadic {
+                    self.error(
+                        t.pos(),
+                        String::from("cannot use '...' outside a variadic function"),
+                    );
+                }
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.loadvarargs();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.adjustv(1);
+            }
             Expr::Table { fields, .. } => {
                 self.asm.alloc(mem::size_of::<Object>() as u32);
                 self.asm.mode(inst::MODE_OBJECT);
@@ -874,7 +897,17 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 }
                 ExprListLen::Dynamic
             }
-            // TODO: expand '...'
+            Some(Expr::VarArgs(t)) => {
+                if !self.is_variadic {
+                    self.error(
+                        t.pos(),
+                        String::from("cannot use '...' outside a variadic function"),
+                    );
+                }
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.loadvarargs();
+                ExprListLen::Dynamic
+            }
             Some(expr) => {
                 self.compile_expr(expr);
                 ExprListLen::Static
@@ -944,13 +977,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         body: &[Stmt<'src>],
         pos: Pos,
     ) -> u32 {
-        // TODO: support variadic functions.
-        if is_variadic {
-            unimplemented!();
-        }
-
         // Start compiling the function.
-        self.push_asm();
+        self.push_func(parameters.len().try_into().unwrap(), is_variadic);
         self.line(pos);
 
         // Move captured parameters into cells.
@@ -994,7 +1022,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         self.asm.retv();
 
         // Finish building the function and add it to the package.
-        let (insts, line_map) = match self.pop_asm().finish() {
+        let (insts, line_map) = match self.pop_func().finish() {
             Ok(res) => res,
             Err(err) => {
                 self.errors.push(Error::wrap(self.lmap.position(pos), &err));
@@ -1007,6 +1035,11 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             parameters.len()
         };
         let param_types = vec![Type::NanBox; param_count];
+        let var_param_type = if is_variadic {
+            Some(Type::NanBox)
+        } else {
+            None
+        };
         let fn_index = match self.functions.len().try_into() {
             Ok(i) => i,
             Err(_) => {
@@ -1019,6 +1052,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             insts,
             package: 0 as *mut Package,
             param_types,
+            var_param_type,
             cell_types: Vec::new(),
             line_map,
         });
@@ -1105,12 +1139,22 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         }
     }
 
+    /// Emits instructions needed before a (possibly captured) local variable
+    /// definition. This should be called before compiling the value to be
+    /// assigned. compile_define should be called after. Both should be called
+    /// before the next variable definition. These function can't be used with
+    /// a normal assignment or "local" statement which has multiple expressions
+    /// on the left or right.
     fn compile_define_prepare(&mut self, var: &Var) {
         if var.kind == VarKind::Capture {
             self.asm.alloc(mem::size_of::<usize>() as u32);
+            self.asm.dup();
         }
     }
 
+    /// Emits instructions needed for a local variable definition. This should
+    /// be called after compile_define_prepare and after compiling the value
+    /// to be assigned.
     fn compile_define(&mut self, var: &Var) {
         match var.kind {
             VarKind::Global | VarKind::Parameter => unreachable!(),
@@ -1270,14 +1314,24 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         }
     }
 
-    fn push_asm(&mut self) {
-        self.asm_stack.push(Assembler::new());
-        mem::swap(self.asm_stack.last_mut().unwrap(), &mut self.asm);
+    fn push_func(&mut self, mut param_count: u16, mut is_variadic: bool) {
+        let mut asm = Assembler::new();
+        mem::swap(&mut self.asm, &mut asm);
+        mem::swap(&mut self.param_count, &mut param_count);
+        mem::swap(&mut self.is_variadic, &mut is_variadic);
+        self.func_stack.push(FuncState {
+            asm,
+            param_count,
+            is_variadic,
+        });
     }
 
-    fn pop_asm(&mut self) -> Assembler {
-        mem::swap(self.asm_stack.last_mut().unwrap(), &mut self.asm);
-        self.asm_stack.pop().unwrap()
+    fn pop_func(&mut self) -> Assembler {
+        let mut state = self.func_stack.pop().unwrap();
+        mem::swap(&mut self.asm, &mut state.asm);
+        mem::swap(&mut self.param_count, &mut state.param_count);
+        mem::swap(&mut self.is_variadic, &mut state.is_variadic);
+        state.asm
     }
 
     fn line(&mut self, pos: Pos) {

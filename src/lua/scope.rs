@@ -556,7 +556,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
 
     fn resolve_expr(&mut self, expr: &Expr<'src>) {
         match expr {
-            Expr::Literal(_) => (),
+            Expr::Literal(_) | Expr::VarArgs(_) => (),
             Expr::Var { name, var_use, .. } => {
                 self.resolve(*name, *var_use);
             }

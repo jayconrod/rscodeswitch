@@ -424,6 +424,7 @@ pub enum Expr<'src> {
         pos: Pos,
     },
     Call(Call<'src>),
+    VarArgs(Token<'src>),
     Table {
         fields: Vec<TableField<'src>>,
         pos: Pos,
@@ -450,6 +451,7 @@ impl<'src> Expr<'src> {
             Expr::Group { pos, .. } => *pos,
             Expr::Function { pos, .. } => *pos,
             Expr::Call(Call { pos, .. }) => *pos,
+            Expr::VarArgs(t) => t.pos(),
             Expr::Table { pos, .. } => *pos,
             Expr::Dot { pos, .. } => *pos,
             Expr::Index { pos, .. } => *pos,
@@ -496,6 +498,7 @@ impl<'src> DisplayIndent for Expr<'src> {
                 write!(f, "end")
             }
             Expr::Call(call) => call.fmt_indent(f, level),
+            Expr::VarArgs(_) => f.write_str("..."),
             Expr::Table { fields, .. } => {
                 f.write_str("{")?;
                 let mut sep = "";
@@ -1267,6 +1270,11 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         })
     }
 
+    fn parse_varargs_expr(&mut self) -> Result<Expr<'src>, Error> {
+        let t = self.expect(Kind::DotDotDot)?;
+        Ok(Expr::VarArgs(t))
+    }
+
     fn parse_function_parameters_and_body(
         &mut self,
     ) -> Result<(Vec<Param<'src>>, bool, Vec<Stmt<'src>>, Pos), Error> {
@@ -1288,6 +1296,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
                     parameters.push(Param { name, var });
                 }
                 Kind::DotDotDot => {
+                    self.take();
                     is_variadic = true;
                     break;
                 }
@@ -1336,6 +1345,11 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             },
             Kind::Function => ParseRule {
                 prefix: Some(&Parser::parse_function_expr),
+                infix: None,
+                precedence: PREC_NONE,
+            },
+            Kind::DotDotDot => ParseRule {
+                prefix: Some(&Parser::parse_varargs_expr),
                 infix: None,
                 precedence: PREC_NONE,
             },

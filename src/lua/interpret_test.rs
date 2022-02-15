@@ -118,7 +118,7 @@ enum Want {
 }
 
 fn parse_want(path: &Path, data: &[u8]) -> Result<Want, ErrorList> {
-    let re = regex!(r"(?m)-- (Output|Error):\s*(.*)$");
+    let re = regex!(r"(?m)-- (Output|Error): *(.*)$");
     let data_str =
         str::from_utf8(data).map_err(|err| ErrorList::wrap(Position::from(path), &err))?;
     let mut first_label: Option<String> = None;

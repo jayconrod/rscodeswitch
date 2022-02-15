@@ -226,6 +226,16 @@ impl<'src, 'lm> Lexer<'src, 'lm> {
                 continue;
             }
 
+            // "..." operator.
+            if b == b'.'
+                && bnext == b'.'
+                && self.p + 2 < self.data.len()
+                && self.data[self.p + 2] == b'.'
+            {
+                self.token(Kind::DotDotDot, self.p + 3);
+                continue;
+            }
+
             // Two-character operators.
             let kind = match (b, bnext) {
                 (b'<', b'<') => Kind::LtLt,

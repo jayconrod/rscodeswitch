@@ -78,6 +78,7 @@ pub struct Function {
     pub package: *const Package,
     pub param_types: Vec<Type>,
     pub cell_types: Vec<Type>,
+    pub var_param_type: Option<Type>,
     pub line_map: FunctionLineMap,
 }
 

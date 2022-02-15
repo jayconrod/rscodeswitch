@@ -302,57 +302,18 @@ impl<'w> Interpreter<'w> {
             }};
         }
 
-        // call_closure! sets up a call to the given closure, with a number
-        // of arguments on the stack. If the callee has bound arguments,
-        // they're inserted on the stack before the arguments that are
-        // already there. After call_closure!, ip points to the first
-        // instruction of the callee, so 'continue' should run to avoid
-        // incrementing ip.
-        macro_rules! call_closure {
-            ($callee:expr, $arg_count:expr) => {{
-                let callee = $callee;
-                let arg_count = $arg_count;
-                let callee_func = callee.function.unwrap_ref();
-                if callee.bound_arg_count as usize + arg_count != callee_func.param_types.len() {
-                    return_errorf!(
-                        "call to function with {} parameters, but got {} arguments",
-                        callee_func.param_types.len(),
-                        arg_count
-                    );
+        // arg_addr returns the stack address of an argument to the current
+        // function.
+        macro_rules! arg_addr {
+            ($index:expr) => {{
+                let index = $index;
+                if func.var_param_type.is_some() {
+                    let argc = *((fp + FRAME_SIZE) as *const u64) as usize;
+                    fp + FRAME_SIZE + argc * 8 - index * 8
+                } else {
+                    let argc = func.param_types.len();
+                    fp + FRAME_SIZE + argc * 8 - index * 8 - 8
                 }
-
-                // If the callee has bound arguments, insert them on the
-                // stack before the regular arguments.
-                if callee.bound_arg_count > 0 {
-                    let bound_arg_begin = sp + arg_count * 8 - 8;
-                    let delta = callee.bound_arg_count as usize * 8;
-                    let mut from = sp;
-                    sp -= delta;
-                    let mut to = sp;
-                    while from <= bound_arg_begin {
-                        *(to as *mut u64) = *(from as *mut u64);
-                        to += 8;
-                        from += 8;
-                    }
-                    for i in 0..callee.bound_arg_count {
-                        let to = (bound_arg_begin - i as usize * 8) as *mut u64;
-                        *to = callee.bound_arg(i);
-                    }
-                }
-
-                // Construct a stack frame for the callee, and set the
-                // "registers" so the function's instructions, cells,
-                // and package will be used.
-                sp -= FRAME_SIZE;
-                *((sp as usize + 24) as *mut u64) = func as *const Function as u64;
-                func = callee_func;
-                *((sp as usize + 16) as *mut u64) = cp as u64;
-                cp = callee;
-                *((sp as usize + 8) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
-                ip = &func.insts[0] as *const u8;
-                *(sp as *mut u64) = fp as u64;
-                fp = sp;
-                pp = callee_func.package.as_ref().unwrap();
             }};
         }
 
@@ -434,7 +395,6 @@ impl<'w> Interpreter<'w> {
 
         macro_rules! lua_call_closure {
             ($callee:expr, $arg_count:expr) => {{
-                // TODO: support variadic functions
                 // TODO: support metatable calls
                 let callee: &Closure = $callee;
                 let arg_count = ($arg_count) as usize;
@@ -459,16 +419,26 @@ impl<'w> Interpreter<'w> {
                     }
                 }
 
-                // Adjust the number of arguments to match the number of
-                // parameters by popping arguments or pushing nil.
-                let total_arg_count = arg_count + callee.bound_arg_count as usize;
+                // If there are fewer arguments than parameters, push nils. If
+                // the callee is variadic, push the number of arguments,
+                // including pushed nils. If the callee is not variadic and
+                // there are more arguments than parameters, pop the extra
+                // arguments.
+                let mut total_arg_count = arg_count + callee.bound_arg_count as usize;
+                if total_arg_count > u16::MAX as usize {
+                    return_errorf!("too many arguments");
+                }
                 let param_count = callee_func.param_types.len();
-                if total_arg_count > param_count {
-                    sp += (total_arg_count - param_count) * 8;
-                } else if total_arg_count < param_count {
+                if total_arg_count < param_count {
                     for _ in 0..(param_count - total_arg_count) {
                         push!(NanBox::from_nil().0);
                     }
+                    total_arg_count = param_count;
+                }
+                if callee_func.var_param_type.is_some() {
+                    push!(total_arg_count as u64);
+                } else if total_arg_count > param_count {
+                    sp += (total_arg_count - param_count) * 8;
                 }
 
                 // Construct a stack frame for the callee, and set the
@@ -650,7 +620,7 @@ impl<'w> Interpreter<'w> {
                     } else {
                         arg_count + 1
                     };
-                    call_closure!(callee, arg_count_including_receiver);
+                    lua_call_closure!(callee, arg_count_including_receiver);
                     continue;
                 }
                 (inst::CALLNAMEDPROPV, inst::MODE_LUA) => {
@@ -685,7 +655,7 @@ impl<'w> Interpreter<'w> {
                     } else {
                         vc + 1
                     };
-                    call_closure!(callee, arg_count_including_receiver);
+                    lua_call_closure!(callee, arg_count_including_receiver);
                     continue;
                 }
                 (inst::CALLNAMEDPROPWITHPROTOTYPE, inst::MODE_LUA) => {
@@ -718,7 +688,7 @@ impl<'w> Interpreter<'w> {
                         shift_args!(arg_count, 1);
                         arg_count + 1
                     };
-                    call_closure!(callee, arg_count_including_receiver);
+                    lua_call_closure!(callee, arg_count_including_receiver);
                     continue;
                 }
                 (inst::CALLVALUE, inst::MODE_LUA) => {
@@ -1075,8 +1045,8 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::LOADARG, inst::MODE_I64) => {
                     let i = read_imm!(u16, 1) as usize;
-                    let ai = func.param_types.len() - i - 1;
-                    let v = *((fp + FRAME_SIZE + ai * 8) as *const u64);
+                    let slot = arg_addr!(i);
+                    let v = *(slot as *const u64);
                     push!(v);
                     inst::size(inst::LOADARG)
                 }
@@ -1160,6 +1130,19 @@ impl<'w> Interpreter<'w> {
                     };
                     push!(p as *const Object as u64);
                     inst::size(inst::LOADPROTOTYPE)
+                }
+                (inst::LOADVARARGS, inst::MODE_LUA) => {
+                    debug_assert!(func.var_param_type.is_some());
+                    let argc = *((fp + FRAME_SIZE) as *const u64) as usize;
+                    vc = argc - func.param_types.len();
+                    let mut argp = fp + FRAME_SIZE + vc * 8;
+                    let end = fp + FRAME_SIZE;
+                    while argp != end {
+                        let v = *(argp as *const u64);
+                        argp -= 8;
+                        push!(v);
+                    }
+                    inst::size(inst::LOADVARARGS)
                 }
                 (inst::LT, inst::MODE_I64) => {
                     binop_cmp!(<, i64);
@@ -1499,7 +1482,7 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::RET, inst::MODE_I64) => {
                     let ret_sp = sp;
-                    sp = fp + FRAME_SIZE + func.param_types.len() * 8 - 8;
+                    sp = arg_addr!(0);
                     func = match (*((fp + 24) as *const *const Function)).as_ref() {
                         Some(f) => f,
                         None => {
@@ -1515,9 +1498,8 @@ impl<'w> Interpreter<'w> {
                     continue;
                 }
                 (inst::RETV, inst::MODE_LUA) => {
-                    // TODO: support variadic functions.
                     let mut retp = sp + vc * 8;
-                    sp = fp + FRAME_SIZE + func.param_types.len() * 8;
+                    sp = arg_addr!(0) + 8;
                     func = match (*((fp + 24) as *const *const Function)).as_ref() {
                         Some(f) => f,
                         None => {
@@ -1611,9 +1593,9 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::STOREARG, inst::MODE_I64) => {
                     let i = read_imm!(u16, 1) as usize;
-                    let ai = func.param_types.len() - i - 1;
+                    let slot = arg_addr!(i);
                     let v = pop!();
-                    *((fp + FRAME_SIZE + ai * 8) as *mut u64) = v;
+                    *(slot as *mut u64) = v;
                     inst::size(inst::STOREARG)
                 }
                 (inst::STOREGLOBAL, inst::MODE_I64) => {

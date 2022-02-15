@@ -74,6 +74,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     insts: init_insts,
                     package: 0 as *mut Package,
                     param_types: Vec::new(),
+                    var_param_type: None,
                     cell_types: Vec::new(),
                     line_map,
                 });
@@ -206,6 +207,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     insts: ctor_insts,
                     package: 0 as *mut Package,
                     param_types: vec![Type::NanBox; init_param_count.unwrap_or(0) as usize],
+                    var_param_type: None,
                     cell_types: Vec::new(),
                     line_map,
                 };
@@ -357,6 +359,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             insts,
             package: 0 as *mut Package,
             param_types,
+            var_param_type: None,
             cell_types,
             line_map,
         };
