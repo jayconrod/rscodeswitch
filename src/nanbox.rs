@@ -129,8 +129,8 @@ impl PartialEq for NanBox {
         } else if let (Ok(lf), Ok(rf)) = (self.as_f64(), other.as_f64()) {
             lf == rf
         } else if let (Ok(ls), Ok(rs)) = (
-            <NanBox as TryInto<*const data::String>>::try_into(*self),
-            <NanBox as TryInto<*const data::String>>::try_into(*other),
+            <NanBox as TryInto<&data::String>>::try_into(*self),
+            <NanBox as TryInto<&data::String>>::try_into(*other),
         ) {
             ls == rs
         } else {

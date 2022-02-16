@@ -546,11 +546,6 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                     self.resolve_expr(expr);
                 }
             }
-            Stmt::Print { exprs, .. } => {
-                for expr in exprs {
-                    self.resolve_expr(expr);
-                }
-            }
         }
     }
 
@@ -862,8 +857,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             | Stmt::Function { .. }
             | Stmt::LocalFunction { .. }
             | Stmt::Call(_)
-            | Stmt::Return { .. }
-            | Stmt::Print { .. } => (),
+            | Stmt::Return { .. } => (),
             Stmt::Do { scope, stmts, .. } => {
                 self.shift_vars_in_scope(*scope, shift);
                 for stmt in stmts {

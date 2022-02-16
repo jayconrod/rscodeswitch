@@ -135,12 +135,6 @@ pub enum Stmt<'src> {
         exprs: Vec<Expr<'src>>,
         pos: Pos,
     },
-    // TODO: Remove this construct after standard library calls are supported.
-    // This is a hack to enable debugging and testing.
-    Print {
-        exprs: Vec<Expr<'src>>,
-        pos: Pos,
-    },
 }
 
 impl<'src> Stmt<'src> {
@@ -165,7 +159,6 @@ impl<'src> Stmt<'src> {
             Stmt::LocalFunction { pos, .. } => *pos,
             Stmt::Call(Call { pos, .. }) => *pos,
             Stmt::Return { pos, .. } => *pos,
-            Stmt::Print { pos, .. } => *pos,
         }
     }
 
@@ -192,21 +185,6 @@ impl<'src> Stmt<'src> {
         }
         self.write_indent(f, level)?;
         write!(f, "end")
-    }
-
-    fn write_expr_list(
-        &self,
-        f: &mut Formatter,
-        exprs: &[Expr<'src>],
-        level: usize,
-    ) -> fmt::Result {
-        let mut sep = "";
-        for expr in exprs {
-            write!(f, "{}", sep)?;
-            sep = ", ";
-            expr.fmt_indent(f, level)?;
-        }
-        Ok(())
     }
 }
 
@@ -343,11 +321,6 @@ impl<'src> DisplayIndent for Stmt<'src> {
                     sep = ", ";
                 }
                 Ok(())
-            }
-            Stmt::Print { exprs, .. } => {
-                write!(f, "print(")?;
-                self.write_expr_list(f, exprs, level)?;
-                write!(f, ")")
             }
         }
     }
@@ -723,14 +696,6 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             Kind::Goto => self.parse_goto_stmt(),
             Kind::Function => self.parse_function_stmt(),
             Kind::Return => self.parse_return_stmt(),
-            Kind::Ident if self.tokens[self.next].text == "print" => {
-                let begin = self.take().pos();
-                self.expect(Kind::LParen)?;
-                let exprs = self.parse_expr_list()?;
-                let end = self.expect(Kind::RParen)?.pos();
-                let pos = begin.combine(end);
-                return Ok(Stmt::Print { exprs, pos });
-            }
             _ => {
                 let e = self.parse_expr()?;
                 if self.peek() == Kind::Comma || self.peek() == Kind::Eq {

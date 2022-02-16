@@ -637,24 +637,6 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm.mode(inst::MODE_LUA);
                 self.asm.retv();
             }
-            Stmt::Print { exprs, .. } => {
-                match self.compile_expr_list(exprs, 0) {
-                    ExprListLen::Static => {
-                        self.asm.mode(inst::MODE_LUA);
-                        let n = match exprs.len().try_into() {
-                            Ok(n) => n,
-                            Err(_) => {
-                                self.error(stmt.pos(), String::from("too many arguments"));
-                                !0
-                            }
-                        };
-                        self.asm.setv(n);
-                    }
-                    ExprListLen::Dynamic => (),
-                };
-                self.asm.mode(inst::MODE_LUA);
-                self.asm.sys(inst::SYS_PRINT);
-            }
         }
     }
 
@@ -741,6 +723,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     self.asm.dup();
                     self.asm.mode(inst::MODE_LUA);
                     self.asm.bif(&mut after_label);
+                    self.asm.pop();
                     self.compile_expr(right);
                     self.asm.bind(&mut after_label);
                 } else {
