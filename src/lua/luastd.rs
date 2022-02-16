@@ -44,6 +44,14 @@ pub fn build_std_package() -> Box<Package> {
         b.finish_function("assert", 2, false);
     }
 
+    // collectgarbage(opt, arg)
+    // TODO: implement garbage collection.
+    b.asm.mode(inst::MODE_LUA);
+    b.asm.setv(0);
+    b.asm.mode(inst::MODE_LUA);
+    b.asm.retv();
+    b.finish_function("collectgarbage", 2, false);
+
     // print
     b.asm.mode(inst::MODE_LUA);
     b.asm.loadvarargs();
