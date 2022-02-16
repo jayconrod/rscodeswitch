@@ -7,7 +7,7 @@ use crate::lua::syntax::{
 };
 use crate::lua::token::{self, Number, Token};
 use crate::nanbox;
-use crate::package::{Function, Global, Object, Package, Type};
+use crate::package::{Function, Global, ImportGlobal, ImportPackage, Object, Package, Type};
 use crate::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
 
 use std::fs;
@@ -113,35 +113,25 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             return None;
         }
 
+        let imports = vec![ImportPackage::new(
+            String::from("luastd"),
+            vec![ImportGlobal::new(String::from("_ENV"))],
+            Vec::new(),
+        )];
         let mut package = Box::new(Package {
+            name: String::from("main"),
             globals: self.globals,
-            functions: Vec::new(),
+            functions: self.functions,
             strings: Handle::empty(),
             line_map: PackageLineMap::from(self.lmap),
+            imports,
         });
-        for f in &mut self.functions {
-            f.package = &*package;
-        }
-        package.functions = self.functions;
         package.strings = Handle::new(Slice::alloc());
         package.strings.init_from_list(&self.strings);
         Some(package)
     }
 
     fn compile_chunk(&mut self, chunk: &Chunk<'src>) {
-        // Create the global object.
-        let env_var = &self.scope_set.vars[chunk.env_var.0];
-        assert_eq!(env_var.slot, 0);
-        self.globals.push(Global {
-            name: String::from("_ENV"),
-        });
-        let object_size = mem::size_of::<Object>() as u32;
-        self.asm.alloc(object_size);
-        self.asm.mode(inst::MODE_OBJECT);
-        self.asm.nanbox();
-        self.asm.storeglobal(env_var.slot as u32);
-
-        // Compile statements.
         for stmt in &chunk.stmts {
             self.compile_stmt(stmt);
         }
@@ -549,7 +539,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     }
                 } else {
                     // First part of name is unknown. May or may not be in _ENV.
-                    self.asm.loadglobal(0);
+                    self.asm.loadimportglobal(0, 0);
                     if is_method_assign {
                         let si = self.ensure_string(name.name.text.as_bytes(), name.name.pos());
                         self.asm.mode(inst::MODE_LUA);
@@ -1187,7 +1177,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         self.compile_store_var(var, var_use.cell);
                     }
                     None => {
-                        self.asm.loadglobal(0); // _ENV
+                        self.asm.loadimportglobal(0, 0); // _ENV
                         self.asm.swap();
                         let si = self.ensure_string(name.text.as_bytes(), name.pos());
                         self.asm.mode(inst::MODE_LUA);
@@ -1241,7 +1231,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             let var = &self.scope_set.vars[vid.0];
             self.compile_load_var(var, var_use.cell);
         } else {
-            self.asm.loadglobal(0); // _ENV
+            self.asm.loadimportglobal(0, 0); // _ENV
             let si = self.ensure_string(name.text.as_bytes(), name.pos());
             self.asm.mode(inst::MODE_LUA);
             self.asm.loadnamedpropornil(si);
@@ -1250,7 +1240,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
     fn compile_load_var(&mut self, var: &Var, var_use_cell: Option<usize>) {
         match var.kind {
-            VarKind::Global => self.asm.loadglobal(var.slot.try_into().unwrap()),
+            VarKind::Global => self.asm.loadimportglobal(0, 0),
             VarKind::Parameter => self.asm.loadarg(var.slot.try_into().unwrap()),
             VarKind::Local => self.asm.loadlocal(var.slot.try_into().unwrap()),
             VarKind::Capture => {

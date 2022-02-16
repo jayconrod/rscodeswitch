@@ -89,15 +89,13 @@ impl<'a, 'b> Compiler<'a, 'b> {
         }
 
         let mut package = Box::new(Package {
+            name: String::from("main"),
             globals: self.globals,
-            functions: Vec::new(),
+            functions: self.functions,
             strings: Handle::empty(),
             line_map: PackageLineMap::from(self.lmap),
+            imports: Vec::new(),
         });
-        for f in &mut self.functions {
-            f.package = &*package;
-        }
-        package.functions = self.functions;
         package.strings = Handle::new(Slice::alloc());
         package.strings.init_from_list(&self.strings);
         Ok(package)
@@ -712,6 +710,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             VarKind::Global => {
                 *self.ensure_global(var.slot) = Global {
                     name: String::from(name),
+                    value: 0,
                 };
             }
             VarKind::Local => {}
@@ -799,6 +798,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         if self.globals.len() <= index {
             self.globals.resize_with(index + 1, || Global {
                 name: String::from(""),
+                value: 0,
             });
         }
         &mut self.globals[index]

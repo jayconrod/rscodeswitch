@@ -1,5 +1,7 @@
 use codeswitch::interpret::Interpreter;
 use codeswitch::lua::compile;
+use codeswitch::lua::luastd;
+use codeswitch::package::{PackageLoader, ProvidedPackageSearcher};
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -26,22 +28,33 @@ fn main() {
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {
+    let mut searcher = Box::new(ProvidedPackageSearcher::new());
+    let std_package = luastd::build_std_package();
+    if args.disassemble {
+        print!(
+            "-- begin disassembly: {} --\n{}\n-- end disassembly --\n",
+            std_package.name, std_package
+        );
+    }
+    searcher.add(std_package);
     let path = PathBuf::from(&args.path);
     let package = compile::compile_file(&path)?;
     if args.disassemble {
         print!(
-            "-- begin disassembly --\n{}\n-- end disassembly --\n",
-            package
+            "-- begin disassembly: {} --\n{}\n-- end disassembly --\n",
+            package.name, package
         );
     }
+    searcher.add(package);
 
+    let mut loader = PackageLoader::new(searcher);
     let mut w = stdout();
     let mut interp = Interpreter::new(&mut w);
-    let f = package
-        .function_by_name("·init")
-        .ok_or_else(|| Box::new(StringError("·init function not found")))?;
-    interp.interpret(f)?;
-    Ok(())
+    let res = unsafe { loader.load_package("main", &mut interp) };
+    match res {
+        Ok(_) => Ok(()),
+        Err(err) => Err(Box::new(err)),
+    }
 }
 
 #[derive(Debug)]

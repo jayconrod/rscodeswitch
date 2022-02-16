@@ -1,5 +1,7 @@
 use crate::interpret::Interpreter;
 use crate::lua::compile;
+use crate::lua::luastd;
+use crate::package::{PackageLoader, ProvidedPackageSearcher};
 use crate::pos::{ErrorList, Position};
 
 use std::env;
@@ -51,14 +53,16 @@ fn interpret_test() {
 }
 
 fn try_compile_and_interpret(path: &Path) -> Result<Vec<u8>, ErrorList> {
+    let mut searcher = Box::new(ProvidedPackageSearcher::new());
+    let std_package = luastd::build_std_package();
+    searcher.add(std_package);
     let package = compile::compile_file(path)?;
+    searcher.add(package);
+    let mut loader = PackageLoader::new(searcher);
     let mut output = Vec::new();
     let mut interp = Interpreter::new(&mut output);
-    let f = package.function_by_name("·init").ok_or_else(|| {
-        let position = Position::from(path);
-        ErrorList::new(position, "·init function not found")
-    })?;
-    match interp.interpret(f) {
+    let res = unsafe { loader.load_package("main", &mut interp) };
+    match res {
         Ok(_) => Ok(output),
         Err(err) => Err(ErrorList::from(err)),
     }

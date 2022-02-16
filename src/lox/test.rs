@@ -1,5 +1,6 @@
 use crate::interpret::Interpreter;
 use crate::lox::compile;
+use crate::package::{PackageLoader, ProvidedPackageSearcher};
 use crate::pos::{ErrorList, Position};
 
 use std::env;
@@ -52,13 +53,13 @@ fn interpret_test() {
 
 fn try_compile_and_interpret(path: &Path) -> Result<Vec<u8>, ErrorList> {
     let package = compile::compile_file(path)?;
+    let mut searcher = Box::new(ProvidedPackageSearcher::new());
+    searcher.add(package);
+    let mut loader = PackageLoader::new(searcher);
     let mut output = Vec::new();
     let mut interp = Interpreter::new(&mut output);
-    let f = package.function_by_name("·init").ok_or_else(|| {
-        let position = Position::from(path);
-        ErrorList::new(position, "·init function not found")
-    })?;
-    match interp.interpret(f) {
+    let res = unsafe { loader.load_package("main", &mut interp) };
+    match res {
         Ok(_) => Ok(output),
         Err(err) => Err(ErrorList::from(err)),
     }

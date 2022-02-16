@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 76.
+// Next opcode: 77.
 pub const ADD: u8 = 20;
 pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
@@ -36,6 +36,7 @@ pub const LEN: u8 = 73;
 pub const LOAD: u8 = 36;
 pub const LOADARG: u8 = 29;
 pub const LOADGLOBAL: u8 = 9;
+pub const LOADIMPORTGLOBAL: u8 = 76;
 pub const LOADINDEXPROPORNIL: u8 = 72;
 pub const LOADLOCAL: u8 = 11;
 pub const LOADNAMEDPROP: u8 = 42;
@@ -125,7 +126,7 @@ pub const fn size(op: u8) -> usize {
         | STORELOCAL => 3,
         ALLOC | B | BIF | CALLNAMEDPROPV | FUNCTION | LOADGLOBAL | LOADNAMEDPROP
         | LOADNAMEDPROPORNIL | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP | STRING => 5,
-        CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE => 7,
+        CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE | LOADIMPORTGLOBAL => 7,
         CONST | NEWCLOSURE => 9,
         _ => 255,
     }
@@ -161,6 +162,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         LOAD => "load",
         LOADARG => "loadarg",
         LOADGLOBAL => "loadglobal",
+        LOADIMPORTGLOBAL => "loadimportglobal",
         LOADINDEXPROPORNIL => "loadindexpropornil",
         LOADLOCAL => "loadlocal",
         LOADNAMEDPROP => "loadnamedprop",
@@ -419,6 +421,12 @@ impl Assembler {
 
     pub fn loadglobal(&mut self, index: u32) {
         self.write_u8(LOADGLOBAL);
+        self.write_u32(index);
+    }
+
+    pub fn loadimportglobal(&mut self, imp_index: u16, index: u32) {
+        self.write_u8(LOADIMPORTGLOBAL);
+        self.write_u16(imp_index);
         self.write_u32(index);
     }
 
@@ -777,6 +785,14 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 }
                 let n = u64::from_le_bytes(insts[p + 1..p + 9].try_into().unwrap());
                 write!(f, " {}\n", n)?;
+            }
+            LOADIMPORTGLOBAL => {
+                if p + 7 > insts.len() {
+                    return Err(fmt::Error);
+                }
+                let imp_index = u16::from_le_bytes(insts[p + 1..p + 3].try_into().unwrap());
+                let index = u32::from_le_bytes(insts[p + 3..p + 7].try_into().unwrap());
+                write!(f, " {} {}\n", imp_index, index)?;
             }
             NEWCLOSURE => {
                 if p + 9 > insts.len() {

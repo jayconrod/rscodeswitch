@@ -277,13 +277,6 @@ impl From<*mut Closure> for NanBox {
     }
 }
 
-impl From<*const Closure> for NanBox {
-    fn from(c: *const Closure) -> NanBox {
-        assert!(!c.is_null());
-        NanBox(QNAN | TAG_CLOSURE | c as u64)
-    }
-}
-
 impl TryInto<*mut Closure> for NanBox {
     type Error = ConvertError;
     fn try_into(self) -> ConvertResult<*mut Closure> {
@@ -295,17 +288,16 @@ impl TryInto<*mut Closure> for NanBox {
     }
 }
 
-impl From<&mut Closure> for NanBox {
-    fn from(c: &mut Closure) -> NanBox {
-        NanBox::from(c as *mut Closure)
+impl From<*const Closure> for NanBox {
+    fn from(c: *const Closure) -> NanBox {
+        assert!(!c.is_null());
+        NanBox(QNAN | TAG_CLOSURE | c as u64)
     }
 }
 
-impl TryInto<&Closure> for NanBox {
-    type Error = ConvertError;
-    fn try_into(self) -> ConvertResult<&'static Closure> {
-        self.try_into()
-            .map(|c: *mut Closure| unsafe { c.as_ref().unwrap() })
+impl From<&mut Closure> for NanBox {
+    fn from(c: &mut Closure) -> NanBox {
+        NanBox::from(c as *mut Closure)
     }
 }
 
@@ -314,6 +306,20 @@ impl TryInto<&mut Closure> for NanBox {
     fn try_into(self) -> ConvertResult<&'static mut Closure> {
         self.try_into()
             .map(|c: *mut Closure| unsafe { c.as_mut().unwrap() })
+    }
+}
+
+impl From<&Closure> for NanBox {
+    fn from(c: &Closure) -> NanBox {
+        NanBox::from(c as *const Closure)
+    }
+}
+
+impl TryInto<&Closure> for NanBox {
+    type Error = ConvertError;
+    fn try_into(self) -> ConvertResult<&'static Closure> {
+        self.try_into()
+            .map(|c: *mut Closure| unsafe { c.as_ref().unwrap() })
     }
 }
 

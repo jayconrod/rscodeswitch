@@ -1,4 +1,5 @@
 pub mod compile;
+pub mod luastd;
 pub mod scope;
 pub mod syntax;
 pub mod token;

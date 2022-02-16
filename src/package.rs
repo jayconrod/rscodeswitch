@@ -1,18 +1,21 @@
 use crate::data::{self, SetValue, Slice};
 use crate::heap::{self, Handle, Ptr, Set, HEAP};
 use crate::inst;
+use crate::interpret::Interpreter;
 use crate::nanbox::{NanBox, NanBoxKey};
-use crate::pos::{FunctionLineMap, PackageLineMap};
+use crate::pos::{Error, FunctionLineMap, PackageLineMap, Position};
 
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
+use std::collections::HashMap;
+use std::fmt::{self, Formatter};
 use std::mem;
 
 pub struct Package {
+    pub name: String,
     pub globals: Vec<Global>,
     pub functions: Vec<Function>,
     pub strings: Handle<Slice<data::String>>,
     pub line_map: PackageLineMap,
+    pub imports: Vec<ImportPackage>,
 }
 
 impl Package {
@@ -64,6 +67,8 @@ impl fmt::Display for Package {
 
 pub struct Global {
     pub name: std::string::String,
+
+    pub value: u64,
 }
 
 impl fmt::Display for Global {
@@ -75,11 +80,12 @@ impl fmt::Display for Global {
 pub struct Function {
     pub name: std::string::String,
     pub insts: Vec<u8>,
-    pub package: *const Package,
     pub param_types: Vec<Type>,
     pub cell_types: Vec<Type>,
     pub var_param_type: Option<Type>,
     pub line_map: FunctionLineMap,
+
+    pub package: *mut Package,
 }
 
 impl fmt::Display for Function {
@@ -90,19 +96,61 @@ impl fmt::Display for Function {
     }
 }
 
-pub struct Class {
-    pub name: std::string::String,
-    pub methods: Vec<*const Function>,
+pub struct ImportPackage {
+    pub name: String,
+    pub globals: Vec<ImportGlobal>,
+    pub functions: Vec<ImportFunction>,
+    pub link: *const Package,
 }
 
-impl fmt::Display for Class {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "class {} {{", self.name)?;
-        for method in &self.methods {
-            let name = unsafe { &method.as_ref().unwrap().name };
-            write!(f, "\n  method {}", name)?;
+impl ImportPackage {
+    pub fn new(
+        name: String,
+        globals: Vec<ImportGlobal>,
+        functions: Vec<ImportFunction>,
+    ) -> ImportPackage {
+        ImportPackage {
+            name,
+            globals,
+            functions,
+            link: 0 as *const Package,
         }
-        f.write_str("\n}")
+    }
+}
+
+pub struct ImportGlobal {
+    pub name: String,
+    pub link: *const Global,
+}
+
+impl ImportGlobal {
+    pub fn new(name: String) -> ImportGlobal {
+        ImportGlobal {
+            name,
+            link: 0 as *const Global,
+        }
+    }
+}
+
+pub struct ImportFunction {
+    pub name: String,
+    pub param_types: Vec<Type>,
+    pub var_param_type: Option<Type>,
+    pub link: *const Function,
+}
+
+impl ImportFunction {
+    pub fn new(
+        name: String,
+        param_types: Vec<Type>,
+        var_param_type: Option<Type>,
+    ) -> ImportFunction {
+        ImportFunction {
+            name,
+            param_types,
+            var_param_type,
+            link: 0 as *const Function,
+        }
     }
 }
 
@@ -168,6 +216,115 @@ impl fmt::Display for Type {
                 };
                 f.write_str(s)
             }
+        }
+    }
+}
+
+/// Finds, loads, links, and initializes packages.
+///
+/// PackageLoader maintains a graph of packages in memory. When a package that
+/// hasn't been loaded is requested with load_package, PackageLoader queries
+/// its given PackageSearcher. After recursively loading the package's
+/// imports, PackageLoader links imported definitions to the actual definitions
+/// in imported packages, then calls the package's initializer if it has one
+/// using the provided interpreter.
+pub struct PackageLoader {
+    packages: HashMap<String, Box<Package>>,
+    searcher: Box<dyn PackageSearcher>,
+}
+
+impl PackageLoader {
+    pub fn new(searcher: Box<dyn PackageSearcher>) -> PackageLoader {
+        PackageLoader {
+            packages: HashMap::new(),
+            searcher,
+        }
+    }
+
+    pub unsafe fn load_package(
+        &mut self,
+        name: &str,
+        interp: &mut Interpreter,
+    ) -> Result<&Package, Error> {
+        let mut search_stack = vec![String::from(name)];
+        let mut link_stack = Vec::new();
+
+        while let Some(name) = search_stack.pop() {
+            if self.packages.contains_key(&name) {
+                continue;
+            }
+            let package = self.searcher.search(&name)?;
+            for imp in &package.imports {
+                search_stack.push(imp.name.clone());
+            }
+            link_stack.push(package);
+        }
+
+        while let Some(mut package) = link_stack.pop() {
+            self.link_package(&mut package);
+            if let Some(init) = package.function_by_name("·init") {
+                interp.interpret(init)?;
+            }
+            self.packages.insert(package.name.clone(), package);
+        }
+
+        Ok(self.packages.get(name).unwrap())
+    }
+
+    unsafe fn link_package(&mut self, package: &mut Package) {
+        let pp = package as *mut Package;
+        for f in &mut package.functions {
+            f.package = pp;
+        }
+        for pi in &mut package.imports {
+            let p = self.packages.get(&pi.name).unwrap();
+            pi.link = &**p as *const Package;
+            for gi in &mut pi.globals {
+                let g = p.global_by_name(&gi.name).unwrap();
+                gi.link = g as *const Global;
+            }
+            for fi in &mut pi.functions {
+                let f = p.function_by_name(&fi.name).unwrap();
+                fi.link = f as *const Function;
+            }
+        }
+    }
+}
+
+/// Finds packages by name. This is dynamic, since it's likely to be highly
+/// language-specific. For example, a language might have a list of directories
+/// that could contain packages, specified with an environment variable.
+pub trait PackageSearcher {
+    fn search(&mut self, name: &str) -> Result<Box<Package>, Error>;
+}
+
+/// ProvidedPackageSearcher is a trivial implementation of PackageSearcher;
+/// packages are added to it explicitly.
+pub struct ProvidedPackageSearcher {
+    packages: HashMap<String, Box<Package>>,
+}
+
+impl ProvidedPackageSearcher {
+    pub fn new() -> ProvidedPackageSearcher {
+        ProvidedPackageSearcher {
+            packages: HashMap::new(),
+        }
+    }
+
+    pub fn add(&mut self, package: Box<Package>) {
+        let old = self.packages.insert(package.name.clone(), package);
+        assert!(old.is_none());
+    }
+}
+
+impl PackageSearcher for ProvidedPackageSearcher {
+    fn search(&mut self, name: &str) -> Result<Box<Package>, Error> {
+        match self.packages.remove(name) {
+            Some(p) => Ok(p),
+            None => Err(Error {
+                position: Position::default(),
+                message: format!("no such package: {}", name),
+            }),
         }
     }
 }
@@ -412,16 +569,3 @@ pub enum PropertyKind {
     /// allocates a "bound method" closure that captures the receiver.
     Method,
 }
-
-#[derive(Debug)]
-struct SerializationError {
-    message: String,
-}
-
-impl Display for SerializationError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl Error for SerializationError {}

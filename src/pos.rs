@@ -168,7 +168,7 @@ impl PackageLineMap {
     pub fn position(&self, offset: u32, flmap: &FunctionLineMap) -> Position {
         let encoded_line = flmap.lookup(offset);
         if encoded_line == INVALID_ENCODED_LINE {
-            return Position::unknown();
+            return Position::default();
         }
         let mut enc = encoded_line.0;
         for f in &self.files {
@@ -183,7 +183,7 @@ impl PackageLineMap {
             }
             enc -= f.line_count;
         }
-        Position::unknown()
+        Position::default()
     }
 }
 
@@ -319,18 +319,6 @@ pub struct Position {
     pub end_col: usize,
 }
 
-impl Position {
-    pub fn unknown() -> Position {
-        Position {
-            path: PathBuf::from("<unknown>"),
-            begin_line: 0,
-            begin_col: 0,
-            end_line: 0,
-            end_col: 0,
-        }
-    }
-}
-
 impl From<&str> for Position {
     fn from(path: &str) -> Position {
         Position::from(PathBuf::from(path).as_path())
@@ -341,6 +329,18 @@ impl From<&Path> for Position {
     fn from(path: &Path) -> Position {
         Position {
             path: PathBuf::from(path),
+            begin_line: 0,
+            begin_col: 0,
+            end_line: 0,
+            end_col: 0,
+        }
+    }
+}
+
+impl Default for Position {
+    fn default() -> Position {
+        Position {
+            path: PathBuf::from("<unknown>"),
             begin_line: 0,
             begin_col: 0,
             end_line: 0,

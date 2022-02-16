@@ -18,15 +18,11 @@ const FRAME_SIZE: usize = 32;
 
 pub struct Interpreter<'w> {
     w: &'w mut dyn Write,
-    global_slots: Vec<u64>,
 }
 
 impl<'w> Interpreter<'w> {
     pub fn new(w: &'w mut dyn Write) -> Interpreter<'w> {
-        Interpreter {
-            w,
-            global_slots: Vec::new(),
-        }
+        Interpreter { w }
     }
 
     pub fn interpret(&mut self, func: &Function) -> Result<(), Error> {
@@ -41,10 +37,7 @@ impl<'w> Interpreter<'w> {
         let mut vc = 0;
 
         // pp points to the current function's package.
-        let mut pp = func.package.as_ref().unwrap();
-        if self.global_slots.is_empty() {
-            self.global_slots.resize(pp.globals.len(), 0);
-        }
+        let mut pp = func.package.as_mut().unwrap();
 
         // cp points to the current function's closure. cp is null if
         // the function was called directly without a closure.
@@ -453,7 +446,7 @@ impl<'w> Interpreter<'w> {
                 ip = &func.insts[0] as *const u8;
                 *(sp as *mut u64) = fp as u64;
                 fp = sp;
-                pp = callee_func.package.as_ref().unwrap();
+                pp = callee_func.package.as_mut().unwrap();
             }};
         }
 
@@ -1052,9 +1045,20 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::LOADGLOBAL, inst::MODE_I64) => {
                     let i = read_imm!(u32, 1) as usize;
-                    let v = self.global_slots[i];
+                    let v = pp.globals[i].value;
                     push!(v);
                     inst::size(inst::LOADGLOBAL)
+                }
+                (inst::LOADIMPORTGLOBAL, inst::MODE_I64) => {
+                    let imp_index = read_imm!(u16, 1) as usize;
+                    let index = read_imm!(u32, 1) as usize;
+                    let v = pp.imports[imp_index].globals[index]
+                        .link
+                        .as_ref()
+                        .unwrap()
+                        .value;
+                    push!(v);
+                    inst::size(inst::LOADIMPORTGLOBAL)
                 }
                 (inst::LOADINDEXPROPORNIL, inst::MODE_LUA) => {
                     let index = NanBox(pop!());
@@ -1489,7 +1493,7 @@ impl<'w> Interpreter<'w> {
                             return Ok(());
                         }
                     };
-                    pp = func.package.as_ref().unwrap();
+                    pp = func.package.as_mut().unwrap();
                     cp = *((fp + 16) as *const *const Closure);
                     ip = *((fp + 8) as *const *const u8);
                     fp = *(fp as *const usize);
@@ -1506,7 +1510,7 @@ impl<'w> Interpreter<'w> {
                             return Ok(());
                         }
                     };
-                    pp = func.package.as_ref().unwrap();
+                    pp = func.package.as_mut().unwrap();
                     cp = *((fp + 16) as *const *const Closure);
                     ip = *((fp + 8) as *const *const u8);
                     fp = *(fp as *const usize);
@@ -1601,7 +1605,7 @@ impl<'w> Interpreter<'w> {
                 (inst::STOREGLOBAL, inst::MODE_I64) => {
                     let i = read_imm!(u32, 1) as usize;
                     let v = pop!();
-                    self.global_slots[i] = v;
+                    pp.globals[i].value = v;
                     inst::size(inst::STOREGLOBAL)
                 }
                 (inst::STOREINDEXPROP, inst::MODE_LUA) => {
