@@ -1473,6 +1473,11 @@ impl<'w> Interpreter<'w> {
                     let s = (*(sp as *const *const data::String)).as_ref().unwrap();
                     return_errorf!("{}", s)
                 }
+                (inst::PANIC, inst::MODE_LUA) => {
+                    let v = NanBox(*(sp as *const u64));
+                    let s = v.to_string();
+                    return_errorf!("{}", s)
+                }
                 (inst::POP, inst::MODE_I64) => {
                     sp += 8;
                     inst::size(inst::POP)

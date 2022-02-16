@@ -421,6 +421,13 @@ impl From<Error> for ErrorList {
     }
 }
 
+impl From<Vec<Error>> for ErrorList {
+    fn from(mut errs: Vec<Error>) -> ErrorList {
+        errs.sort_by(|l, r| l.position.cmp(&r.position));
+        ErrorList(errs)
+    }
+}
+
 impl Display for ErrorList {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let mut sep = "";

@@ -1,6 +1,6 @@
 use crate::data::{self, List, Slice};
 use crate::heap::Handle;
-use crate::inst::{self, Assembler};
+use crate::inst::{self, Assembler, Label};
 use crate::package::{Function, Global, Object, Package, Type};
 use crate::pos::PackageLineMap;
 
@@ -9,6 +9,40 @@ use std::mem;
 
 pub fn build_std_package() -> Box<Package> {
     let mut b = Builder::new();
+
+    // assert(v, message)
+    // TODO: error message should use caller's position, not the position here,
+    // which is unspecified.
+    {
+        let mut ok_label = Label::new();
+        let mut panic_label = Label::new();
+        b.asm.loadarg(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.bif(&mut ok_label);
+        b.asm.loadarg(1);
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.ne();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.bif(&mut panic_label);
+        b.asm.pop();
+        let si = b.ensure_string("assertion failed!");
+        b.asm.string(si);
+        b.asm.mode(inst::MODE_STRING);
+        b.asm.nanbox();
+        b.asm.bind(&mut panic_label);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.panic();
+        b.asm.bind(&mut ok_label);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("assert", 2, false);
+    }
 
     // print
     b.asm.mode(inst::MODE_LUA);

@@ -25,26 +25,27 @@ pub fn compile_file(path: &Path) -> Result<Box<Package>, ErrorList> {
     let tokens = token::lex(path, &data, &mut lmap, &mut errors);
     let chunk = syntax::parse(&tokens, &lmap, &mut errors);
     let scope_set = scope::resolve(&chunk, &lmap, &mut errors);
-    if let Some(package) = compile_chunk(&chunk, &scope_set, &lmap, &mut errors) {
+    if let Some(package) = compile_chunk(path, &chunk, &scope_set, &lmap, &mut errors) {
         Ok(package)
     } else {
-        errors.sort_by(|l, r| l.position.cmp(&r.position));
-        Err(ErrorList(errors))
+        Err(ErrorList::from(errors))
     }
 }
 
 pub fn compile_chunk(
+    path: &Path,
     chunk: &Chunk,
     scope_set: &ScopeSet,
     lmap: &LineMap,
     errors: &mut Vec<Error>,
 ) -> Option<Box<Package>> {
-    let mut cmp = Compiler::new(scope_set, lmap, errors);
+    let mut cmp = Compiler::new(path, scope_set, lmap, errors);
     cmp.compile_chunk(chunk);
     cmp.finish()
 }
 
 struct Compiler<'src, 'ss, 'lm, 'err> {
+    name: String,
     scope_set: &'ss ScopeSet<'src>,
     lmap: &'lm LineMap,
     globals: Vec<Global>,
@@ -67,11 +68,13 @@ struct FuncState {
 
 impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     fn new(
+        path: &Path,
         scope_set: &'ss ScopeSet<'src>,
         lmap: &'lm LineMap,
         errors: &'err mut Vec<Error>,
     ) -> Compiler<'src, 'ss, 'lm, 'err> {
         Compiler {
+            name: String::from(path.to_string_lossy()),
             scope_set,
             lmap,
             globals: Vec::new(),
@@ -119,7 +122,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Vec::new(),
         )];
         let mut package = Box::new(Package {
-            name: String::from("main"),
+            name: self.name,
             globals: self.globals,
             functions: self.functions,
             strings: Handle::empty(),

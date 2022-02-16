@@ -1,13 +1,16 @@
 use crate::interpret::Interpreter;
 use crate::lua::compile;
 use crate::lua::luastd;
+use crate::lua::scope;
+use crate::lua::syntax;
+use crate::lua::token;
 use crate::package::{PackageLoader, ProvidedPackageSearcher};
-use crate::pos::{ErrorList, Position};
+use crate::pos::{Error, ErrorList, LineMap, Position};
 
 use std::env;
 use std::fmt::Display;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str;
 
 use lazy_regex::regex;
@@ -41,9 +44,7 @@ fn interpret_test() {
         }
         did_match = true;
 
-        let res = try_compile_and_interpret(&path);
-        let data = fs::read(&path).map_err(print_error).unwrap();
-        check_result(&path, &data, res)
+        try_compile_and_interpret(&path)
             .map_err(print_error)
             .unwrap();
     }
@@ -52,20 +53,76 @@ fn interpret_test() {
     }
 }
 
-fn try_compile_and_interpret(path: &Path) -> Result<Vec<u8>, ErrorList> {
+fn try_compile_and_interpret(path: &Path) -> Result<(), ErrorList> {
     let mut searcher = Box::new(ProvidedPackageSearcher::new());
     let std_package = luastd::build_std_package();
     searcher.add(std_package);
-    let package = compile::compile_file(path)?;
-    searcher.add(package);
-    let mut loader = PackageLoader::new(searcher);
-    let mut output = Vec::new();
-    let mut interp = Interpreter::new(&mut output);
-    let res = unsafe { loader.load_package("main", &mut interp) };
-    match res {
-        Ok(_) => Ok(output),
-        Err(err) => Err(ErrorList::from(err)),
+
+    let mut chunk_paths = Vec::new();
+    let mut chunk_datas = Vec::new();
+    let data = fs::read(path).map_err(|err| {
+        let position = Position::from(path);
+        let wrapped = Error::wrap(position, &err);
+        ErrorList(vec![wrapped])
+    })?;
+    let chunk_sep = b"\n---\n";
+    let mut begin = 0;
+    let mut i = 0;
+    while begin < data.len() {
+        let end = match &data[begin..]
+            .windows(chunk_sep.len())
+            .position(|w| w == chunk_sep)
+        {
+            Some(i) => begin + i,
+            None => data.len(),
+        };
+        let chunk_data = &data[begin..end];
+        let path = if i == 0 {
+            PathBuf::from(path)
+        } else {
+            PathBuf::from(format!("{}#{}", path.to_string_lossy(), i))
+        };
+
+        let mut lmap = LineMap::new();
+        let mut errors = Vec::new();
+        let tokens = if i == 0 {
+            token::lex(&path, chunk_data, &mut lmap, &mut errors)
+        } else {
+            let part_path = PathBuf::from(format!("{}#{}", path.to_string_lossy(), i));
+            token::lex(&part_path, chunk_data, &mut lmap, &mut errors)
+        };
+        let ast = syntax::parse(&tokens, &lmap, &mut errors);
+        let scope_set = scope::resolve(&ast, &lmap, &mut errors);
+        match compile::compile_chunk(&path, &ast, &scope_set, &lmap, &mut errors) {
+            Some(package) => {
+                chunk_paths.push(path);
+                chunk_datas.push(chunk_data);
+                searcher.add(package);
+            }
+            None => {
+                check_result(&path, chunk_data, Err(ErrorList::from(errors)))?;
+            }
+        };
+
+        begin = end + chunk_sep.len();
+        i += 1;
     }
+
+    let mut loader = PackageLoader::new(searcher);
+    for i in 0..chunk_paths.len() {
+        let chunk_path = &chunk_paths[i];
+        let chunk_data = &chunk_datas[i];
+        let mut output = Vec::new();
+        let mut interp = Interpreter::new(&mut output);
+        let load_res =
+            unsafe { loader.load_package(chunk_path.to_string_lossy().as_ref(), &mut interp) };
+        let check_res = match load_res {
+            Ok(_) => Ok(output),
+            Err(err) => Err(ErrorList::from(err)),
+        };
+        check_result(chunk_path, chunk_data, check_res)?;
+    }
+    Ok(())
 }
 
 fn check_result(
