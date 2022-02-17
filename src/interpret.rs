@@ -1470,13 +1470,27 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::OR)
                 }
                 (inst::PANIC, inst::MODE_STRING) => {
+                    let level = read_imm!(u8, 1) as usize;
                     let s = (*(sp as *const *const data::String)).as_ref().unwrap();
-                    return_errorf!("{}", s)
+                    let message = s.to_string();
+                    return Err(Interpreter::error_level(func, ip, fp, level, message));
                 }
                 (inst::PANIC, inst::MODE_LUA) => {
+                    let level = read_imm!(u8, 1) as usize;
                     let v = NanBox(*(sp as *const u64));
                     let s = v.to_string();
-                    return_errorf!("{}", s)
+                    let message = s.to_string();
+                    return Err(Interpreter::error_level(func, ip, fp, level, message));
+                }
+                (inst::PANICLEVEL, inst::MODE_LUA) => {
+                    let raw_level = NanBox(*(sp as *const u64));
+                    let raw_message = NanBox(*((sp + 8) as *const u64));
+                    let level: usize = match <NanBox as TryInto<i64>>::try_into(raw_level) {
+                        Ok(n) if n >= 0 => n as usize,
+                        _ => 0,
+                    };
+                    let message = raw_message.to_string();
+                    return Err(Interpreter::error_level(func, ip, fp, level, message));
                 }
                 (inst::POP, inst::MODE_I64) => {
                     sp += 8;
@@ -1834,6 +1848,25 @@ impl<'w> Interpreter<'w> {
             .line_map
             .position(inst_offset, &func.line_map);
         Error { position, message }
+    }
+
+    unsafe fn error_level(
+        mut func: &Function,
+        mut ip: *const u8,
+        mut fp: usize,
+        mut level: usize,
+        message: String,
+    ) -> Error {
+        while level > 0 {
+            func = match (*((fp + 24) as *const *const Function)).as_ref() {
+                Some(f) => f,
+                None => break,
+            };
+            ip = *((fp + 8) as *const *const u8);
+            fp = *(fp as *const usize);
+            level -= 1;
+        }
+        Interpreter::error(func, ip, message)
     }
 }
 

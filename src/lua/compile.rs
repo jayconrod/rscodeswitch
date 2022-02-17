@@ -25,7 +25,13 @@ pub fn compile_file(path: &Path) -> Result<Box<Package>, ErrorList> {
     let tokens = token::lex(path, &data, &mut lmap, &mut errors);
     let chunk = syntax::parse(&tokens, &lmap, &mut errors);
     let scope_set = scope::resolve(&chunk, &lmap, &mut errors);
-    if let Some(package) = compile_chunk(path, &chunk, &scope_set, &lmap, &mut errors) {
+    if let Some(package) = compile_chunk(
+        path.to_string_lossy().into(),
+        &chunk,
+        &scope_set,
+        &lmap,
+        &mut errors,
+    ) {
         Ok(package)
     } else {
         Err(ErrorList::from(errors))
@@ -33,13 +39,13 @@ pub fn compile_file(path: &Path) -> Result<Box<Package>, ErrorList> {
 }
 
 pub fn compile_chunk(
-    path: &Path,
+    name: String,
     chunk: &Chunk,
     scope_set: &ScopeSet,
     lmap: &LineMap,
     errors: &mut Vec<Error>,
 ) -> Option<Box<Package>> {
-    let mut cmp = Compiler::new(path, scope_set, lmap, errors);
+    let mut cmp = Compiler::new(name, scope_set, lmap, errors);
     cmp.compile_chunk(chunk);
     cmp.finish()
 }
@@ -68,13 +74,13 @@ struct FuncState {
 
 impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     fn new(
-        path: &Path,
+        name: String,
         scope_set: &'ss ScopeSet<'src>,
         lmap: &'lm LineMap,
         errors: &'err mut Vec<Error>,
     ) -> Compiler<'src, 'ss, 'lm, 'err> {
         Compiler {
-            name: String::from(path.to_string_lossy()),
+            name,
             scope_set,
             lmap,
             globals: Vec::new(),
@@ -312,7 +318,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         let si = self.ensure_string(b"'for' step is zero", step.pos());
                         self.asm.string(si);
                         self.asm.mode(inst::MODE_STRING);
-                        self.asm.panic();
+                        self.asm.panic(0);
                         self.asm.bind(&mut step_ok_label);
                     }
                     None => {
@@ -403,7 +409,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let si = self.ensure_string(b"'for' limit is not a number", limit.pos());
                 self.asm.string(si);
                 self.asm.mode(inst::MODE_STRING);
-                self.asm.panic();
+                self.asm.panic(0);
                 self.asm.bind(&mut limit_ok_label);
                 self.asm.pop(); // typeof limit
                 self.asm.b(&mut cond_label);

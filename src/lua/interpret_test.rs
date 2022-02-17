@@ -77,7 +77,7 @@ fn try_compile_and_interpret(path: &Path) -> Result<(), ErrorList> {
             None => data.len(),
         };
         let chunk_data = &data[begin..end];
-        let path = if i == 0 {
+        let chunk_path = if i == 0 {
             PathBuf::from(path)
         } else {
             PathBuf::from(format!("{}#{}", path.to_string_lossy(), i))
@@ -85,17 +85,18 @@ fn try_compile_and_interpret(path: &Path) -> Result<(), ErrorList> {
 
         let mut lmap = LineMap::new();
         let mut errors = Vec::new();
-        let tokens = if i == 0 {
-            token::lex(&path, chunk_data, &mut lmap, &mut errors)
-        } else {
-            let part_path = PathBuf::from(format!("{}#{}", path.to_string_lossy(), i));
-            token::lex(&part_path, chunk_data, &mut lmap, &mut errors)
-        };
+        let tokens = token::lex(&chunk_path, chunk_data, &mut lmap, &mut errors);
         let ast = syntax::parse(&tokens, &lmap, &mut errors);
         let scope_set = scope::resolve(&ast, &lmap, &mut errors);
-        match compile::compile_chunk(&path, &ast, &scope_set, &lmap, &mut errors) {
+        match compile::compile_chunk(
+            chunk_path.to_string_lossy().into(),
+            &ast,
+            &scope_set,
+            &lmap,
+            &mut errors,
+        ) {
             Some(package) => {
-                chunk_paths.push(path);
+                chunk_paths.push(chunk_path);
                 chunk_datas.push(chunk_data);
                 searcher.add(package);
             }

@@ -35,7 +35,7 @@ pub fn build_std_package() -> Box<Package> {
         b.asm.nanbox();
         b.asm.bind(&mut panic_label);
         b.asm.mode(inst::MODE_LUA);
-        b.asm.panic();
+        b.asm.panic(1);
         b.asm.bind(&mut ok_label);
         b.asm.mode(inst::MODE_LUA);
         b.asm.setv(0);
@@ -51,6 +51,33 @@ pub fn build_std_package() -> Box<Package> {
     b.asm.mode(inst::MODE_LUA);
     b.asm.retv();
     b.finish_function("collectgarbage", 2, false);
+
+    // dofile
+    // TODO: implement. This needs to hook into native code.
+    {
+        let si = b.ensure_string("unimplemented");
+        b.asm.string(si);
+        b.asm.mode(inst::MODE_STRING);
+        b.asm.panic(0);
+        b.finish_function("dofile", 1, false);
+    }
+
+    // error(message, level)
+    {
+        let mut panic_label = Label::new();
+        b.asm.loadarg(0);
+        b.asm.loadarg(1);
+        b.asm.dup();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.bif(&mut panic_label);
+        b.asm.pop();
+        b.asm.const_(1);
+        b.asm.nanbox();
+        b.asm.bind(&mut panic_label);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.paniclevel();
+        b.finish_function("error", 2, false);
+    }
 
     // print
     b.asm.mode(inst::MODE_LUA);

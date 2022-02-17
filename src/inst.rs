@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 77.
+// Next opcode: 78.
 pub const ADD: u8 = 20;
 pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
@@ -56,6 +56,7 @@ pub const NOT: u8 = 24;
 pub const NOTB: u8 = 53;
 pub const OR: u8 = 61;
 pub const PANIC: u8 = 65;
+pub const PANICLEVEL: u8 = 77;
 pub const POP: u8 = 3;
 pub const PROTOTYPE: u8 = 48;
 pub const RET: u8 = 4;
@@ -118,10 +119,10 @@ pub const fn size(op: u8) -> usize {
     match op {
         ADD | AND | CALLVALUEV | CONSTZERO | DIV | DUP | EQ | EXP | FLOORDIV | GE | GT | LT
         | LE | LEN | LOAD | LOADINDEXPROPORNIL | LOADPROTOTYPE | LOADVARARGS | MOD | MUL
-        | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | PANIC | POP | PROTOTYPE | RET | RETV
+        | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | PANICLEVEL | POP | PROTOTYPE | RET | RETV
         | SHL | SHR | STORE | STOREINDEXPROP | STOREPROTOTYPE | STRCAT | SUB | SWAP | TOFLOAT
         | TYPEOF | XOR => 1,
-        SWAPN | SYS => 2,
+        PANIC | SWAPN | SYS => 2,
         ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETV | STOREARG
         | STORELOCAL => 3,
         ALLOC | B | BIF | CALLNAMEDPROPV | FUNCTION | LOADGLOBAL | LOADNAMEDPROP
@@ -181,6 +182,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         NOTB => "notb",
         OR => "or",
         PANIC => "panic",
+        PANICLEVEL => "paniclevel",
         POP => "pop",
         PROTOTYPE => "prototype",
         RET => "ret",
@@ -504,8 +506,13 @@ impl Assembler {
         self.write_u8(OR);
     }
 
-    pub fn panic(&mut self) {
+    pub fn panic(&mut self, level: u8) {
         self.write_u8(PANIC);
+        self.write_u8(level);
+    }
+
+    pub fn paniclevel(&mut self) {
+        self.write_u8(PANICLEVEL);
     }
 
     pub fn pop(&mut self) {
@@ -735,8 +742,8 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         match insts[p] {
             ADD | AND | CALLVALUEV | CONSTZERO | DIV | DUP | EXP | EQ | FLOORDIV | GE | GT | LT
             | LE | LEN | LOAD | LOADINDEXPROPORNIL | LOADPROTOTYPE | LOADVARARGS | MOD | MUL
-            | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | PANIC | POP | PROTOTYPE | RET | RETV
-            | SHL | SHR | STORE | STOREINDEXPROP | STOREPROTOTYPE | STRCAT | SUB | SWAP
+            | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | PANICLEVEL | POP | PROTOTYPE | RET
+            | RETV | SHL | SHR | STORE | STOREINDEXPROP | STOREPROTOTYPE | STRCAT | SUB | SWAP
             | TOFLOAT | TYPEOF | XOR => {
                 f.write_str("\n")?;
             }
@@ -803,7 +810,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let bound_arg_count = u16::from_le_bytes(insts[p + 7..p + 9].try_into().unwrap());
                 write!(f, " {} {} {}\n", fn_index, capture_count, bound_arg_count)?;
             }
-            SWAPN => {
+            PANIC | SWAPN => {
                 if p + 2 > insts.len() {
                     return Err(fmt::Error);
                 }
