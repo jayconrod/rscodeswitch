@@ -16,8 +16,10 @@ trait DisplayIndent {
 
 pub struct Chunk<'src> {
     pub stmts: Vec<Stmt<'src>>,
-    pub scope: ScopeID,
+    pub global_scope: ScopeID,
+    pub chunk_scope: ScopeID,
     pub env_var: VarID,
+    pub g_var: VarID,
 }
 
 impl<'src> Chunk<'src> {
@@ -643,13 +645,17 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     }
 
     fn parse_chunk(&mut self) -> Chunk<'src> {
-        let scope = self.next_scope();
+        let global_scope = self.next_scope();
+        let chunk_scope = self.next_scope();
         let env_var = self.next_var();
+        let g_var = self.next_var();
         let stmts = self.parse_block_stmts(Kind::EOF);
         Chunk {
             stmts,
-            scope,
+            global_scope,
+            chunk_scope,
             env_var,
+            g_var,
         }
     }
 

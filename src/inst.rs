@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 78.
+// Next opcode: 79.
 pub const ADD: u8 = 20;
 pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
@@ -68,6 +68,7 @@ pub const SHR: u8 = 59;
 pub const STORE: u8 = 37;
 pub const STOREARG: u8 = 30;
 pub const STOREGLOBAL: u8 = 10;
+pub const STOREIMPORTGLOBAL: u8 = 78;
 pub const STORELOCAL: u8 = 12;
 pub const STOREMETHOD: u8 = 46;
 pub const STORENAMEDPROP: u8 = 43;
@@ -127,7 +128,7 @@ pub const fn size(op: u8) -> usize {
         | STORELOCAL => 3,
         ALLOC | B | BIF | CALLNAMEDPROPV | FUNCTION | LOADGLOBAL | LOADNAMEDPROP
         | LOADNAMEDPROPORNIL | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP | STRING => 5,
-        CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE | LOADIMPORTGLOBAL => 7,
+        CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE | LOADIMPORTGLOBAL | STOREIMPORTGLOBAL => 7,
         CONST | NEWCLOSURE => 9,
         _ => 255,
     }
@@ -194,6 +195,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         STOREARG => "storearg",
         STOREINDEXPROP => "storeindexprop",
         STOREGLOBAL => "storeglobal",
+        STOREIMPORTGLOBAL => "storeimportglobal",
         STORELOCAL => "storelocal",
         STOREMETHOD => "storemethod",
         STORENAMEDPROP => "storenamedprop",
@@ -558,6 +560,12 @@ impl Assembler {
         self.write_u32(index);
     }
 
+    pub fn storeimportglobal(&mut self, imp_index: u16, index: u32) {
+        self.write_u8(STOREIMPORTGLOBAL);
+        self.write_u16(imp_index);
+        self.write_u32(index);
+    }
+
     pub fn storeindexprop(&mut self) {
         self.write_u8(STOREINDEXPROP);
     }
@@ -793,7 +801,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let n = u64::from_le_bytes(insts[p + 1..p + 9].try_into().unwrap());
                 write!(f, " {}\n", n)?;
             }
-            LOADIMPORTGLOBAL => {
+            LOADIMPORTGLOBAL | STOREIMPORTGLOBAL => {
                 if p + 7 > insts.len() {
                     return Err(fmt::Error);
                 }

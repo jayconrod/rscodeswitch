@@ -9,6 +9,9 @@ use std::collections::HashMap;
 use std::fmt::{self, Formatter};
 use std::mem;
 
+// TODO: divide Package and the structs it depends on into separate compile-time
+// and run-time parts. For example, a run-time Global would have a value which
+// could be mutated by the interpreter.
 pub struct Package {
     pub name: String,
     pub globals: Vec<Global>,
@@ -120,14 +123,14 @@ impl ImportPackage {
 
 pub struct ImportGlobal {
     pub name: String,
-    pub link: *const Global,
+    pub link: *mut Global,
 }
 
 impl ImportGlobal {
     pub fn new(name: String) -> ImportGlobal {
         ImportGlobal {
             name,
-            link: 0 as *const Global,
+            link: 0 as *mut Global,
         }
     }
 }
@@ -281,7 +284,7 @@ impl PackageLoader {
             pi.link = &**p as *const Package;
             for gi in &mut pi.globals {
                 let g = p.global_by_name(&gi.name).unwrap();
-                gi.link = g as *const Global;
+                gi.link = g as *const Global as usize as *mut Global; // gross.
             }
             for fi in &mut pi.functions {
                 let f = p.function_by_name(&fi.name).unwrap();

@@ -45,12 +45,13 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             package.name, package
         );
     }
+    let name = package.name.clone();
     searcher.add(package);
 
     let mut loader = PackageLoader::new(searcher);
     let mut w = stdout();
     let mut interp = Interpreter::new(&mut w);
-    let res = unsafe { loader.load_package("main", &mut interp) };
+    let res = unsafe { loader.load_package(&name, &mut interp) };
     match res {
         Ok(_) => Ok(()),
         Err(err) => Err(Box::new(err)),

@@ -124,7 +124,10 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
         let imports = vec![ImportPackage::new(
             String::from("luastd"),
-            vec![ImportGlobal::new(String::from("_ENV"))],
+            vec![
+                ImportGlobal::new(String::from("_ENV")),
+                ImportGlobal::new(String::from("_G")),
+            ],
             Vec::new(),
         )];
         let mut package = Box::new(Package {
@@ -1196,8 +1199,14 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     fn compile_store_var(&mut self, var: &Var, var_use_cell: Option<usize>) {
         match var.kind {
             VarKind::Global => {
-                // Assignment to _ENV has no effect.
-                self.asm.pop();
+                if var.slot == 0 {
+                    // Assignment to _ENV has no effect.
+                    self.asm.pop();
+                } else {
+                    // Assignment to _G.
+                    assert_eq!(var.slot, 1);
+                    self.asm.storeimportglobal(0, 1);
+                }
             }
             VarKind::Parameter => {
                 self.asm.storearg(var.slot.try_into().unwrap());
@@ -1232,7 +1241,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
     fn compile_load_var(&mut self, var: &Var, var_use_cell: Option<usize>) {
         match var.kind {
-            VarKind::Global => self.asm.loadimportglobal(0, 0),
+            VarKind::Global => self.asm.loadimportglobal(0, var.slot.try_into().unwrap()),
             VarKind::Parameter => self.asm.loadarg(var.slot.try_into().unwrap()),
             VarKind::Local => self.asm.loadlocal(var.slot.try_into().unwrap()),
             VarKind::Capture => {

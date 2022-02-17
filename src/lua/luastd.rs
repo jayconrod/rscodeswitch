@@ -91,7 +91,8 @@ pub fn build_std_package() -> Box<Package> {
     b.finish_function("print", 0, true);
 
     // init - allocates and populates the _ENV table.
-    let gi = b.add_global("_ENV");
+    let env_index = b.add_global("_ENV");
+    let g_index = b.add_global("_G");
     b.asm.alloc(mem::size_of::<Object>() as u32);
     b.asm.mode(inst::MODE_OBJECT);
     b.asm.nanbox();
@@ -103,7 +104,9 @@ pub fn build_std_package() -> Box<Package> {
         b.asm.mode(inst::MODE_LUA);
         b.asm.storenamedprop(b.function_name_index[i]);
     }
-    b.asm.storeglobal(gi);
+    b.asm.dup();
+    b.asm.storeglobal(env_index);
+    b.asm.storeglobal(g_index);
     b.asm.mode(inst::MODE_LUA);
     b.asm.setv(0);
     b.asm.mode(inst::MODE_LUA);

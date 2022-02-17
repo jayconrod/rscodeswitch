@@ -242,6 +242,7 @@ pub enum CaptureFrom {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ScopeKind {
+    Global,
     Function,
     Local,
 }
@@ -283,7 +284,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
     }
 
     fn resolve_chunk(&mut self, chunk: &Chunk<'src>) {
-        self.enter(chunk.scope, ScopeKind::Local);
+        self.enter(chunk.global_scope, ScopeKind::Global);
         self.declare(
             chunk.env_var,
             "_ENV",
@@ -291,10 +292,13 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             Attr::None,
             chunk.pos(),
         );
+        self.declare(chunk.g_var, "_G", VarKind::Global, Attr::None, chunk.pos());
+        self.enter(chunk.chunk_scope, ScopeKind::Local);
         self.declare_labels(&chunk.stmts);
         for stmt in &chunk.stmts {
             self.resolve_stmt(stmt);
         }
+        self.leave();
         self.leave();
     }
 
@@ -677,12 +681,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
 
     fn declare(&mut self, vid: VarID, name: &'src str, kind: VarKind, attr: Attr, pos: Pos) {
         let scope = &mut self.scope_set.scopes[self.scope_stack.last().unwrap().0];
-        let slot = if kind == VarKind::Global {
-            debug_assert_eq!(name, "_ENV");
-            0
-        } else {
-            scope.next_slot()
-        };
+        let slot = scope.next_slot();
         let too_many_err = match kind {
             VarKind::Global if slot > u32::MAX as usize => Some("too many global variables"),
             VarKind::Parameter if slot > u16::MAX as usize => Some("too many parameters"),

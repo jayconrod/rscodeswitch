@@ -1051,7 +1051,7 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::LOADIMPORTGLOBAL, inst::MODE_I64) => {
                     let imp_index = read_imm!(u16, 1) as usize;
-                    let index = read_imm!(u32, 1) as usize;
+                    let index = read_imm!(u32, 3) as usize;
                     let v = pp.imports[imp_index].globals[index]
                         .link
                         .as_ref()
@@ -1626,6 +1626,17 @@ impl<'w> Interpreter<'w> {
                     let v = pop!();
                     pp.globals[i].value = v;
                     inst::size(inst::STOREGLOBAL)
+                }
+                (inst::STOREIMPORTGLOBAL, inst::MODE_I64) => {
+                    let imp_index = read_imm!(u16, 1) as usize;
+                    let index = read_imm!(u32, 3) as usize;
+                    let v = pop!();
+                    pp.imports[imp_index].globals[index]
+                        .link
+                        .as_mut()
+                        .unwrap()
+                        .value = v;
+                    inst::size(inst::STOREIMPORTGLOBAL)
                 }
                 (inst::STOREINDEXPROP, inst::MODE_LUA) => {
                     let v = NanBox(pop!());
