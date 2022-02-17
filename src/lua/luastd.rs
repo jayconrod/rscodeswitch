@@ -11,8 +11,6 @@ pub fn build_std_package() -> Box<Package> {
     let mut b = Builder::new();
 
     // assert(v, message)
-    // TODO: error message should use caller's position, not the position here,
-    // which is unspecified.
     {
         let mut ok_label = Label::new();
         let mut panic_label = Label::new();
@@ -79,6 +77,14 @@ pub fn build_std_package() -> Box<Package> {
         b.finish_function("error", 2, false);
     }
 
+    // TODO: getmetatable
+    // TODO: ipairs
+    // TODO: load
+    // TODO: loadfile
+    // TODO: next
+    // TODO: pairs
+    // TODO: pcall
+
     // print
     b.asm.mode(inst::MODE_LUA);
     b.asm.loadvarargs();
@@ -89,6 +95,38 @@ pub fn build_std_package() -> Box<Package> {
     b.asm.mode(inst::MODE_LUA);
     b.asm.retv();
     b.finish_function("print", 0, true);
+
+    // TODO: rawequal
+    // TODO: rawget
+    // TODO: rawlen
+    // TODO: rawset
+    // TODO: select
+    // TODO: setmetatable
+    // TODO: tonumber
+    // TODO: tostring
+    // TODO: type
+    // TODO: _VERSION
+    // TODO: warn
+    // TODO: xpcall
+
+    // TODO: coroutine
+
+    // TODO: require
+    // TODO: package
+
+    // TODO: string
+
+    // TODO: utf8
+
+    // TODO: table
+
+    // TODO: math
+
+    // TODO: io
+
+    // TODO: os
+
+    // TODO: debug
 
     // init - allocates and populates the _ENV table.
     let env_index = b.add_global("_ENV");
