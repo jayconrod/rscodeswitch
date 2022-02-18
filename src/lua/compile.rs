@@ -1,5 +1,3 @@
-use crate::data::{self, List, SetValue, Slice};
-use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
 use crate::lua::scope::{self, CaptureFrom, ScopeSet, Var, VarKind, VarUse};
 use crate::lua::syntax::{
@@ -7,14 +5,16 @@ use crate::lua::syntax::{
 };
 use crate::lua::token::{self, Number, Token};
 use crate::nanbox;
-use crate::package::{Function, Global, ImportGlobal, ImportPackage, Object, Package, Type};
+use crate::package::{Function, Global, GlobalImport, Package, PackageImport, Type};
 use crate::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
+use crate::runtime::Object;
 
+use std::collections::HashMap;
 use std::fs;
 use std::mem;
 use std::path::Path;
 
-pub fn compile_file(path: &Path) -> Result<Box<Package>, ErrorList> {
+pub fn compile_file(path: &Path) -> Result<Package, ErrorList> {
     let data = fs::read(path).map_err(|err| {
         let position = Position::from(path);
         let wrapped = Error::wrap(position, &err);
@@ -44,7 +44,7 @@ pub fn compile_chunk(
     scope_set: &ScopeSet,
     lmap: &LineMap,
     errors: &mut Vec<Error>,
-) -> Option<Box<Package>> {
+) -> Option<Package> {
     let mut cmp = Compiler::new(name, scope_set, lmap, errors);
     cmp.compile_chunk(chunk);
     cmp.finish()
@@ -56,8 +56,8 @@ struct Compiler<'src, 'ss, 'lm, 'err> {
     lmap: &'lm LineMap,
     globals: Vec<Global>,
     functions: Vec<Function>,
-    strings: Handle<List<data::String>>,
-    string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
+    strings: Vec<Vec<u8>>,
+    string_index: HashMap<Vec<u8>, u32>,
     named_labels: Vec<inst::Label>,
     asm: Assembler,
     param_count: u16,
@@ -85,8 +85,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             lmap,
             globals: Vec::new(),
             functions: Vec::new(),
-            strings: Handle::new(List::alloc()),
-            string_index: Handle::new(data::HashMap::alloc()),
+            strings: Vec::new(),
+            string_index: HashMap::new(),
             named_labels: Vec::new(),
             asm: Assembler::new(),
             param_count: 0,
@@ -96,7 +96,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         }
     }
 
-    fn finish(mut self) -> Option<Box<Package>> {
+    fn finish(mut self) -> Option<Package> {
         self.asm.mode(inst::MODE_LUA);
         self.asm.setv(0);
         self.asm.mode(inst::MODE_LUA);
@@ -106,7 +106,6 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.functions.push(Function {
                     name: String::from("·init"),
                     insts,
-                    package: 0 as *mut Package,
                     param_types: Vec::new(),
                     var_param_type: None,
                     cell_types: Vec::new(),
@@ -122,24 +121,22 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             return None;
         }
 
-        let imports = vec![ImportPackage::new(
+        let imports = vec![PackageImport::new(
             String::from("luastd"),
             vec![
-                ImportGlobal::new(String::from("_ENV")),
-                ImportGlobal::new(String::from("_G")),
+                GlobalImport::new(String::from("_ENV")),
+                GlobalImport::new(String::from("_G")),
             ],
             Vec::new(),
         )];
-        let mut package = Box::new(Package {
+        let package = Package {
             name: self.name,
             globals: self.globals,
             functions: self.functions,
-            strings: Handle::empty(),
+            strings: self.strings,
             line_map: PackageLineMap::from(self.lmap),
             imports,
-        });
-        package.strings = Handle::new(Slice::alloc());
-        package.strings.init_from_list(&self.strings);
+        };
         Some(package)
     }
 
@@ -1035,7 +1032,6 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         self.functions.push(Function {
             name: String::from(name),
             insts,
-            package: 0 as *mut Package,
             param_types,
             var_param_type,
             cell_types: Vec::new(),
@@ -1256,19 +1252,18 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     }
 
     fn ensure_string(&mut self, s: &[u8], pos: Pos) -> u32 {
-        let hs = Handle::new(data::String::from_bytes(s));
-        match self.string_index.get(&*hs) {
-            Some(v) => v.value,
+        match self.string_index.get(s) {
+            Some(&i) => i,
             None => {
-                let i: u32 = match (*self.strings).len().try_into() {
+                let i: u32 = match self.strings.len().try_into() {
                     Ok(i) => i,
                     _ => {
                         self.error(pos, String::from("too many strings"));
-                        return !0;
+                        !0
                     }
                 };
-                (*self.strings).push(&*hs);
-                (*self.string_index).insert(&*hs, &SetValue { value: i });
+                self.strings.push(Vec::from(s));
+                self.string_index.insert(Vec::from(s), i);
                 i
             }
         }

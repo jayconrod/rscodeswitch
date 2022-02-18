@@ -1,7 +1,7 @@
 use codeswitch::interpret::Interpreter;
 use codeswitch::lua::compile;
 use codeswitch::lua::luastd;
-use codeswitch::package::{PackageLoader, ProvidedPackageSearcher};
+use codeswitch::runtime::{PackageLoader, ProvidedPackageSearcher};
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};

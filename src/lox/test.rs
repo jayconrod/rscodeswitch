@@ -1,7 +1,7 @@
 use crate::interpret::Interpreter;
 use crate::lox::compile;
-use crate::package::{PackageLoader, ProvidedPackageSearcher};
 use crate::pos::{ErrorList, Position};
+use crate::runtime::{PackageLoader, ProvidedPackageSearcher};
 
 use std::env;
 use std::fmt::Display;

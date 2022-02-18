@@ -1,17 +1,16 @@
-use crate::data::{self, List, SetValue, Slice};
-use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
 use crate::lox::scope::{self, CaptureFrom, ScopeSet, Var, VarKind, VarUse};
 use crate::lox::syntax::{self, Block, Decl, Expr, ForInit, LValue, Param, Program, Stmt};
 use crate::lox::token::{self, Kind, Token};
-use crate::package::{Function, Global, Object, Package, Type};
+use crate::package::{Function, Global, Package, Type};
 use crate::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
+use crate::runtime::Object;
 use std::collections::HashMap;
 use std::fs;
 use std::mem;
 use std::path::Path;
 
-pub fn compile_file<'a>(path: &Path) -> Result<Box<Package>, ErrorList> {
+pub fn compile_file<'a>(path: &Path) -> Result<Package, ErrorList> {
     let data = fs::read(path).map_err(|err| {
         let position = Position::from(path);
         let wrapped = Error::wrap(position, &err);
@@ -28,7 +27,7 @@ pub fn compile_from_ast(
     ast: &Program,
     scopes: &ScopeSet,
     lmap: &LineMap,
-) -> Result<Box<Package>, ErrorList> {
+) -> Result<Package, ErrorList> {
     let mut cmp = Compiler::new(scopes, lmap);
     for decl in &ast.decls {
         cmp.compile_decl(decl);
@@ -41,8 +40,8 @@ struct Compiler<'a, 'b> {
     lmap: &'a LineMap,
     globals: Vec<Global>,
     functions: Vec<Function>,
-    strings: Handle<List<data::String>>,
-    string_index: Handle<data::HashMap<data::String, SetValue<u32>>>,
+    strings: Vec<Vec<u8>>,
+    string_index: HashMap<Vec<u8>, u32>,
     asm_stack: Vec<Assembler>,
     errors: Vec<Error>,
 }
@@ -54,14 +53,14 @@ impl<'a, 'b> Compiler<'a, 'b> {
             lmap,
             globals: Vec::new(),
             functions: Vec::new(),
-            strings: Handle::new(List::alloc()),
-            string_index: Handle::new(data::HashMap::alloc()),
+            strings: Vec::new(),
+            string_index: HashMap::new(),
             asm_stack: vec![Assembler::new()],
             errors: Vec::new(),
         }
     }
 
-    fn finish(mut self) -> Result<Box<Package>, ErrorList> {
+    fn finish(mut self) -> Result<Package, ErrorList> {
         let mut asm = self.asm_stack.pop().unwrap();
         asm.constzero();
         asm.mode(inst::MODE_PTR);
@@ -72,7 +71,6 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.functions.push(Function {
                     name: String::from("·init"),
                     insts: init_insts,
-                    package: 0 as *mut Package,
                     param_types: Vec::new(),
                     var_param_type: None,
                     cell_types: Vec::new(),
@@ -88,16 +86,14 @@ impl<'a, 'b> Compiler<'a, 'b> {
             return Err(ErrorList(self.errors));
         }
 
-        let mut package = Box::new(Package {
+        let package = Package {
             name: String::from("main"),
             globals: self.globals,
             functions: self.functions,
-            strings: Handle::empty(),
+            strings: self.strings,
             line_map: PackageLineMap::from(self.lmap),
             imports: Vec::new(),
-        });
-        package.strings = Handle::new(Slice::alloc());
-        package.strings.init_from_list(&self.strings);
+        };
         Ok(package)
     }
 
@@ -203,7 +199,6 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 let ctor = Function {
                     name: format!("·{}·constructor", name.text),
                     insts: ctor_insts,
-                    package: 0 as *mut Package,
                     param_types: vec![Type::NanBox; init_param_count.unwrap_or(0) as usize],
                     var_param_type: None,
                     cell_types: Vec::new(),
@@ -355,7 +350,6 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let f = Function {
             name: String::from(name.text),
             insts,
-            package: 0 as *mut Package,
             param_types,
             var_param_type: None,
             cell_types,
@@ -710,7 +704,6 @@ impl<'a, 'b> Compiler<'a, 'b> {
             VarKind::Global => {
                 *self.ensure_global(var.slot) = Global {
                     name: String::from(name),
-                    value: 0,
                 };
             }
             VarKind::Local => {}
@@ -798,7 +791,6 @@ impl<'a, 'b> Compiler<'a, 'b> {
         if self.globals.len() <= index {
             self.globals.resize_with(index + 1, || Global {
                 name: String::from(""),
-                value: 0,
             });
         }
         &mut self.globals[index]
@@ -812,19 +804,18 @@ impl<'a, 'b> Compiler<'a, 'b> {
     }
 
     fn ensure_string(&mut self, s: &[u8], pos: Pos) -> u32 {
-        let hs = Handle::new(data::String::from_bytes(s));
-        match self.string_index.get(&*hs) {
-            Some(v) => v.value,
+        match self.string_index.get(s) {
+            Some(&i) => i,
             None => {
-                let i: u32 = match (*self.strings).len().try_into() {
+                let i: u32 = match self.strings.len().try_into() {
                     Ok(i) => i,
                     _ => {
                         self.error(pos, String::from("too many strings"));
-                        return !0;
+                        !0
                     }
                 };
-                (*self.strings).push(&*hs);
-                (*self.string_index).insert(&*hs, &SetValue { value: i });
+                self.strings.push(Vec::from(s));
+                self.string_index.insert(Vec::from(s), i);
                 i
             }
         }

@@ -1,6 +1,6 @@
 use codeswitch::interpret::Interpreter;
 use codeswitch::lox::compile;
-use codeswitch::package::{PackageLoader, ProvidedPackageSearcher};
+use codeswitch::runtime::{PackageLoader, ProvidedPackageSearcher};
 
 use std::env;
 use std::error::Error;

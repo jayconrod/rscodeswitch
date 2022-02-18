@@ -4,8 +4,8 @@ use crate::lua::luastd;
 use crate::lua::scope;
 use crate::lua::syntax;
 use crate::lua::token;
-use crate::package::{PackageLoader, ProvidedPackageSearcher};
 use crate::pos::{Error, ErrorList, LineMap, Position};
+use crate::runtime::{PackageLoader, ProvidedPackageSearcher};
 
 use std::env;
 use std::fmt::Display;

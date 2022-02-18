@@ -1,13 +1,12 @@
-use crate::data::{self, List, Slice};
-use crate::heap::Handle;
 use crate::inst::{self, Assembler, Label};
-use crate::package::{Function, Global, Object, Package, Type};
+use crate::package::{Function, Global, Package, Type};
 use crate::pos::PackageLineMap;
+use crate::runtime::Object;
 
 use std::collections::HashMap;
 use std::mem;
 
-pub fn build_std_package() -> Box<Package> {
+pub fn build_std_package() -> Package {
     let mut b = Builder::new();
 
     // assert(v, message)
@@ -155,34 +154,30 @@ pub fn build_std_package() -> Box<Package> {
 }
 
 struct Builder {
-    strings: Handle<List<data::String>>,
     string_index: HashMap<&'static str, u32>,
     asm: Assembler,
-    package: Box<Package>,
+    package: Package,
     function_name_index: Vec<u32>,
 }
 
 impl Builder {
     fn new() -> Builder {
         Builder {
-            strings: Handle::new(List::alloc()),
             string_index: HashMap::new(),
             asm: Assembler::new(),
-            package: Box::new(Package {
+            package: Package {
                 name: String::from("luastd"),
                 globals: Vec::new(),
                 functions: Vec::new(),
-                strings: Handle::new(Slice::alloc()),
+                strings: Vec::new(),
                 line_map: PackageLineMap { files: Vec::new() },
                 imports: Vec::new(),
-            }),
+            },
             function_name_index: Vec::new(),
         }
     }
 
-    fn build(mut self) -> Box<Package> {
-        self.package.strings = Handle::new(Slice::alloc());
-        self.package.strings.init_from_list(&*self.strings);
+    fn build(self) -> Package {
         self.package
     }
 
@@ -198,7 +193,6 @@ impl Builder {
         self.package.functions.push(Function {
             name: String::from(name),
             insts,
-            package: 0 as *mut Package,
             param_types: vec![Type::NanBox; param_count],
             var_param_type,
             cell_types: Vec::new(),
@@ -212,20 +206,19 @@ impl Builder {
         let i = self.package.globals.len() as u32;
         self.package.globals.push(Global {
             name: String::from(s),
-            value: 0,
         });
         i
     }
 
     fn ensure_string(&mut self, s: &'static str) -> u32 {
-        if let Some(&i) = self.string_index.get(s) {
-            i
-        } else {
-            let i = self.strings.len().try_into().unwrap();
-            let sh = Handle::new(data::String::from_bytes(s.as_bytes()));
-            self.strings.push(&*sh);
-            self.string_index.insert(s, i);
-            i
+        match self.string_index.get(s) {
+            Some(&i) => i,
+            None => {
+                let i = self.package.strings.len().try_into().unwrap();
+                self.package.strings.push(Vec::from(s));
+                self.string_index.insert(s, i);
+                i
+            }
         }
     }
 }

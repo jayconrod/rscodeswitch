@@ -315,6 +315,17 @@ impl String {
         }
     }
 
+    pub fn set_from_bytes(&mut self, s: &[u8]) {
+        unsafe {
+            let data = Array::alloc(s.len());
+            let data_ref = data.as_mut().unwrap();
+            for (i, b) in s.iter().enumerate() {
+                *data_ref.index_mut(i) = *b;
+            }
+            self.data.init(data, s.len());
+        }
+    }
+
     pub fn as_str(&self) -> Result<&str, Utf8Error> {
         str::from_utf8(self.data.as_slice())
     }

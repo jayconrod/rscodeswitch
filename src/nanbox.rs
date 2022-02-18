@@ -4,7 +4,7 @@
 
 use crate::data;
 use crate::heap::{Set, HEAP};
-use crate::package::{Closure, Object};
+use crate::runtime::{Closure, Object};
 use std::cmp::{Ordering, PartialOrd};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};

@@ -2,8 +2,8 @@ use crate::data;
 use crate::heap::HEAP;
 use crate::inst;
 use crate::nanbox::{self, NanBox};
-use crate::package::{Closure, Function, Object, Property, PropertyKind};
 use crate::pos::Error;
+use crate::runtime::{Closure, Function, Object, Property, PropertyKind};
 
 use std::io::Write;
 use std::mem;
@@ -1052,11 +1052,7 @@ impl<'w> Interpreter<'w> {
                 (inst::LOADIMPORTGLOBAL, inst::MODE_I64) => {
                     let imp_index = read_imm!(u16, 1) as usize;
                     let index = read_imm!(u32, 3) as usize;
-                    let v = pp.imports[imp_index].globals[index]
-                        .link
-                        .as_ref()
-                        .unwrap()
-                        .value;
+                    let v = pp.imports[imp_index].globals[index].as_ref().unwrap().value;
                     push!(v);
                     inst::size(inst::LOADIMPORTGLOBAL)
                 }
@@ -1631,11 +1627,7 @@ impl<'w> Interpreter<'w> {
                     let imp_index = read_imm!(u16, 1) as usize;
                     let index = read_imm!(u32, 3) as usize;
                     let v = pop!();
-                    pp.imports[imp_index].globals[index]
-                        .link
-                        .as_mut()
-                        .unwrap()
-                        .value = v;
+                    pp.imports[imp_index].globals[index].as_mut().unwrap().value = v;
                     inst::size(inst::STOREIMPORTGLOBAL)
                 }
                 (inst::STOREINDEXPROP, inst::MODE_LUA) => {
