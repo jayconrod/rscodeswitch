@@ -1,4 +1,5 @@
 use crate::inst::{self, Assembler, Label};
+use crate::nanbox;
 use crate::package::{Function, Global, Package, Type};
 use crate::pos::PackageLineMap;
 use crate::runtime::Object;
@@ -103,7 +104,90 @@ pub fn build_std_package() -> Package {
     // TODO: setmetatable
     // TODO: tonumber
     // TODO: tostring
-    // TODO: type
+
+    // type
+    {
+        b.asm.loadarg(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.typeof_();
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.ne();
+        let mut not_nil_label = Label::new();
+        b.asm.bif(&mut not_nil_label);
+        let nil_si = b.ensure_string("nil");
+        b.asm.string(nil_si);
+        let mut box_label = Label::new();
+        b.asm.b(&mut box_label);
+        b.asm.bind(&mut not_nil_label);
+        b.asm.dup();
+        b.asm.const_(nanbox::TAG_BOOL);
+        b.asm.ne();
+        let mut not_bool_label = Label::new();
+        b.asm.bif(&mut not_bool_label);
+        let bool_si = b.ensure_string("boolean");
+        b.asm.string(bool_si);
+        b.asm.b(&mut box_label);
+        b.asm.bind(&mut not_bool_label);
+        b.asm.dup();
+        b.asm.const_(nanbox::TAG_SMALL_INT);
+        b.asm.eq();
+        let mut number_label = Label::new();
+        b.asm.bif(&mut number_label);
+        b.asm.dup();
+        b.asm.const_(nanbox::TAG_BIG_INT);
+        b.asm.eq();
+        b.asm.bif(&mut number_label);
+        b.asm.dup();
+        b.asm.const_(nanbox::TAG_FLOAT);
+        b.asm.ne();
+        let mut not_number_label = Label::new();
+        b.asm.bif(&mut not_number_label);
+        b.asm.bind(&mut number_label);
+        let number_si = b.ensure_string("number");
+        b.asm.string(number_si);
+        b.asm.b(&mut box_label);
+        b.asm.bind(&mut not_number_label);
+        b.asm.dup();
+        b.asm.const_(nanbox::TAG_STRING);
+        b.asm.ne();
+        let mut not_string_label = Label::new();
+        b.asm.bif(&mut not_string_label);
+        let string_si = b.ensure_string("string");
+        b.asm.string(string_si);
+        b.asm.b(&mut box_label);
+        b.asm.bind(&mut not_string_label);
+        b.asm.dup();
+        b.asm.const_(nanbox::TAG_CLOSURE);
+        b.asm.ne();
+        let mut not_function_label = Label::new();
+        b.asm.bif(&mut not_function_label);
+        let function_si = b.ensure_string("function");
+        b.asm.string(function_si);
+        b.asm.b(&mut box_label);
+        b.asm.bind(&mut not_function_label);
+        b.asm.dup();
+        b.asm.const_(nanbox::TAG_OBJECT);
+        b.asm.ne();
+        let mut not_table_label = Label::new();
+        b.asm.bif(&mut not_table_label);
+        let table_si = b.ensure_string("table");
+        b.asm.string(table_si);
+        b.asm.b(&mut box_label);
+        b.asm.bind(&mut not_table_label);
+        // TODO: userdata, thread
+        let unknown_si = b.ensure_string("unknown");
+        b.asm.string(unknown_si);
+        b.asm.bind(&mut box_label);
+        b.asm.mode(inst::MODE_STRING);
+        b.asm.nanbox();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("type", 1, false);
+    }
+
     // TODO: _VERSION
     // TODO: warn
     // TODO: xpcall
