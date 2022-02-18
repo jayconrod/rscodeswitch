@@ -1,6 +1,7 @@
 use crate::data;
 use crate::heap::HEAP;
 use crate::inst;
+use crate::lua::token::{self, Number};
 use crate::nanbox::{self, NanBox};
 use crate::pos::Error;
 use crate::runtime::{Closure, Function, Object, Property, PropertyKind};
@@ -18,11 +19,49 @@ const FRAME_SIZE: usize = 32;
 
 pub struct Interpreter<'w> {
     w: &'w mut dyn Write,
+
+    stack: Stack,
+
+    // Below this point are "registers" used by the interpreter. The main loop
+    // uses local variables, but they're saved here when calling a native
+    // function.
+    /// The function at the top of the stack being executed.
+    func: *const Function,
+
+    /// Value count. In Lua, this is the number of dynamic values in
+    /// an expression list. Set before calling or returning from a function and
+    /// when expanding "...".
+    vc: usize,
+
+    /// Closure pointer. Points to the current function's closure so that its
+    /// cells may be accessed. cp is null if the function was called directly
+    /// without a closure.
+    cp: *const Closure,
+
+    /// Stack pointer. Points to the value at the "top" of the stack, but like
+    /// most architectures, the stack grows down.
+    sp: usize,
+
+    /// Frame pointer. Points to the current function's stack frame,
+    /// specifically at the saved fp from the caller's stack frame.
+    fp: usize,
+
+    /// Instruction pointer. Points to the instruction being executed.
+    ip: *const u8,
 }
 
 impl<'w> Interpreter<'w> {
     pub fn new(w: &'w mut dyn Write) -> Interpreter<'w> {
-        Interpreter { w }
+        Interpreter {
+            w,
+            stack: Stack::new(),
+            func: 0 as *const Function,
+            vc: 0,
+            cp: 0 as *const Closure,
+            sp: 0,
+            fp: 0,
+            ip: 0 as *const u8,
+        }
     }
 
     pub fn interpret(&mut self, func: &Function) -> Result<(), Error> {
@@ -32,29 +71,11 @@ impl<'w> Interpreter<'w> {
     pub unsafe fn interpret_unsafe(&mut self, mut func: &Function) -> Result<(), Error> {
         assert!(func.param_types.is_empty());
 
-        // vc is value count. In Lua, this is the number of dynamic values in
-        // an expression list.
         let mut vc = 0;
-
-        // pp points to the current function's package.
         let mut pp = func.package.as_mut().unwrap();
-
-        // cp points to the current function's closure. cp is null if
-        // the function was called directly without a closure.
         let mut cp = 0 as *const Closure;
-
-        let mut stack = Stack::new();
-        // sp is the top of the stack. sp points to the last temporary
-        // stack slot. The stack grows down.
-        let mut sp = stack.end() - FRAME_SIZE;
-
-        // fp is the frame pointer. fp points to the caller's saved fp
-        // in the stack frame. The addresses of local variables and
-        // arguments are based on fp.
+        let mut sp = self.stack.end() - FRAME_SIZE;
         let mut fp = sp;
-
-        // ip is the instruction pointer. ip points to the next instruction
-        // to execute.
         let mut ip = &func.insts[0] as *const u8;
 
         // Construct the stack frame.
@@ -62,6 +83,19 @@ impl<'w> Interpreter<'w> {
         *((fp + 16) as *mut u64) = 0; // caller's cells
         *((fp + 8) as *mut u64) = 0; // return address
         *(fp as *mut u64) = 0; // caller's fp
+
+        // save_regs writes the local values of ip and other registers into the
+        // Interpreter object.
+        macro_rules! save_regs {
+            () => {{
+                self.func = func;
+                self.vc = vc;
+                self.cp = cp;
+                self.sp = sp;
+                self.fp = fp;
+                self.ip = ip;
+            }};
+        }
 
         // return_errorf constructs and returns an error immediately.
         macro_rules! return_errorf {
@@ -1469,14 +1503,16 @@ impl<'w> Interpreter<'w> {
                     let level = read_imm!(u8, 1) as usize;
                     let s = (*(sp as *const *const data::String)).as_ref().unwrap();
                     let message = s.to_string();
-                    return Err(Interpreter::error_level(func, ip, fp, level, message));
+                    save_regs!();
+                    return Err(self.error_level(level, message));
                 }
                 (inst::PANIC, inst::MODE_LUA) => {
                     let level = read_imm!(u8, 1) as usize;
                     let v = NanBox(*(sp as *const u64));
                     let s = v.to_string();
                     let message = s.to_string();
-                    return Err(Interpreter::error_level(func, ip, fp, level, message));
+                    save_regs!();
+                    return Err(self.error_level(level, message));
                 }
                 (inst::PANICLEVEL, inst::MODE_LUA) => {
                     let raw_level = NanBox(*(sp as *const u64));
@@ -1486,7 +1522,8 @@ impl<'w> Interpreter<'w> {
                         _ => 0,
                     };
                     let message = raw_message.to_string();
-                    return Err(Interpreter::error_level(func, ip, fp, level, message));
+                    save_regs!();
+                    return Err(self.error_level(level, message));
                 }
                 (inst::POP, inst::MODE_I64) => {
                     sp += 8;
@@ -1769,18 +1806,23 @@ impl<'w> Interpreter<'w> {
                 }
                 (inst::SYS, inst::MODE_LUA) => {
                     let sys = read_imm!(u8, 1);
-                    let mut args = vec![0; vc];
+                    let mut args = vec![NanBox(0); vc];
                     for i in 0..vc {
                         let argp = sp + (vc - i - 1) * 8;
-                        args[i] = *(argp as *const u64);
+                        args[i] = NanBox(*(argp as *const u64));
                     }
-                    match sys {
-                        inst::SYS_PRINT => {
-                            self.sys_print(&args)?;
-                        }
+                    save_regs!();
+                    let rets = match sys {
+                        inst::SYS_PRINT => self.sys_print(&args)?,
+                        inst::SYS_TONUMBER => self.sys_tonumber(&args)?,
                         _ => panic!("unknown sys {}", sys),
-                    }
+                    };
                     sp += vc * 8;
+                    vc = rets.len();
+                    for ret in rets {
+                        sp -= 8;
+                        *(sp as *mut u64) = ret.0;
+                    }
                     inst::size(inst::SYS)
                 }
                 (inst::TOFLOAT, inst::MODE_LUA) => {
@@ -1830,14 +1872,71 @@ impl<'w> Interpreter<'w> {
         }
     }
 
-    fn sys_print(&mut self, vs: &[u64]) -> Result<(), Error> {
+    fn sys_print(&mut self, vs: &[NanBox]) -> Result<Vec<NanBox>, Error> {
         let mut sep = "";
         for v in vs {
-            let _ = write!(self.w, "{}{}", sep, NanBox(*v));
+            let _ = write!(self.w, "{}{}", sep, v);
             sep = " ";
         }
         let _ = write!(self.w, "\n");
-        Ok(())
+        Ok(Vec::new())
+    }
+
+    unsafe fn sys_tonumber(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
+        if args.is_empty() {
+            return Err(
+                self.error_level(1, String::from("tonumber: requires at least one argument"))
+            );
+        }
+        match args.get(1).filter(|v| !v.is_nil()) {
+            Some(&raw_base) => {
+                let s: &data::String = match args[0].try_into() {
+                    Ok(s) => s,
+                    _ => {
+                        return Err(self.error_level(
+                            1,
+                            format!(
+                                "tonumber: for first argument, expected string, got {:?}",
+                                args[0]
+                            ),
+                        ))
+                    }
+                };
+                let base: u32 = match <NanBox as TryInto<i64>>::try_into(raw_base) {
+                    Ok(n) if 2 <= n && n <= 36 => n as u32,
+                    _ => {
+                        return Err(self
+                            .error_level(1, String::from("tonumber: base argument out of range")))
+                    }
+                };
+                let s_str = match s.as_str() {
+                    Ok(s) => s.trim(),
+                    _ => return Ok(vec![NanBox::from_nil()]),
+                };
+                match i64::from_str_radix(s_str, base) {
+                    Ok(n) => return Ok(vec![NanBox::from_small_or_big_i64(n)]),
+                    _ => return Ok(vec![NanBox::from_nil()]),
+                }
+            }
+            None => {
+                if args[0].is_number() {
+                    return Ok(vec![args[0]]);
+                }
+                let s: &data::String = match args[0].try_into() {
+                    Ok(s) => s,
+                    _ => return Ok(vec![NanBox::from_nil()]),
+                };
+                let s_str = match s.as_str() {
+                    Ok(s) => s.trim(),
+                    _ => return Ok(vec![NanBox::from_nil()]),
+                };
+                match token::convert_number(s_str) {
+                    Number::Malformed => return Ok(vec![NanBox::from_nil()]),
+                    Number::Int(n) => return Ok(vec![NanBox::from_small_or_big_i64(n)]),
+                    Number::Float(n) => return Ok(vec![NanBox::from(n)]),
+                }
+            }
+        }
     }
 
     unsafe fn error(func: &Function, ip: *const u8, message: String) -> Error {
@@ -1853,13 +1952,10 @@ impl<'w> Interpreter<'w> {
         Error { position, message }
     }
 
-    unsafe fn error_level(
-        mut func: &Function,
-        mut ip: *const u8,
-        mut fp: usize,
-        mut level: usize,
-        message: String,
-    ) -> Error {
+    unsafe fn error_level(&self, mut level: usize, message: String) -> Error {
+        let mut func = self.func.as_ref().unwrap();
+        let mut fp = self.fp;
+        let mut ip = self.ip;
         while level > 0 {
             func = match (*((fp + 24) as *const *const Function)).as_ref() {
                 Some(f) => f,

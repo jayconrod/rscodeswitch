@@ -102,7 +102,18 @@ pub fn build_std_package() -> Package {
     // TODO: rawset
     // TODO: select
     // TODO: setmetatable
-    // TODO: tonumber
+
+    // tonumber
+    {
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadvarargs();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.sys(inst::SYS_TONUMBER);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("tonumber", 0, true);
+    }
+
     // TODO: tostring
 
     // type

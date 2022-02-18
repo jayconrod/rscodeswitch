@@ -8,6 +8,7 @@ use crate::runtime::{Closure, Object};
 use std::cmp::{Ordering, PartialOrd};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
+use std::mem;
 
 /// NanBox encodes various types within the unused bits of IEEE-754 QNaN values
 /// that are not naturally produced by supported processors. This is useful for
@@ -32,6 +33,14 @@ impl NanBox {
 
     pub fn is_nil(&self) -> bool {
         self.0 == QNAN | TAG_NIL
+    }
+
+    pub unsafe fn from_small_or_big_i64(n: i64) -> NanBox {
+        n.try_into().unwrap_or_else(|_| {
+            let bi = HEAP.allocate(mem::size_of::<i64>()) as *mut i64;
+            *bi = n;
+            bi.into()
+        })
     }
 
     pub fn as_i64(&self) -> ConvertResult<i64> {

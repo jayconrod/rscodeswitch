@@ -784,9 +784,14 @@ pub enum Number {
 /// Lua number. Lua supports 64-bit signed integers and 64-bit floating point
 /// numbers. If an integer literal can't be represented in 64 bits, it's
 /// interpreted as a floating point number instead.
+///
+/// convert_number supports leading signs to help with the implementation of
+/// tonumber. However, the lexer treats a leading sign as a separate token,
+/// so that functionality isn't needed for numbers in source code.
 pub fn convert_number(s: &str) -> Number {
     let sb = s.as_bytes();
     let mut p = 0;
+    let mut sign: &[u8] = &sb[0..0];
     let whole: &[u8];
     let mut frac = &sb[0..0];
     let mut is_float = false;
@@ -794,7 +799,12 @@ pub fn convert_number(s: &str) -> Number {
     let mut exp = &sb[0..0];
     let mut radix = 10;
 
-    if sb.starts_with(b"0x") || sb.starts_with(b"0X") {
+    if sb.len() > 0 && (sb[0] == b'-' || sb[0] == b'+') {
+        sign = &sb[0..1];
+        p += 1;
+    }
+
+    if sb.len() >= p + 2 && sb[p] == b'0' && (sb[p + 1] == b'x' || sb[p + 1] == b'X') {
         radix = 16;
         p += 2;
 
@@ -885,11 +895,18 @@ pub fn convert_number(s: &str) -> Number {
         return Number::Malformed;
     }
 
+    let sign = unsafe { str::from_utf8_unchecked(sign) };
     let whole = unsafe { str::from_utf8_unchecked(whole) };
     let frac = unsafe { str::from_utf8_unchecked(frac) };
     let exp = unsafe { str::from_utf8_unchecked(exp) };
     if !is_float {
-        if let Ok(n) = i64::from_str_radix(whole, radix) {
+        let res = if radix == 10 {
+            i64::from_str_radix(s, radix)
+        } else {
+            let without_0x = format!("{}{}", sign, whole);
+            i64::from_str_radix(&without_0x, radix)
+        };
+        if let Ok(n) = res {
             return Number::Int(n);
         }
         // If the number doesn't fit in i64, fall through and treat it as
@@ -905,10 +922,11 @@ pub fn convert_number(s: &str) -> Number {
         return Number::Malformed;
     }
     let fs = if exp.is_empty() {
-        format!("{}.{}", whole, frac)
+        format!("{}{}.{}", sign, whole, frac)
     } else {
         format!(
-            "{}.{}e{}{}",
+            "{}{}.{}e{}{}",
+            sign,
             whole,
             frac,
             if exp_neg { "-" } else { "" },
