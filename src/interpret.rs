@@ -2,7 +2,7 @@ use crate::data;
 use crate::heap::HEAP;
 use crate::inst;
 use crate::lua::token::{self, Number};
-use crate::nanbox::{self, NanBox};
+use crate::nanbox::{self, NanBox, NanBoxKey};
 use crate::pos::Error;
 use crate::runtime::{Closure, Function, Object, Property, PropertyKind};
 
@@ -625,7 +625,7 @@ impl<'w> Interpreter<'w> {
                         Ok(o) => o,
                         _ => return_errorf!("receiver is not an object: {:?}", raw_receiver),
                     };
-                    let prop = match receiver.property(key) {
+                    let prop = match receiver.lookup_property(key) {
                         Some(p) => p,
                         _ => return_errorf!("property {} is not defined", name),
                     };
@@ -660,7 +660,7 @@ impl<'w> Interpreter<'w> {
                         Ok(o) => o,
                         _ => return_errorf!("receiver is not an object: {:?}", raw_receiver),
                     };
-                    let prop = match receiver.property(key) {
+                    let prop = match receiver.lookup_property(key) {
                         Some(p) => p,
                         _ => return_errorf!("property {} is not defined", name),
                     };
@@ -696,7 +696,7 @@ impl<'w> Interpreter<'w> {
                         Ok(p) => p,
                         _ => return_errorf!("prototype is not an object: {:?}", prototype),
                     };
-                    let prop = match prototype_obj.property(key) {
+                    let prop = match prototype_obj.lookup_property(key) {
                         Some(p) => p,
                         _ => return_errorf!("property {} is not defined", key),
                     };
@@ -1025,7 +1025,7 @@ impl<'w> Interpreter<'w> {
                             n -= 1;
                         }
                         while n > 0 {
-                            match o.own_array_property(n) {
+                            match o.lookup_own_array_property(n) {
                                 Some(Property { value, .. }) if !value.is_nil() => break,
                                 _ => (),
                             }
@@ -1099,7 +1099,7 @@ impl<'w> Interpreter<'w> {
                     };
                     let v = match index.try_into() {
                         Err(_) => NanBox::from_nil(),
-                        Ok(key) => match receiver.property(key) {
+                        Ok(key) => match receiver.lookup_property(key) {
                             None => NanBox::from_nil(),
                             Some(p) => receiver.property_value(p),
                         },
@@ -1122,7 +1122,7 @@ impl<'w> Interpreter<'w> {
                         Ok(o) => o,
                         _ => return_errorf!("value is not an object: {:?}", raw_receiver),
                     };
-                    let prop = match receiver.property(key) {
+                    let prop = match receiver.lookup_property(key) {
                         Some(p) => p,
                         None => return_errorf!("object does not have property {}", key),
                     };
@@ -1139,7 +1139,7 @@ impl<'w> Interpreter<'w> {
                         Ok(o) => o,
                         _ => return_errorf!("value is not an object: {:?}", receiver),
                     };
-                    let value = match receiver_obj.property(key) {
+                    let value = match receiver_obj.lookup_property(key) {
                         Some(p) => receiver_obj.property_value(p),
                         None => NanBox::from_nil(),
                     };
@@ -1815,6 +1815,7 @@ impl<'w> Interpreter<'w> {
                     let rets = match sys {
                         inst::SYS_PRINT => self.sys_print(&args)?,
                         inst::SYS_TONUMBER => self.sys_tonumber(&args)?,
+                        inst::SYS_TOSTRING => self.sys_tostring(&args)?,
                         _ => panic!("unknown sys {}", sys),
                     };
                     sp += vc * 8;
@@ -1937,6 +1938,37 @@ impl<'w> Interpreter<'w> {
                 }
             }
         }
+    }
+
+    unsafe fn sys_tostring(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
+        self.lua_tostring(args[0]).map(|v| vec![v])
+    }
+
+    unsafe fn lua_tostring(&mut self, v: NanBox) -> Result<NanBox, Error> {
+        if v.type_tag() == nanbox::TAG_STRING {
+            return Ok(v);
+        }
+        if let Ok(o) = <NanBox as TryInto<&Object>>::try_into(v) {
+            let tostring_name = data::String::from_bytes(b"__tostring");
+            let tostring_box: NanBox = tostring_name.into();
+            let tostring_key: NanBoxKey = tostring_box.try_into().unwrap();
+            let tostring_opt = o
+                .prototype
+                .as_ref()
+                .and_then(|p| p.own_property(tostring_key));
+            if let Some(tostring_raw) = tostring_opt {
+                if let Ok(_) = <NanBox as TryInto<&Closure>>::try_into(tostring_raw) {
+                    // TODO: call __tostring method, return result
+                } else {
+                    return Err(self.error_level(
+                        0,
+                        format!("__tostring is a {:?}, not a method", tostring_raw),
+                    ));
+                }
+            }
+            // fall through
+        }
+        Ok(data::String::from_bytes(v.to_string().as_bytes()).into())
     }
 
     unsafe fn error(func: &Function, ip: *const u8, message: String) -> Error {

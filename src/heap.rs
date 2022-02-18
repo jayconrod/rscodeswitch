@@ -71,6 +71,14 @@ impl<T> Ptr<T> {
     pub fn unwrap_ref(&self) -> &T {
         unsafe { self.p.as_ref().unwrap() }
     }
+
+    pub fn as_ref(&self) -> Option<&T> {
+        unsafe { self.p.as_ref() }
+    }
+
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        unsafe { self.p.as_mut() }
+    }
 }
 
 impl<T> Set for Ptr<T> {

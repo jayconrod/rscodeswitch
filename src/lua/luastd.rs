@@ -114,7 +114,17 @@ pub fn build_std_package() -> Package {
         b.finish_function("tonumber", 0, true);
     }
 
-    // TODO: tostring
+    // tostring
+    {
+        b.asm.loadarg(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.sys(inst::SYS_TOSTRING);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("tostring", 1, false);
+    }
 
     // type
     {

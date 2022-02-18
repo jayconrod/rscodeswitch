@@ -265,6 +265,13 @@ impl TryInto<*const data::String> for NanBox {
     }
 }
 
+impl From<*mut data::String> for NanBox {
+    fn from(s: *mut data::String) -> NanBox {
+        assert!(!s.is_null());
+        NanBox(QNAN | TAG_STRING | s as u64)
+    }
+}
+
 impl From<&data::String> for NanBox {
     fn from(s: &data::String) -> NanBox {
         NanBox::from(s as *const data::String)

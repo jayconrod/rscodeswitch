@@ -312,11 +312,11 @@ pub struct Object {
 impl Object {
     /// Looks up and returns a property, which may be in this object or the
     /// prototype chain.
-    pub fn property(&self, key: NanBoxKey) -> Option<&Property> {
+    pub fn lookup_property(&self, key: NanBoxKey) -> Option<&Property> {
         unsafe {
             let mut o = self;
             loop {
-                let prop = o.own_property(key);
+                let prop = o.lookup_own_property(key);
                 if prop.is_some() {
                     return prop;
                 }
@@ -334,9 +334,9 @@ impl Object {
 
     /// Looks up and returns a property stored in the object itself, not in
     /// its prototype chain.
-    pub fn own_property(&self, key: NanBoxKey) -> Option<&Property> {
+    pub fn lookup_own_property(&self, key: NanBoxKey) -> Option<&Property> {
         if let Ok(i) = key.as_array_key() {
-            self.own_array_property(i)
+            self.lookup_own_array_property(i)
         } else {
             self.properties.get(&key)
         }
@@ -344,7 +344,7 @@ impl Object {
 
     /// Looks up and returns an array property stored in the object itself, not
     /// in its prototype chain.
-    pub fn own_array_property(&self, key: i64) -> Option<&Property> {
+    pub fn lookup_own_array_property(&self, key: i64) -> Option<&Property> {
         self.array_properties.get(&SetValue { value: key })
     }
 
@@ -401,6 +401,19 @@ impl Object {
                 self.properties.insert(&key, &prop);
             }
         }
+    }
+
+    /// Looks up a property and returns its value. This is a convenience method for
+    /// lookup_property followed by property_value.
+    pub unsafe fn property(&self, key: NanBoxKey) -> Option<NanBox> {
+        self.lookup_property(key).map(|p| self.property_value(p))
+    }
+
+    /// Looks up a property on this object (not the prototype chain) and returns its value.
+    /// This is a convenience method for lookup_own_property followed by property_value.
+    pub unsafe fn own_property(&self, key: NanBoxKey) -> Option<NanBox> {
+        self.lookup_own_property(key)
+            .map(|p| self.property_value(p))
     }
 
     /// Loads the value of a property. For methods, this allocates a
