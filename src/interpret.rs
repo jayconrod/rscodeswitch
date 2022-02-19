@@ -16,10 +16,17 @@ use std::mem;
 //   - Return address: *const u8
 //   - Caller's fp
 const FRAME_SIZE: usize = 32;
+const FRAME_FP_OFFSET: usize = 0;
+const FRAME_IP_OFFSET: usize = 8;
+const FRAME_CP_OFFSET: usize = 16;
+const FRAME_FUNC_OFFSET: usize = 24;
 
 pub struct Interpreter<'w> {
     w: &'w mut dyn Write,
 
+    /// Holds the memory for the interpreter's stack.
+    // TODO: remove this annotation. Check stack limits.
+    #[allow(dead_code)]
     stack: Stack,
 
     // Below this point are "registers" used by the interpreter. The main loop
@@ -52,37 +59,68 @@ pub struct Interpreter<'w> {
 
 impl<'w> Interpreter<'w> {
     pub fn new(w: &'w mut dyn Write) -> Interpreter<'w> {
+        let stack = Stack::new();
+        let sp = stack.end() - FRAME_SIZE;
+        let fp = sp;
         Interpreter {
             w,
-            stack: Stack::new(),
+            stack,
             func: 0 as *const Function,
             vc: 0,
             cp: 0 as *const Closure,
-            sp: 0,
-            fp: 0,
+            sp,
+            fp,
             ip: 0 as *const u8,
         }
     }
 
-    pub fn interpret(&mut self, func: &Function) -> Result<(), Error> {
-        unsafe { self.interpret_unsafe(func) }
+    pub fn interpret_closure(
+        &mut self,
+        closure: &Closure,
+        args: &[u64],
+    ) -> Result<Vec<u64>, Error> {
+        unsafe {
+            self.interpret_loop(
+                closure.function.unwrap_ref(),
+                closure as *const Closure,
+                args,
+            )
+        }
     }
 
-    pub unsafe fn interpret_unsafe(&mut self, mut func: &Function) -> Result<(), Error> {
-        assert!(func.param_types.is_empty());
+    pub unsafe fn interpret_function(
+        &mut self,
+        func: &Function,
+        args: &[u64],
+    ) -> Result<Vec<u64>, Error> {
+        self.interpret_loop(func, 0 as *const Closure, args)
+    }
 
-        let mut vc = 0;
+    unsafe fn interpret_loop(
+        &mut self,
+        mut func: &Function,
+        mut cp: *const Closure,
+        args: &[u64],
+    ) -> Result<Vec<u64>, Error> {
+        // Load interpreter state into registers.
+        let mut vc = self.vc;
         let mut pp = func.package.as_mut().unwrap();
-        let mut cp = 0 as *const Closure;
-        let mut sp = self.stack.end() - FRAME_SIZE;
-        let mut fp = sp;
+        let mut sp = self.sp;
+        let mut fp;
         let mut ip = &func.insts[0] as *const u8;
+        let mut ret_sp; // used to return at the end
 
         // Construct the stack frame.
-        *((fp + 24) as *mut u64) = 0; // caller
-        *((fp + 16) as *mut u64) = 0; // caller's cells
-        *((fp + 8) as *mut u64) = 0; // return address
-        *(fp as *mut u64) = 0; // caller's fp
+        for i in 0..args.len() {
+            sp -= 8;
+            *(sp as *mut u64) = args[i];
+        }
+        sp -= FRAME_SIZE;
+        *((sp + FRAME_FUNC_OFFSET) as *mut *const Function) = self.func;
+        *((sp + FRAME_CP_OFFSET) as *mut *const Closure) = self.cp;
+        *((sp + FRAME_IP_OFFSET) as *mut *const u8) = self.ip;
+        *((sp + FRAME_FP_OFFSET) as *mut usize) = self.fp;
+        fp = sp;
 
         // save_regs writes the local values of ip and other registers into the
         // Interpreter object.
@@ -102,6 +140,33 @@ impl<'w> Interpreter<'w> {
             ($($x:expr),*) => {{
                 let message = format!($($x,)*);
                 return Err(Interpreter::error(func, ip, message))
+            }};
+        }
+
+        // return_ok returns normally from a function, popping the stack frame.
+        // If the return address is non-zero, return_ok moves results into the
+        // caller's stack frame and continues. If the return address is zero,
+        // return_ok leaves ret_sp pointing to the last result and breaks.
+        macro_rules! return_ok {
+            ($retc:expr) => {{
+                let retc = $retc;
+                ret_sp = sp;
+                sp = arg_addr!(0) + 8;
+                let func_ptr = *((fp + FRAME_FUNC_OFFSET) as *const *const Function);
+                cp = *((fp + FRAME_CP_OFFSET) as *const *const Closure);
+                ip = *((fp + FRAME_IP_OFFSET) as *const *const u8);
+                fp = *((fp + FRAME_FP_OFFSET) as *const usize);
+                if ip.is_null() {
+                    break;
+                }
+                func = func_ptr.as_ref().unwrap();
+                pp = func.package.as_mut().unwrap();
+                for i in 0..retc {
+                    let retp = ret_sp + (retc - i - 1) * 8;
+                    let ret = *(retp as *const u64);
+                    push!(ret);
+                }
+                continue;
             }};
         }
 
@@ -1537,41 +1602,10 @@ impl<'w> Interpreter<'w> {
                     inst::size(inst::PROTOTYPE)
                 }
                 (inst::RET, inst::MODE_I64) => {
-                    let ret_sp = sp;
-                    sp = arg_addr!(0);
-                    func = match (*((fp + 24) as *const *const Function)).as_ref() {
-                        Some(f) => f,
-                        None => {
-                            return Ok(());
-                        }
-                    };
-                    pp = func.package.as_mut().unwrap();
-                    cp = *((fp + 16) as *const *const Closure);
-                    ip = *((fp + 8) as *const *const u8);
-                    fp = *(fp as *const usize);
-                    let v = *(ret_sp as *const u64);
-                    *(sp as *mut u64) = v;
-                    continue;
+                    return_ok!(1);
                 }
                 (inst::RETV, inst::MODE_LUA) => {
-                    let mut retp = sp + vc * 8;
-                    sp = arg_addr!(0) + 8;
-                    func = match (*((fp + 24) as *const *const Function)).as_ref() {
-                        Some(f) => f,
-                        None => {
-                            return Ok(());
-                        }
-                    };
-                    pp = func.package.as_mut().unwrap();
-                    cp = *((fp + 16) as *const *const Closure);
-                    ip = *((fp + 8) as *const *const u8);
-                    fp = *(fp as *const usize);
-                    for _ in 0..vc {
-                        sp -= 8;
-                        retp -= 8;
-                        *(sp as *mut u64) = *(retp as *const u64);
-                    }
-                    continue;
+                    return_ok!(vc);
                 }
                 (inst::SHL, inst::MODE_LUA) => {
                     let r = NanBox(pop!());
@@ -1871,6 +1905,30 @@ impl<'w> Interpreter<'w> {
             };
             ip = (ip as usize + inst_size) as *const u8;
         }
+
+        // We break out of the loop above after popping a stack frame with a
+        // null func and return address. ret_sp points to the last result.
+        // We need to move results into a Vec for native code, the save
+        // registers and return.
+        let retc = if func.var_param_type.is_some() {
+            assert!(vc >= func.param_types.len());
+            vc
+        } else {
+            func.param_types.len()
+        };
+        let mut rets = Vec::with_capacity(retc);
+        for i in 0..retc {
+            let retp = ret_sp + (retc - i - 1) * 8;
+            let ret = *(retp as *const u64);
+            rets.push(ret);
+        }
+        self.func = 0 as *const Function;
+        self.vc = vc;
+        self.cp = 0 as *const Closure;
+        self.sp = sp;
+        self.fp = fp;
+        self.ip = 0 as *const u8;
+        Ok(rets)
     }
 
     fn sys_print(&mut self, vs: &[NanBox]) -> Result<Vec<NanBox>, Error> {
@@ -1957,8 +2015,15 @@ impl<'w> Interpreter<'w> {
                 .as_ref()
                 .and_then(|p| p.own_property(tostring_key));
             if let Some(tostring_raw) = tostring_opt {
-                if let Ok(_) = <NanBox as TryInto<&Closure>>::try_into(tostring_raw) {
-                    // TODO: call __tostring method, return result
+                if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(tostring_raw) {
+                    let ret = self.lua_interpret_closure(c, &[v])?;
+                    if ret.type_tag() != nanbox::TAG_STRING {
+                        return Err(self.error_level(
+                            0,
+                            format!("__tostring returned {:?}, not a string", ret),
+                        ));
+                    }
+                    return Ok(ret);
                 } else {
                     return Err(self.error_level(
                         0,
@@ -1969,6 +2034,67 @@ impl<'w> Interpreter<'w> {
             // fall through
         }
         Ok(data::String::from_bytes(v.to_string().as_bytes()).into())
+    }
+
+    unsafe fn interpret_closure_rec(
+        &mut self,
+        closure: &Closure,
+        args: &[u64],
+    ) -> Result<Vec<u64>, Error> {
+        // Construct a frame for the caller and clear the saved registers. This
+        // will cause the recursive interpreter call to return here instead of
+        // into the previous stack frame.
+        let fp = self.sp - FRAME_SIZE;
+        *((self.fp + FRAME_FUNC_OFFSET) as *mut *const Function) = self.func;
+        self.func = 0 as *const Function;
+        *((self.fp + FRAME_CP_OFFSET) as *mut *const Closure) = self.cp;
+        self.cp = 0 as *const Closure;
+        *((self.fp + FRAME_IP_OFFSET) as *mut *const u8) = self.ip;
+        self.ip = 0 as *const u8;
+        *((self.fp + FRAME_FP_OFFSET) as *mut usize) = self.fp;
+        self.fp = fp;
+        self.sp = fp;
+
+        // Call the closure.
+        let rets = self.interpret_closure(closure, args)?;
+
+        // Pop the caller's frame.
+        debug_assert_eq!(self.fp, fp);
+        debug_assert_eq!(self.sp, fp);
+        self.func = *((fp + FRAME_FUNC_OFFSET) as *const *const Function);
+        self.cp = *((fp + FRAME_CP_OFFSET) as *const *const Closure);
+        self.ip = *((fp + FRAME_IP_OFFSET) as *const *const u8);
+        self.fp = *((fp + FRAME_FP_OFFSET) as *const usize);
+        self.sp = fp + FRAME_SIZE;
+
+        Ok(rets)
+    }
+
+    unsafe fn lua_interpret_closure(
+        &mut self,
+        closure: &Closure,
+        args: &[NanBox],
+    ) -> Result<NanBox, Error> {
+        let rets = self.lua_interpret_closure_any(closure, args)?;
+        Ok(rets.first().map(|&v| v).unwrap_or(NanBox::from_nil()))
+    }
+
+    unsafe fn lua_interpret_closure_any(
+        &mut self,
+        closure: &Closure,
+        args: &[NanBox],
+    ) -> Result<Vec<NanBox>, Error> {
+        let argc = if closure.function.var_param_type.is_some() {
+            args.len().max(closure.function.param_types.len())
+        } else {
+            closure.function.param_types.len()
+        };
+        let mut raw_args = Vec::with_capacity(argc);
+        raw_args.extend(args.iter().take(args.len().min(argc)).map(|n| n.0));
+        raw_args.resize(argc, NanBox::from_nil().0);
+        let raw_rets = self.interpret_closure_rec(closure, &raw_args)?;
+        let rets = raw_rets.iter().map(|&n| NanBox(n)).collect();
+        Ok(rets)
     }
 
     unsafe fn error(func: &Function, ip: *const u8, message: String) -> Error {
@@ -2012,7 +2138,7 @@ impl Stack {
         Stack { data }
     }
 
-    fn end(&mut self) -> usize {
-        &mut self.data[0] as *mut u8 as usize + self.data.len()
+    fn end(&self) -> usize {
+        &self.data[0] as *const u8 as usize + self.data.len()
     }
 }

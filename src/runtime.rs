@@ -100,7 +100,7 @@ impl PackageLoader {
             let name = package.name.clone();
             let linked_package = self.link_package(package);
             if let Some(init) = linked_package.function_by_name("·init") {
-                interp.interpret(init)?;
+                interp.interpret_function(init, &[])?;
             }
             self.packages.insert(name, linked_package);
         }
