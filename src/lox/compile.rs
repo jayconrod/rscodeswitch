@@ -223,9 +223,12 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 // our prototype's prototype.
                 if let Some(base_var_use) = base_var_use {
                     self.asm().dup();
+                    self.asm().mode(inst::MODE_OBJECT);
+                    self.asm().nanbox();
                     self.compile_var_use(&self.scopes.var_uses[*base_var_use]);
                     self.asm().mode(inst::MODE_LUA);
                     self.asm().loadprototype();
+                    self.asm().mode(inst::MODE_LUA);
                     self.asm().storeprototype();
                 }
 
@@ -580,10 +583,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.asm().dup();
                         self.asm().mode(inst::MODE_LUA);
                         self.asm().loadprototype();
-                        self.asm().mode(inst::MODE_OBJECT);
+                        self.asm().mode(inst::MODE_LUA);
                         self.asm().loadprototype();
-                        self.asm().mode(inst::MODE_OBJECT);
-                        self.asm().nanbox();
                         for arg in arguments {
                             self.compile_expr(arg);
                         }

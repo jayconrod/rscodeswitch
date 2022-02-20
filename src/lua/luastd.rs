@@ -77,7 +77,58 @@ pub fn build_std_package() -> Package {
         b.finish_function("error", 2, false);
     }
 
-    // TODO: getmetatable
+    // getmetatable(table)
+    {
+        // Check that the argument is a table.
+        // Return nil for anything that's not a table.
+        b.asm.loadarg(0);
+        b.asm.dup();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.typeof_();
+        b.asm.const_(nanbox::TAG_OBJECT);
+        b.asm.eq();
+        let mut is_table_label = Label::new();
+        b.asm.bif(&mut is_table_label);
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+
+        // Load the prototype.
+        // If it's non-nil, check if it has a non-nil "__metatable" field.
+        // Return that if it exists.
+        b.asm.bind(&mut is_table_label);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadprototype();
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.eq();
+        let mut return_label = Label::new();
+        b.asm.bif(&mut return_label);
+        b.asm.dup();
+        let si = b.ensure_string("__metatable");
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadnamedpropornil(si);
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.ne();
+        b.asm.bif(&mut return_label);
+        b.asm.pop();
+        b.asm.bind(&mut return_label);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("getmetatable", 1, false);
+    }
+
     // TODO: ipairs
     // TODO: load
     // TODO: loadfile
@@ -101,7 +152,80 @@ pub fn build_std_package() -> Package {
     // TODO: rawlen
     // TODO: rawset
     // TODO: select
-    // TODO: setmetatable
+
+    // setmetatable(table, metatable)
+    {
+        // The first argument must be a table. Load its previous metatable
+        // and check that it isn't protected with a non-nil __metatable
+        // property.
+        b.asm.loadarg(0);
+        b.asm.dup();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.typeof_();
+        b.asm.const_(nanbox::TAG_OBJECT);
+        b.asm.eq();
+        let mut table_is_table_label = Label::new();
+        b.asm.bif(&mut table_is_table_label);
+        let si = b.ensure_string("first argument must be table");
+        b.asm.string(si);
+        b.asm.panic(0);
+        b.asm.bind(&mut table_is_table_label);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadprototype();
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.eq();
+        let mut check_metatable_label = Label::new();
+        b.asm.bif(&mut check_metatable_label);
+        b.asm.dup();
+        let si = b.ensure_string("__metatable");
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadnamedpropornil(si);
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.eq();
+        b.asm.bif(&mut check_metatable_label);
+        let si = b.ensure_string("cannot change a protected metatable");
+        b.asm.string(si);
+        b.asm.panic(0);
+
+        // The second argument must be a table or nil.
+        // stack: oldtable
+        b.asm.bind(&mut check_metatable_label);
+        b.asm.loadarg(1);
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.eq();
+        let mut store_metatable_label = Label::new();
+        b.asm.bif(&mut store_metatable_label);
+        b.asm.dup();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.typeof_();
+        b.asm.const_(nanbox::TAG_OBJECT);
+        b.asm.eq();
+        b.asm.bif(&mut store_metatable_label);
+        let si = b.ensure_string("metatable must be table or nil");
+        b.asm.string(si);
+        b.asm.panic(0);
+
+        // Store the metatable into the table, then return the old one.
+        // stack: oldtable newtable
+        b.asm.bind(&mut store_metatable_label);
+        b.asm.loadarg(0);
+        b.asm.swap();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.storeprototype();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("setmetatable", 2, false);
+    }
 
     // tonumber
     {

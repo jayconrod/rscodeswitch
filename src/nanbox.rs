@@ -243,14 +243,18 @@ impl TryInto<i64> for NanBox {
 
 impl From<*mut i64> for NanBox {
     fn from(bi: *mut i64) -> NanBox {
+        assert!(!bi.is_null());
         NanBox(QNAN | TAG_BIG_INT | (bi as u64))
     }
 }
 
 impl From<*const data::String> for NanBox {
     fn from(s: *const data::String) -> NanBox {
-        assert!(!s.is_null());
-        NanBox(QNAN | TAG_STRING | s as u64)
+        if s.is_null() {
+            NanBox::from_nil()
+        } else {
+            NanBox(QNAN | TAG_STRING | s as u64)
+        }
     }
 }
 
@@ -267,8 +271,11 @@ impl TryInto<*const data::String> for NanBox {
 
 impl From<*mut data::String> for NanBox {
     fn from(s: *mut data::String) -> NanBox {
-        assert!(!s.is_null());
-        NanBox(QNAN | TAG_STRING | s as u64)
+        if s.is_null() {
+            NanBox::from_nil()
+        } else {
+            NanBox(QNAN | TAG_STRING | s as u64)
+        }
     }
 }
 
@@ -288,8 +295,11 @@ impl TryInto<&data::String> for NanBox {
 
 impl From<*mut Closure> for NanBox {
     fn from(c: *mut Closure) -> NanBox {
-        assert!(!c.is_null());
-        NanBox(QNAN | TAG_CLOSURE | c as u64)
+        if c.is_null() {
+            NanBox::from_nil()
+        } else {
+            NanBox(QNAN | TAG_CLOSURE | c as u64)
+        }
     }
 }
 
@@ -306,8 +316,11 @@ impl TryInto<*mut Closure> for NanBox {
 
 impl From<*const Closure> for NanBox {
     fn from(c: *const Closure) -> NanBox {
-        assert!(!c.is_null());
-        NanBox(QNAN | TAG_CLOSURE | c as u64)
+        if c.is_null() {
+            NanBox::from_nil()
+        } else {
+            NanBox(QNAN | TAG_CLOSURE | c as u64)
+        }
     }
 }
 
@@ -341,8 +354,11 @@ impl TryInto<&Closure> for NanBox {
 
 impl From<*const Object> for NanBox {
     fn from(o: *const Object) -> NanBox {
-        assert!(!o.is_null());
-        NanBox(QNAN | TAG_OBJECT | o as u64)
+        if o.is_null() {
+            NanBox::from_nil()
+        } else {
+            NanBox(QNAN | TAG_OBJECT | o as u64)
+        }
     }
 }
 

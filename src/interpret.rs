@@ -1227,7 +1227,7 @@ impl<'w> Interpreter<'w> {
                     } else {
                         return_errorf!("value is not an object: {:?}", v)
                     };
-                    push!(p as *const Object as u64);
+                    push!(NanBox::from(p).0);
                     inst::size(inst::LOADPROTOTYPE)
                 }
                 (inst::LOADVARARGS, inst::MODE_LUA) => {
@@ -1760,6 +1760,25 @@ impl<'w> Interpreter<'w> {
                 (inst::STOREPROTOTYPE, inst::MODE_CLOSURE) => {
                     let prototype = pop!() as *mut Object;
                     let receiver = (pop!() as *mut Closure).as_mut().unwrap();
+                    receiver.prototype.set_ptr(prototype);
+                    inst::size(inst::STOREPROTOTYPE)
+                }
+                (inst::STOREPROTOTYPE, inst::MODE_LUA) => {
+                    let boxed_prototype = NanBox(pop!());
+                    let boxed_receiver = NanBox(pop!());
+                    let receiver = match <NanBox as TryInto<&mut Object>>::try_into(boxed_receiver)
+                    {
+                        Ok(r) => r,
+                        _ => return_errorf!("value is not an object: {:?}", boxed_receiver),
+                    };
+                    let prototype =
+                        match <NanBox as TryInto<*mut Object>>::try_into(boxed_prototype) {
+                            Ok(p) => p,
+                            _ => return_errorf!(
+                                "prototype is not an object or nil: {:?}",
+                                boxed_prototype
+                            ),
+                        };
                     receiver.prototype.set_ptr(prototype);
                     inst::size(inst::STOREPROTOTYPE)
                 }
