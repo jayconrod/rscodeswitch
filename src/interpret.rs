@@ -1884,9 +1884,9 @@ impl<'w> Interpreter<'w> {
                     ip = (ip as usize + inst::size(inst::SYS)) as *const u8;
                     save_regs!();
                     let rets = match sys {
-                        inst::SYS_PRINT => self.sys_print(&args)?,
-                        inst::SYS_TONUMBER => self.sys_tonumber(&args)?,
-                        inst::SYS_TOSTRING => self.sys_tostring(&args)?,
+                        inst::SYS_PRINT => self.sys_lua_print(&args)?,
+                        inst::SYS_TONUMBER => self.sys_lua_tonumber(&args)?,
+                        inst::SYS_TOSTRING => self.sys_lua_tostring(&args)?,
                         _ => panic!("unknown sys {}", sys),
                     };
                     load_regs!();
@@ -1968,17 +1968,18 @@ impl<'w> Interpreter<'w> {
         Ok(rets)
     }
 
-    fn sys_print(&mut self, vs: &[NanBox]) -> Result<Vec<NanBox>, Error> {
+    unsafe fn sys_lua_print(&mut self, vs: &[NanBox]) -> Result<Vec<NanBox>, Error> {
         let mut sep = "";
-        for v in vs {
-            let _ = write!(self.w, "{}{}", sep, v);
+        for &v in vs {
+            let s = self.lua_tostring(v)?;
+            let _ = write!(self.w, "{}{}", sep, s);
             sep = " ";
         }
         let _ = write!(self.w, "\n");
         Ok(Vec::new())
     }
 
-    unsafe fn sys_tonumber(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
+    unsafe fn sys_lua_tonumber(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
         if args.is_empty() {
             return Err(
                 self.error_level(1, String::from("tonumber: requires at least one argument"))
@@ -2035,7 +2036,7 @@ impl<'w> Interpreter<'w> {
         }
     }
 
-    unsafe fn sys_tostring(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
+    unsafe fn sys_lua_tostring(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
         self.lua_tostring(args[0]).map(|v| vec![v])
     }
 

@@ -19,6 +19,9 @@ print(tostring(mt)) -- Output: <object>
 setmetatable(a, mt)
 print(tostring(a)) -- Output: object with x = 12
 
+-- __tostring method is called by print.
+print(a) -- Output: object with x = 12
+
 -- __name does nothing.
 -- TODO: tostring should return something like "<joebob>".
 -- This isn't strictly required by the reference.
