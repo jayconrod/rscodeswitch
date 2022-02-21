@@ -135,6 +135,22 @@ impl<'w> Interpreter<'w> {
             }};
         }
 
+        // load_regs reads the the local values of ip and other registers from
+        // the Interpreter object.
+        macro_rules! load_regs {
+            () => {
+                #[allow(unused_assignments)] // for vc
+                {
+                    func = self.func.as_ref().unwrap();
+                    vc = self.vc;
+                    cp = self.cp;
+                    sp = self.sp;
+                    fp = self.fp;
+                    ip = self.ip;
+                }
+            };
+        }
+
         // return_errorf constructs and returns an error immediately.
         macro_rules! return_errorf {
             ($($x:expr),*) => {{
@@ -1864,6 +1880,8 @@ impl<'w> Interpreter<'w> {
                         let argp = sp + (vc - i - 1) * 8;
                         args[i] = NanBox(*(argp as *const u64));
                     }
+                    sp += vc * 8;
+                    ip = (ip as usize + inst::size(inst::SYS)) as *const u8;
                     save_regs!();
                     let rets = match sys {
                         inst::SYS_PRINT => self.sys_print(&args)?,
@@ -1871,13 +1889,13 @@ impl<'w> Interpreter<'w> {
                         inst::SYS_TOSTRING => self.sys_tostring(&args)?,
                         _ => panic!("unknown sys {}", sys),
                     };
-                    sp += vc * 8;
+                    load_regs!();
                     vc = rets.len();
                     for ret in rets {
                         sp -= 8;
                         *(sp as *mut u64) = ret.0;
                     }
-                    inst::size(inst::SYS)
+                    continue;
                 }
                 (inst::TOFLOAT, inst::MODE_LUA) => {
                     let i = NanBox(pop!());
@@ -2029,11 +2047,12 @@ impl<'w> Interpreter<'w> {
             let tostring_name = data::String::from_bytes(b"__tostring");
             let tostring_box: NanBox = tostring_name.into();
             let tostring_key: NanBoxKey = tostring_box.try_into().unwrap();
-            let tostring_opt = o
+            let tostring_raw = o
                 .prototype
                 .as_ref()
-                .and_then(|p| p.own_property(tostring_key));
-            if let Some(tostring_raw) = tostring_opt {
+                .and_then(|p| p.own_property(tostring_key))
+                .unwrap_or(NanBox::from_nil());
+            if !tostring_raw.is_nil() {
                 if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(tostring_raw) {
                     let ret = self.lua_interpret_closure(c, &[v])?;
                     if ret.type_tag() != nanbox::TAG_STRING {
@@ -2044,12 +2063,11 @@ impl<'w> Interpreter<'w> {
                     }
                     return Ok(ret);
                 } else {
-                    return Err(self.error_level(
-                        0,
-                        format!("__tostring is a {:?}, not a method", tostring_raw),
-                    ));
+                    return Err(self.error_level(0, String::from("__tostring is not a method")));
                 }
             }
+            // TODO: use the __name field and return something like "<name>".
+
             // fall through
         }
         Ok(data::String::from_bytes(v.to_string().as_bytes()).into())
@@ -2064,17 +2082,20 @@ impl<'w> Interpreter<'w> {
         // will cause the recursive interpreter call to return here instead of
         // into the previous stack frame.
         let fp = self.sp - FRAME_SIZE;
-        *((self.fp + FRAME_FUNC_OFFSET) as *mut *const Function) = self.func;
+        *((fp + FRAME_FUNC_OFFSET) as *mut *const Function) = self.func;
         self.func = 0 as *const Function;
-        *((self.fp + FRAME_CP_OFFSET) as *mut *const Closure) = self.cp;
+        *((fp + FRAME_CP_OFFSET) as *mut *const Closure) = self.cp;
         self.cp = 0 as *const Closure;
-        *((self.fp + FRAME_IP_OFFSET) as *mut *const u8) = self.ip;
+        *((fp + FRAME_IP_OFFSET) as *mut *const u8) = self.ip;
         self.ip = 0 as *const u8;
-        *((self.fp + FRAME_FP_OFFSET) as *mut usize) = self.fp;
+        *((fp + FRAME_FP_OFFSET) as *mut usize) = self.fp;
         self.fp = fp;
         self.sp = fp;
 
-        // Call the closure.
+        // Call the closure. This pushes arguments, constructs a stack frame
+        // for the callee, and begins the interpreter loop. Because we set
+        // self.ip to 0 above, interpret_closure will stop and return when
+        // the callee returns.
         let rets = self.interpret_closure(closure, args)?;
 
         // Pop the caller's frame.

@@ -409,11 +409,18 @@ impl Object {
         self.lookup_property(key).map(|p| self.property_value(p))
     }
 
-    /// Looks up a property on this object (not the prototype chain) and returns its value.
-    /// This is a convenience method for lookup_own_property followed by property_value.
+    /// Looks up a property on this object (not the prototype chain) and returns
+    /// its value. This is a convenience method for lookup_own_property followed
+    /// by property_value.
     pub unsafe fn own_property(&self, key: NanBoxKey) -> Option<NanBox> {
         self.lookup_own_property(key)
             .map(|p| self.property_value(p))
+    }
+
+    /// Looks up a property on this object (not the prototype chain) and returns
+    /// its value or nil if there is no such property.
+    pub unsafe fn own_property_or_nil(&self, key: NanBoxKey) -> NanBox {
+        self.own_property(key).unwrap_or(NanBox::from_nil())
     }
 
     /// Loads the value of a property. For methods, this allocates a
