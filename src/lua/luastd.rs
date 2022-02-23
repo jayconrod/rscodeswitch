@@ -148,6 +148,19 @@ pub fn build_std_package() -> Package {
         b.finish_function("load", 4, false);
     }
 
+    {
+        b.asm.loadarg(0);
+        b.asm.loadarg(1);
+        b.asm.loadarg(2);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(3);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.sys(inst::SYS_LOADFILE);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("loadfile", 3, false);
+    }
+
     // TODO: loadfile
     // TODO: next
     // TODO: pairs

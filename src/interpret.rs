@@ -1902,6 +1902,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let rets = match sys {
                         inst::SYS_DOFILE => self.sys_lua_dofile(&args)?,
                         inst::SYS_LOAD => self.sys_lua_load(&args)?,
+                        inst::SYS_LOADFILE => self.sys_lua_loadfile(&args)?,
                         inst::SYS_PRINT => self.sys_lua_print(&args)?,
                         inst::SYS_TONUMBER => self.sys_lua_tonumber(&args)?,
                         inst::SYS_TOSTRING => self.sys_lua_tostring(&args)?,
@@ -2076,6 +2077,71 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         };
 
         if !args[3].is_nil() {
+            // TODO: support it. This requires more Lua-specific hacks on the
+            // package loader though.
+            return Err(self.error(String::from("env argument not supported")));
+        }
+
+        let mut package = compile::compile_file_data(&chunk_name, &chunk_source)
+            .map_err(|mut errs| errs.0.remove(0))?;
+        let init_index = package.init_index.unwrap() as usize;
+        package.init_index = None;
+        let interp_fac = InterpreterFactory::new(self.env);
+        let (index, _) = PackageLoader::load_given_package(self.loader, interp_fac, package)?;
+        let init_closure = Closure::alloc(0, 0).as_mut().unwrap();
+        let mut loader = self.loader.borrow_mut();
+        let loaded_package = loader.unnamed_package_by_index(index).unwrap();
+        let init_func = &mut loaded_package.functions[init_index] as *mut Function;
+        init_closure.function.set_ptr(init_func);
+        Ok(vec![NanBox::from(init_closure)])
+    }
+
+    unsafe fn sys_lua_loadfile(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
+        let (chunk_name, chunk_source) =
+            if let Ok(s) = <NanBox as TryInto<&data::String>>::try_into(args[0]) {
+                let path_str = s.as_str().map_err(|_| {
+                    self.error(String::from("filename argument must be a valid path"))
+                })?;
+                let path = PathBuf::from(path_str);
+                let data =
+                    fs::read(&path).map_err(|err| self.error(format!("{}: {}", path_str, err)))?;
+                (path, data)
+            } else if args[0].is_nil() {
+                let mut buf = Vec::new();
+                let mut env = self.env.borrow_mut();
+                env.r
+                    .read_to_end(&mut buf)
+                    .map_err(|err| self.wrap_error(&err))?;
+                (PathBuf::from("<stdin>"), buf)
+            } else {
+                return Err(self.error(String::from("filename argument must be string or nil")));
+            };
+
+        let mode = if let Ok(s) = <NanBox as TryInto<&data::String>>::try_into(args[1]) {
+            s.as_str().map_err(|_| {
+                self.error(String::from(
+                    "mode argument must be \"b\", \"t\", \"bt\", or nil",
+                ))
+            })?
+        } else if args[1].is_nil() {
+            "bt"
+        } else {
+            return Err(self.error(String::from(
+                "mode argument must be \"b\", \"t\", \"bt\", or nil",
+            )));
+        };
+        match mode {
+            "t" | "bt" => (),
+            // TODO: maybe support binary chunks?
+            "b" => return Err(self.error(String::from("binary chunks not supported"))),
+            _ => {
+                return Err(self.error(String::from(
+                    "mode argument must be \"b\", \"t\", \"bt\", or nil",
+                )))
+            }
+        };
+
+        if !args[2].is_nil() {
             // TODO: support it. This requires more Lua-specific hacks on the
             // package loader though.
             return Err(self.error(String::from("env argument not supported")));
