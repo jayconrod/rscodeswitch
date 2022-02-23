@@ -330,8 +330,16 @@ impl String {
         str::from_utf8(self.data.as_slice())
     }
 
+    pub fn as_bytes(&self) -> &[u8] {
+        self.data.as_slice()
+    }
+
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        return self.len() == 0;
     }
 }
 

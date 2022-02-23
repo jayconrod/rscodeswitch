@@ -5,13 +5,11 @@ use crate::runtime::Object;
 use std::fmt::{self, Formatter};
 use std::mem;
 
-// TODO: divide Package and the structs it depends on into separate compile-time
-// and run-time parts. For example, a run-time Global would have a value which
-// could be mutated by the interpreter.
 pub struct Package {
     pub name: String,
     pub globals: Vec<Global>,
     pub functions: Vec<Function>,
+    pub init_index: Option<u32>,
     pub strings: Vec<Vec<u8>>,
     pub line_map: PackageLineMap,
     pub imports: Vec<PackageImport>,

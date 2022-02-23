@@ -108,7 +108,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         match self.asm.finish() {
             Ok((insts, line_map)) => {
                 self.functions.push(Function {
-                    name: String::from("·init"),
+                    name: String::from(""),
                     insts,
                     param_types: Vec::new(),
                     var_param_type: None,
@@ -123,6 +123,16 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             }
         }
 
+        let init_index: u32 = match (self.functions.len() - 1).try_into() {
+            Ok(i) => i,
+            _ => {
+                self.errors.push(Error {
+                    position: self.lmap.first_file(),
+                    message: String::from("too many functions"),
+                });
+                !0
+            }
+        };
         if !self.errors.is_empty() {
             return None;
         }
@@ -139,6 +149,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             name: self.name,
             globals: self.globals,
             functions: self.functions,
+            init_index: Some(init_index),
             strings: self.strings,
             line_map: PackageLineMap::from(self.lmap),
             imports,

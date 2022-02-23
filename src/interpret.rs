@@ -33,7 +33,7 @@ pub struct Env<'r, 'w> {
 
 pub struct Interpreter<'env, 'r, 'w, 'pl> {
     env: &'env RefCell<Env<'r, 'w>>,
-    pl: &'pl RefCell<PackageLoader>,
+    loader: &'pl RefCell<PackageLoader>,
 
     /// Holds the memory for the interpreter's stack.
     // TODO: remove this annotation. Check stack limits.
@@ -71,14 +71,14 @@ pub struct Interpreter<'env, 'r, 'w, 'pl> {
 impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
     pub fn new(
         env: &'env RefCell<Env<'r, 'w>>,
-        pl: &'pl RefCell<PackageLoader>,
+        loader: &'pl RefCell<PackageLoader>,
     ) -> Interpreter<'env, 'r, 'w, 'pl> {
         let stack = Stack::new();
         let sp = stack.end() - FRAME_SIZE;
         let fp = sp;
         Interpreter {
             env,
-            pl,
+            loader,
             stack,
             func: 0 as *const Function,
             vc: 0,
@@ -1901,6 +1901,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     save_regs!();
                     let rets = match sys {
                         inst::SYS_DOFILE => self.sys_lua_dofile(&args)?,
+                        inst::SYS_LOAD => self.sys_lua_load(&args)?,
                         inst::SYS_PRINT => self.sys_lua_print(&args)?,
                         inst::SYS_TONUMBER => self.sys_lua_tonumber(&args)?,
                         inst::SYS_TOSTRING => self.sys_lua_tostring(&args)?,
@@ -2000,8 +2001,98 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         let package =
             compile::compile_file_data(&path, &data).map_err(|mut errs| errs.0.remove(0))?;
         let interp_fac = InterpreterFactory::new(self.env);
-        let result = PackageLoader::load_given_package(self.pl, interp_fac, package)?;
+        let (_, result) = PackageLoader::load_given_package(self.loader, interp_fac, package)?;
         Ok(result.into_iter().map(|v| NanBox(v)).collect())
+    }
+
+    unsafe fn sys_lua_load(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
+        let chunk_source: Vec<u8> =
+            if let Ok(s) = <NanBox as TryInto<&data::String>>::try_into(args[0]) {
+                Vec::from(s.as_bytes())
+            } else if let Ok(f) = <NanBox as TryInto<&Closure>>::try_into(args[0]) {
+                let mut buf = Vec::new();
+                loop {
+                    let rets = self.interpret_closure_rec(f, &[])?;
+                    if rets.is_empty() || NanBox(rets[0]).is_nil() {
+                        break;
+                    }
+                    let piece: &data::String = NanBox(rets[0]).try_into().map_err(|_| {
+                        self.error(String::from(
+                            "chunk function must return string, nil, or nothing",
+                        ))
+                    })?;
+                    if piece.is_empty() {
+                        break;
+                    }
+                    buf.extend_from_slice(piece.as_bytes());
+                }
+                buf
+            } else {
+                return Err(self.error(String::from(
+                    "chunk argument must be a string or a function",
+                )));
+            };
+
+        let chunk_name = if let Ok(s) = <NanBox as TryInto<&data::String>>::try_into(args[1]) {
+            PathBuf::from(s.as_str().map_err(|_| {
+                self.error(String::from(
+                    "chunkname argument must be a valid UTF-8 string or nil",
+                ))
+            })?)
+        } else if args[1].is_nil() {
+            if args[0].type_tag() == nanbox::TAG_STRING {
+                PathBuf::from("chunk")
+            } else {
+                PathBuf::from("=(load)")
+            }
+        } else {
+            return Err(self.error(String::from(
+                "chunkname argument must be a valid UTF-8 string or nil",
+            )));
+        };
+
+        let mode = if let Ok(s) = <NanBox as TryInto<&data::String>>::try_into(args[2]) {
+            s.as_str().map_err(|_| {
+                self.error(String::from(
+                    "mode argument must be \"b\", \"t\", \"bt\", or nil",
+                ))
+            })?
+        } else if args[2].is_nil() {
+            "bt"
+        } else {
+            return Err(self.error(String::from(
+                "mode argument must be \"b\", \"t\", \"bt\", or nil",
+            )));
+        };
+        match mode {
+            "t" | "bt" => (),
+            // TODO: maybe support binary chunks?
+            "b" => return Err(self.error(String::from("binary chunks not supported"))),
+            _ => {
+                return Err(self.error(String::from(
+                    "mode argument must be \"b\", \"t\", \"bt\", or nil",
+                )))
+            }
+        };
+
+        if !args[3].is_nil() {
+            // TODO: support it. This requires more Lua-specific hacks on the
+            // package loader though.
+            return Err(self.error(String::from("env argument not supported")));
+        }
+
+        let mut package = compile::compile_file_data(&chunk_name, &chunk_source)
+            .map_err(|mut errs| errs.0.remove(0))?;
+        let init_index = package.init_index.unwrap() as usize;
+        package.init_index = None;
+        let interp_fac = InterpreterFactory::new(self.env);
+        let (index, _) = PackageLoader::load_given_package(self.loader, interp_fac, package)?;
+        let init_closure = Closure::alloc(0, 0).as_mut().unwrap();
+        let mut loader = self.loader.borrow_mut();
+        let loaded_package = loader.unnamed_package_by_index(index).unwrap();
+        let init_func = &mut loaded_package.functions[init_index] as *mut Function;
+        init_closure.function.set_ptr(init_func);
+        Ok(vec![NanBox::from(init_closure)])
     }
 
     unsafe fn sys_lua_print(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {

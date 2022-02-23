@@ -132,7 +132,22 @@ pub fn build_std_package() -> Package {
     }
 
     // TODO: ipairs
-    // TODO: load
+
+    // load(chunk, chunkname, mode, env)
+    {
+        b.asm.loadarg(0);
+        b.asm.loadarg(1);
+        b.asm.loadarg(2);
+        b.asm.loadarg(3);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(4);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.sys(inst::SYS_LOAD);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("load", 4, false);
+    }
+
     // TODO: loadfile
     // TODO: next
     // TODO: pairs
@@ -379,7 +394,7 @@ pub fn build_std_package() -> Package {
     b.asm.setv(0);
     b.asm.mode(inst::MODE_LUA);
     b.asm.retv();
-    b.finish_function("·init", 0, false);
+    b.finish_function("", 0, false);
 
     b.build()
 }
@@ -400,6 +415,7 @@ impl Builder {
                 name: String::from("luastd"),
                 globals: Vec::new(),
                 functions: Vec::new(),
+                init_index: None,
                 strings: Vec::new(),
                 line_map: PackageLineMap { files: Vec::new() },
                 imports: Vec::new(),
@@ -408,7 +424,9 @@ impl Builder {
         }
     }
 
-    fn build(self) -> Package {
+    fn build(mut self) -> Package {
+        let init_index = (self.package.functions.len() - 1) as u32;
+        self.package.init_index = Some(init_index);
         self.package
     }
 

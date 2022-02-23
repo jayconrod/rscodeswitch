@@ -84,6 +84,16 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
         }
 
+        let init_index: u32 = match (self.functions.len() - 1).try_into() {
+            Ok(i) => i,
+            _ => {
+                self.errors.push(Error {
+                    position: self.lmap.first_file(),
+                    message: String::from("too many functions"),
+                });
+                !0
+            }
+        };
         if !self.errors.is_empty() {
             return Err(ErrorList(self.errors));
         }
@@ -92,6 +102,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             name: String::from("main"),
             globals: self.globals,
             functions: self.functions,
+            init_index: Some(init_index),
             strings: self.strings,
             line_map: PackageLineMap::from(self.lmap),
             imports: Vec::new(),

@@ -15,6 +15,7 @@ pub struct Package {
     global_index: HashMap<String, usize>,
     pub functions: Vec<Function>,
     function_index: HashMap<String, usize>,
+    pub init_index: Option<u32>,
     pub strings: Handle<Slice<data::String>>,
     pub line_map: PackageLineMap,
     pub imports: Vec<PackageImport>,
@@ -82,6 +83,14 @@ impl PackageLoader {
         }
     }
 
+    pub fn package_by_name(&mut self, name: &str) -> Option<&mut Package> {
+        self.packages.get_mut(name).map(|p| &mut **p)
+    }
+
+    pub fn unnamed_package_by_index(&mut self, index: usize) -> Option<&mut Package> {
+        self.unnamed_packages.get_mut(index).map(|p| &mut **p)
+    }
+
     /// Finds, links, and initializes a package and its dependencies by name.
     /// Returns the returned values from the package's initializer. If the
     /// package was already loaded, or if it does not have an initializer,
@@ -109,7 +118,8 @@ impl PackageLoader {
         };
         let mut result = Vec::new();
         for (i, package) in pending.into_iter().enumerate().rev() {
-            let init_res = if let Some(init) = package.function_by_name("·init") {
+            let init_res = if let Some(ii) = package.init_index {
+                let init = &package.functions[ii as usize];
                 let mut interp = interp_fac.get(loader_ref);
                 interp.interpret_function(init, &[])?
             } else {
@@ -134,7 +144,7 @@ impl PackageLoader {
         loader_ref: &RefCell<PackageLoader>,
         interp_fac: InterpreterFactory,
         package: package::Package,
-    ) -> Result<Vec<u64>, Error> {
+    ) -> Result<(usize, Vec<u64>), Error> {
         for imp in &package.imports {
             PackageLoader::load_package(loader_ref, interp_fac, &imp.name)?;
         }
@@ -142,15 +152,17 @@ impl PackageLoader {
             let mut loader = loader_ref.borrow_mut();
             loader.link_package(package)
         };
-        let result = if let Some(init) = linked_package.function_by_name("·init") {
+        let result = if let Some(ii) = linked_package.init_index {
+            let init = &linked_package.functions[ii as usize];
             let mut interp = interp_fac.get(loader_ref);
             interp.interpret_function(init, &[])?
         } else {
             Vec::new()
         };
         let mut loader = loader_ref.borrow_mut();
+        let i = loader.unnamed_packages.len();
         loader.unnamed_packages.push(linked_package);
-        Ok(result)
+        Ok((i, result))
     }
 
     /// If the named package is not already loaded, search_and_link_packages
@@ -249,6 +261,7 @@ impl PackageLoader {
             global_index,
             functions,
             function_index,
+            init_index: package.init_index,
             strings,
             line_map: package.line_map,
             imports,
