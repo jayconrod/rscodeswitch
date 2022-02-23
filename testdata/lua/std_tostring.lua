@@ -37,4 +37,4 @@ print(tostring(a)) -- Output: <object>
 local a = {}
 local mt = {__tostring = 12}
 setmetatable(a, mt)
-tostring(a) -- Error: <unknown>: __tostring is not a method
+tostring(a) -- Error: tostring: __tostring is not a method

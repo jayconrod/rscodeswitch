@@ -340,7 +340,7 @@ impl From<&Path> for Position {
 impl Default for Position {
     fn default() -> Position {
         Position {
-            path: PathBuf::from("<unknown>"),
+            path: PathBuf::new(),
             begin_line: 0,
             begin_col: 0,
             end_line: 0,
@@ -396,7 +396,11 @@ impl Error {
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}: {}", self.position, self.message)
+        if self.position == Position::default() {
+            write!(f, "{}", self.message)
+        } else {
+            write!(f, "{}: {}", self.position, self.message)
+        }
     }
 }
 

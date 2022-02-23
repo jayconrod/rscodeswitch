@@ -2339,7 +2339,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         self.error_level(0, message)
     }
 
-    unsafe fn error_level(&self, mut level: usize, message: String) -> Error {
+    unsafe fn error_level(&self, mut level: usize, mut message: String) -> Error {
         let mut func = self.func.as_ref().unwrap();
         let mut fp = self.fp;
         let mut ip = self.ip;
@@ -2356,6 +2356,9 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
             .try_into()
             .unwrap();
         let position = self.position_at(func, inst_offset);
+        if !func.name.is_empty() {
+            message = format!("{}: {}", func.name, message);
+        }
         Error { position, message }
     }
 

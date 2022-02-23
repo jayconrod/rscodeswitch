@@ -20,6 +20,6 @@ local a, b = f() -- Output: b
 print(a, b) -- Output: 3 4
 
 ---
-load(nil) -- Error: <unknown>: chunk argument must be a string or a function
+load(nil) -- Error: load: chunk argument must be a string or a function
 ---
 load("?") -- Error: chunk:1.1-1.2: unrecognized character: '?'

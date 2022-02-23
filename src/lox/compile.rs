@@ -69,7 +69,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         match asm.finish() {
             Ok((init_insts, line_map)) => {
                 self.functions.push(Function {
-                    name: String::from("·init"),
+                    name: String::new(),
                     insts: init_insts,
                     param_types: Vec::new(),
                     var_param_type: None,
