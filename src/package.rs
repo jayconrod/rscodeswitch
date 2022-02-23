@@ -51,9 +51,11 @@ impl fmt::Display for Global {
 pub struct Function {
     pub name: std::string::String,
     pub insts: Vec<u8>,
-    pub param_types: Vec<Type>,
     pub cell_types: Vec<Type>,
+    pub param_types: Vec<Type>,
     pub var_param_type: Option<Type>,
+    pub return_types: Vec<Type>,
+    pub var_return_type: Option<Type>,
     pub line_map: FunctionLineMap,
 }
 

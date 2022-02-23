@@ -73,6 +73,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     insts: init_insts,
                     param_types: Vec::new(),
                     var_param_type: None,
+                    return_types: vec![Type::NanBox],
+                    var_return_type: None,
                     cell_types: Vec::new(),
                     line_map,
                 });
@@ -201,6 +203,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     insts: ctor_insts,
                     param_types: vec![Type::NanBox; init_param_count.unwrap_or(0) as usize],
                     var_param_type: None,
+                    return_types: vec![Type::NanBox],
+                    var_return_type: None,
                     cell_types: Vec::new(),
                     line_map,
                 };
@@ -355,6 +359,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
             insts,
             param_types,
             var_param_type: None,
+            return_types: vec![Type::NanBox],
+            var_return_type: None,
             cell_types,
             line_map,
         };

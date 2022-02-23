@@ -1,15 +1,18 @@
-use crate::interpret::Interpreter;
+use crate::interpret::{Env, InterpreterFactory};
 use crate::lua::compile;
 use crate::lua::luastd;
 use crate::lua::scope;
 use crate::lua::syntax;
 use crate::lua::token;
+use crate::package;
 use crate::pos::{Error, ErrorList, LineMap, Position};
 use crate::runtime::{PackageLoader, ProvidedPackageSearcher};
 
+use std::cell::RefCell;
 use std::env;
 use std::fmt::Display;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str;
 
@@ -58,8 +61,12 @@ fn try_compile_and_interpret(path: &Path) -> Result<(), ErrorList> {
     let std_package = luastd::build_std_package();
     searcher.add(std_package);
 
-    let mut chunk_paths = Vec::new();
-    let mut chunk_datas = Vec::new();
+    struct Chunk<'d> {
+        path: PathBuf,
+        data: &'d [u8],
+        package: package::Package,
+    }
+    let mut chunks = Vec::new();
     let data = fs::read(path).map_err(|err| {
         let position = Position::from(path);
         let wrapped = Error::wrap(position, &err);
@@ -96,9 +103,11 @@ fn try_compile_and_interpret(path: &Path) -> Result<(), ErrorList> {
             &mut errors,
         ) {
             Some(package) => {
-                chunk_paths.push(chunk_path);
-                chunk_datas.push(chunk_data);
-                searcher.add(package);
+                chunks.push(Chunk {
+                    path: chunk_path,
+                    data: chunk_data,
+                    package,
+                });
             }
             None => {
                 check_result(&path, chunk_data, Err(ErrorList::from(errors)))?;
@@ -109,19 +118,22 @@ fn try_compile_and_interpret(path: &Path) -> Result<(), ErrorList> {
         i += 1;
     }
 
-    let mut loader = PackageLoader::new(searcher);
-    for i in 0..chunk_paths.len() {
-        let chunk_path = &chunk_paths[i];
-        let chunk_data = &chunk_datas[i];
+    let loader_cell = RefCell::new(PackageLoader::new(searcher));
+    for chunk in chunks {
+        let mut input = io::empty();
         let mut output = Vec::new();
-        let mut interp = Interpreter::new(&mut output);
+        let env_cell = RefCell::new(Env {
+            r: &mut input,
+            w: &mut output,
+        });
+        let interp_fac = InterpreterFactory::new(&env_cell);
         let load_res =
-            unsafe { loader.load_package(chunk_path.to_string_lossy().as_ref(), &mut interp) };
+            unsafe { PackageLoader::load_given_package(&loader_cell, interp_fac, chunk.package) };
         let check_res = match load_res {
             Ok(_) => Ok(output),
             Err(err) => Err(ErrorList::from(err)),
         };
-        check_result(chunk_path, chunk_data, check_res)?;
+        check_result(&chunk.path, chunk.data, check_res)?;
     }
     Ok(())
 }

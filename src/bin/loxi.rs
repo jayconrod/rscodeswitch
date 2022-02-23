@@ -1,11 +1,12 @@
-use codeswitch::interpret::Interpreter;
+use codeswitch::interpret::{Env, InterpreterFactory};
 use codeswitch::lox::compile;
 use codeswitch::runtime::{PackageLoader, ProvidedPackageSearcher};
 
+use std::cell::RefCell;
 use std::env;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::io::stdout;
+use std::io;
 use std::path::PathBuf;
 use std::process;
 
@@ -30,11 +31,15 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     eprintln!("{}", package);
     let mut searcher = Box::new(ProvidedPackageSearcher::new());
     searcher.add(package);
-    let mut loader = PackageLoader::new(searcher);
-
-    let mut w = stdout();
-    let mut interp = Interpreter::new(&mut w);
-    let res = unsafe { loader.load_package("main", &mut interp) };
+    let loader_cell = RefCell::new(PackageLoader::new(searcher));
+    let mut input = io::stdin();
+    let mut output = io::stdout();
+    let env_cell = RefCell::new(Env {
+        r: &mut input,
+        w: &mut output,
+    });
+    let interp_fac = InterpreterFactory::new(&env_cell);
+    let res = unsafe { PackageLoader::load_package(&loader_cell, interp_fac, "main") };
     match res {
         Ok(_) => Ok(()),
         Err(err) => Err(Box::new(err)),

@@ -1,13 +1,18 @@
 use crate::data;
 use crate::heap::HEAP;
 use crate::inst;
+use crate::lua::compile;
 use crate::lua::token::{self, Number};
 use crate::nanbox::{self, NanBox, NanBoxKey};
-use crate::pos::Error;
-use crate::runtime::{Closure, Function, Object, Property, PropertyKind};
+use crate::pos::{Error, Position};
+use crate::runtime::{Closure, Function, Object, PackageLoader, Property, PropertyKind};
 
-use std::io::Write;
+use std::cell::RefCell;
+use std::fmt::Display;
+use std::fs;
+use std::io::{Read, Write};
 use std::mem;
+use std::path::PathBuf;
 
 // Each stack frame consists of (with descending stack address):
 //
@@ -21,8 +26,14 @@ const FRAME_IP_OFFSET: usize = 8;
 const FRAME_CP_OFFSET: usize = 16;
 const FRAME_FUNC_OFFSET: usize = 24;
 
-pub struct Interpreter<'w> {
-    w: &'w mut dyn Write,
+pub struct Env<'r, 'w> {
+    pub r: &'r mut dyn Read,
+    pub w: &'w mut dyn Write,
+}
+
+pub struct Interpreter<'env, 'r, 'w, 'pl> {
+    env: &'env RefCell<Env<'r, 'w>>,
+    pl: &'pl RefCell<PackageLoader>,
 
     /// Holds the memory for the interpreter's stack.
     // TODO: remove this annotation. Check stack limits.
@@ -57,13 +68,17 @@ pub struct Interpreter<'w> {
     ip: *const u8,
 }
 
-impl<'w> Interpreter<'w> {
-    pub fn new(w: &'w mut dyn Write) -> Interpreter<'w> {
+impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
+    pub fn new(
+        env: &'env RefCell<Env<'r, 'w>>,
+        pl: &'pl RefCell<PackageLoader>,
+    ) -> Interpreter<'env, 'r, 'w, 'pl> {
         let stack = Stack::new();
         let sp = stack.end() - FRAME_SIZE;
         let fp = sp;
         Interpreter {
-            w,
+            env,
+            pl,
             stack,
             func: 0 as *const Function,
             vc: 0,
@@ -155,7 +170,8 @@ impl<'w> Interpreter<'w> {
         macro_rules! return_errorf {
             ($($x:expr),*) => {{
                 let message = format!($($x,)*);
-                return Err(Interpreter::error(func, ip, message))
+                save_regs!();
+                return Err(self.error(message))
             }};
         }
 
@@ -1884,6 +1900,7 @@ impl<'w> Interpreter<'w> {
                     ip = (ip as usize + inst::size(inst::SYS)) as *const u8;
                     save_regs!();
                     let rets = match sys {
+                        inst::SYS_DOFILE => self.sys_lua_dofile(&args)?,
                         inst::SYS_PRINT => self.sys_lua_print(&args)?,
                         inst::SYS_TONUMBER => self.sys_lua_tonumber(&args)?,
                         inst::SYS_TOSTRING => self.sys_lua_tostring(&args)?,
@@ -1918,26 +1935,18 @@ impl<'w> Interpreter<'w> {
                 (_, inst::MODE_I64) => {
                     panic!(
                         "{}",
-                        Interpreter::error(
-                            func,
-                            ip,
-                            format!("unknown opcode {} code {}", inst::mnemonic(op), op)
-                        )
+                        self.error(format!("unknown opcode {} code {}", inst::mnemonic(op), op))
                     )
                 }
                 _ => panic!(
                     "{}",
-                    Interpreter::error(
-                        func,
-                        ip,
-                        format!(
-                            "unknown opcode {}{} code {} {}",
-                            inst::mnemonic(op),
-                            inst::mode_mnemonic(mode),
-                            mode,
-                            op
-                        )
-                    )
+                    self.error(format!(
+                        "unknown opcode {}{} code {} {}",
+                        inst::mnemonic(op),
+                        inst::mode_mnemonic(mode),
+                        mode,
+                        op
+                    ))
                 ),
             };
             ip = (ip as usize + inst_size) as *const u8;
@@ -1947,11 +1956,11 @@ impl<'w> Interpreter<'w> {
         // null func and return address. ret_sp points to the last result.
         // We need to move results into a Vec for native code, the save
         // registers and return.
-        let retc = if func.var_param_type.is_some() {
-            assert!(vc >= func.param_types.len());
+        let retc = if func.var_return_type.is_some() {
+            assert!(vc >= func.return_types.len());
             vc
         } else {
-            func.param_types.len()
+            func.return_types.len()
         };
         let mut rets = Vec::with_capacity(retc);
         for i in 0..retc {
@@ -1968,14 +1977,45 @@ impl<'w> Interpreter<'w> {
         Ok(rets)
     }
 
-    unsafe fn sys_lua_print(&mut self, vs: &[NanBox]) -> Result<Vec<NanBox>, Error> {
+    unsafe fn sys_lua_dofile(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
+        let (path, data) = if args.len() == 0 || args[0].is_nil() {
+            let mut buf = Vec::new();
+            let mut env = self.env.borrow_mut();
+            env.r
+                .read_to_end(&mut buf)
+                .map_err(|err| self.wrap_error(&err))?;
+            (PathBuf::from("<stdin>"), buf)
+        } else {
+            let path_dstr: &data::String = args[0]
+                .try_into()
+                .map_err(|_| self.error(String::from("argument must be a string")))?;
+            let path_str = path_dstr
+                .as_str()
+                .map_err(|_| self.error(String::from("argument must be a valid path")))?;
+            let path = PathBuf::from(path_str);
+            let data =
+                fs::read(&path).map_err(|err| self.error(format!("{}: {}", path_str, err)))?;
+            (path, data)
+        };
+        let package =
+            compile::compile_file_data(&path, &data).map_err(|mut errs| errs.0.remove(0))?;
+        let interp_fac = InterpreterFactory::new(self.env);
+        let result = PackageLoader::load_given_package(self.pl, interp_fac, package)?;
+        Ok(result.into_iter().map(|v| NanBox(v)).collect())
+    }
+
+    unsafe fn sys_lua_print(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
+        let strs = args
+            .iter()
+            .map(|&v| self.lua_tostring(v))
+            .collect::<Result<Vec<NanBox>, Error>>()?;
+        let mut env = self.env.borrow_mut();
         let mut sep = "";
-        for &v in vs {
-            let s = self.lua_tostring(v)?;
-            let _ = write!(self.w, "{}{}", sep, s);
+        for s in strs {
+            let _ = write!(env.w, "{}{}", sep, s);
             sep = " ";
         }
-        let _ = write!(self.w, "\n");
+        let _ = write!(env.w, "\n");
         Ok(Vec::new())
     }
 
@@ -2138,17 +2178,8 @@ impl<'w> Interpreter<'w> {
         Ok(rets)
     }
 
-    unsafe fn error(func: &Function, ip: *const u8, message: String) -> Error {
-        let inst_offset = (ip as usize - &func.insts[0] as *const u8 as usize)
-            .try_into()
-            .unwrap();
-        let position = func
-            .package
-            .as_ref()
-            .unwrap()
-            .line_map
-            .position(inst_offset, &func.line_map);
-        Error { position, message }
+    unsafe fn error(&self, message: String) -> Error {
+        self.error_level(0, message)
     }
 
     unsafe fn error_level(&self, mut level: usize, message: String) -> Error {
@@ -2164,7 +2195,34 @@ impl<'w> Interpreter<'w> {
             fp = *(fp as *const usize);
             level -= 1;
         }
-        Interpreter::error(func, ip, message)
+        let inst_offset = (ip as usize - &func.insts[0] as *const u8 as usize)
+            .try_into()
+            .unwrap();
+        let position = self.position_at(func, inst_offset);
+        Error { position, message }
+    }
+
+    unsafe fn wrap_error(&self, err: &dyn Display) -> Error {
+        Error {
+            position: self.position(),
+            message: err.to_string(),
+        }
+    }
+
+    unsafe fn position(&self) -> Position {
+        let func = self.func.as_ref().unwrap();
+        let inst_offset = (self.ip as usize - &func.insts[0] as *const u8 as usize)
+            .try_into()
+            .unwrap();
+        self.position_at(func, inst_offset)
+    }
+
+    unsafe fn position_at(&self, func: &Function, inst_offset: u32) -> Position {
+        func.package
+            .as_ref()
+            .unwrap()
+            .line_map
+            .position(inst_offset, &func.line_map)
     }
 }
 
@@ -2181,5 +2239,23 @@ impl Stack {
 
     fn end(&self) -> usize {
         &self.data[0] as *const u8 as usize + self.data.len()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct InterpreterFactory<'env, 'r, 'w> {
+    env: &'env RefCell<Env<'r, 'w>>,
+}
+
+impl<'env, 'r, 'w> InterpreterFactory<'env, 'r, 'w> {
+    pub fn new(env: &'env RefCell<Env<'r, 'w>>) -> InterpreterFactory<'env, 'r, 'w> {
+        InterpreterFactory { env }
+    }
+
+    pub fn get<'pl>(
+        &self,
+        loader_ref: &'pl RefCell<PackageLoader>,
+    ) -> Interpreter<'env, 'r, 'w, 'pl> {
+        Interpreter::new(self.env, loader_ref)
     }
 }

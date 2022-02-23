@@ -1,11 +1,12 @@
-use codeswitch::interpret::Interpreter;
+use codeswitch::interpret::{Env, InterpreterFactory};
 use codeswitch::lua::compile;
 use codeswitch::lua::luastd;
 use codeswitch::runtime::{PackageLoader, ProvidedPackageSearcher};
 
+use std::cell::RefCell;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::io::stdout;
+use std::io;
 use std::path::PathBuf;
 use std::process;
 
@@ -37,6 +38,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         );
     }
     searcher.add(std_package);
+
     let path = PathBuf::from(&args.path);
     let package = compile::compile_file(&path)?;
     if args.disassemble {
@@ -45,13 +47,16 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             package.name, package
         );
     }
-    let name = package.name.clone();
-    searcher.add(package);
 
-    let mut loader = PackageLoader::new(searcher);
-    let mut w = stdout();
-    let mut interp = Interpreter::new(&mut w);
-    let res = unsafe { loader.load_package(&name, &mut interp) };
+    let loader_cell = RefCell::new(PackageLoader::new(searcher));
+    let mut input = io::stdin();
+    let mut output = io::stdout();
+    let env_cell = RefCell::new(Env {
+        r: &mut input,
+        w: &mut output,
+    });
+    let interp_fac = InterpreterFactory::new(&env_cell);
+    let res = unsafe { PackageLoader::load_given_package(&loader_cell, interp_fac, package) };
     match res {
         Ok(_) => Ok(()),
         Err(err) => Err(Box::new(err)),

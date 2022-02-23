@@ -1,10 +1,11 @@
 use crate::data::{self, SetValue, Slice};
 use crate::heap::{self, Handle, Ptr, Set, HEAP};
-use crate::interpret::Interpreter;
+use crate::interpret::InterpreterFactory;
 use crate::nanbox::{NanBox, NanBoxKey};
 use crate::package::{self, Type};
 use crate::pos::{Error, FunctionLineMap, PackageLineMap, Position};
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem;
 
@@ -37,8 +38,10 @@ pub struct Function {
     pub name: std::string::String,
     pub insts: Vec<u8>,
     pub param_types: Vec<Type>,
-    pub cell_types: Vec<Type>,
     pub var_param_type: Option<Type>,
+    pub return_types: Vec<Type>,
+    pub var_return_type: Option<Type>,
+    pub cell_types: Vec<Type>,
     pub line_map: FunctionLineMap,
     pub package: *mut Package,
 }
@@ -66,6 +69,7 @@ pub struct FunctionImport {
 /// using the provided interpreter.
 pub struct PackageLoader {
     packages: HashMap<String, Box<Package>>,
+    unnamed_packages: Vec<Box<Package>>,
     searcher: Box<dyn PackageSearcher>,
 }
 
@@ -73,17 +77,98 @@ impl PackageLoader {
     pub fn new(searcher: Box<dyn PackageSearcher>) -> PackageLoader {
         PackageLoader {
             packages: HashMap::new(),
+            unnamed_packages: Vec::new(),
             searcher,
         }
     }
 
+    /// Finds, links, and initializes a package and its dependencies by name.
+    /// Returns the returned values from the package's initializer. If the
+    /// package was already loaded, or if it does not have an initializer,
+    /// an empty list is returned.
+    ///
+    /// This is an associated function, not a method, due to a complicated
+    /// borrowing pattern. When running a package's initialization function,
+    /// the interpreter might need to dynamically load another package.
+    /// If this were a method that held a borrowed reference to the
+    /// PackageLoader, that would not be possible. So instead, this function
+    /// loads and links a subgraph of packages (rooted at the named package),
+    /// then initializes each one; while an initializer is running, the
+    /// PackageLoader is not borrowed.
     pub unsafe fn load_package(
-        &mut self,
+        loader_ref: &RefCell<PackageLoader>,
+        interp_fac: InterpreterFactory,
         name: &str,
-        interp: &mut Interpreter,
-    ) -> Result<&mut Package, Error> {
+    ) -> Result<Vec<u64>, Error> {
+        // TODO: detect and report dependency cycles, not only static cycles
+        // expressed in package imports but also cycles introduced dynamically
+        // by an initializer recursively calling this function.
+        let pending = {
+            let mut loader = loader_ref.borrow_mut();
+            loader.search_and_link_packages(name)?
+        };
+        let mut result = Vec::new();
+        for (i, package) in pending.into_iter().enumerate().rev() {
+            let init_res = if let Some(init) = package.function_by_name("·init") {
+                let mut interp = interp_fac.get(loader_ref);
+                interp.interpret_function(init, &[])?
+            } else {
+                Vec::new()
+            };
+            if i == 0 {
+                result = init_res;
+            }
+            let mut loader = loader_ref.borrow_mut();
+            loader.packages.insert(package.name.clone(), package);
+        }
+        Ok(result)
+    }
+
+    /// Finds the given package's dependencies, then links and initializes
+    /// the subgraph.
+    ///
+    /// This function is similar to load_package (so see documentation there),
+    /// except the root package is provided by the caller and can't be
+    /// referred to by name by other packages.
+    pub unsafe fn load_given_package(
+        loader_ref: &RefCell<PackageLoader>,
+        interp_fac: InterpreterFactory,
+        package: package::Package,
+    ) -> Result<Vec<u64>, Error> {
+        for imp in &package.imports {
+            PackageLoader::load_package(loader_ref, interp_fac, &imp.name)?;
+        }
+        let linked_package = {
+            let mut loader = loader_ref.borrow_mut();
+            loader.link_package(package)
+        };
+        let result = if let Some(init) = linked_package.function_by_name("·init") {
+            let mut interp = interp_fac.get(loader_ref);
+            interp.interpret_function(init, &[])?
+        } else {
+            Vec::new()
+        };
+        let mut loader = loader_ref.borrow_mut();
+        loader.unnamed_packages.push(linked_package);
+        Ok(result)
+    }
+
+    /// If the named package is not already loaded, search_and_link_packages
+    /// uses searcher to find it and its dependencies. It then uses
+    /// link_package to create a linked runtime::Package for each newly
+    /// loaded package, then returns those.
+    ///
+    /// The returned packages have not been initialized or installed into
+    /// the main dependency graph; initialization cannot be done while
+    /// PackageLoader is borrowed, since an initializer might dynamically
+    /// load other packages.
+    ///
+    /// If the named package was already loaded, the result will be empty.
+    /// Otherwise, the named package will be the last element of the result.
+    unsafe fn search_and_link_packages(&mut self, name: &str) -> Result<Vec<Box<Package>>, Error> {
         let mut search_stack = vec![String::from(name)];
         let mut link_stack = Vec::new();
+        let mut linked_packages = Vec::new();
 
         while let Some(name) = search_stack.pop() {
             if self.packages.contains_key(&name) {
@@ -97,15 +182,10 @@ impl PackageLoader {
         }
 
         while let Some(package) = link_stack.pop() {
-            let name = package.name.clone();
             let linked_package = self.link_package(package);
-            if let Some(init) = linked_package.function_by_name("·init") {
-                interp.interpret_function(init, &[])?;
-            }
-            self.packages.insert(name, linked_package);
+            linked_packages.push(linked_package);
         }
-
-        Ok(self.packages.get_mut(name).unwrap())
+        Ok(linked_packages)
     }
 
     unsafe fn link_package(&mut self, package: package::Package) -> Box<Package> {
@@ -125,8 +205,10 @@ impl PackageLoader {
                 name: f.name,
                 insts: f.insts,
                 param_types: f.param_types,
-                cell_types: f.cell_types,
                 var_param_type: f.var_param_type,
+                return_types: f.return_types,
+                var_return_type: f.var_return_type,
+                cell_types: f.cell_types,
                 line_map: f.line_map,
                 package: 0 as *mut Package,
             })

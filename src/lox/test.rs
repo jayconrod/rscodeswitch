@@ -1,11 +1,13 @@
-use crate::interpret::Interpreter;
+use crate::interpret::{Env, InterpreterFactory};
 use crate::lox::compile;
 use crate::pos::{ErrorList, Position};
 use crate::runtime::{PackageLoader, ProvidedPackageSearcher};
 
+use std::cell::RefCell;
 use std::env;
 use std::fmt::Display;
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::str;
 
@@ -55,10 +57,15 @@ fn try_compile_and_interpret(path: &Path) -> Result<Vec<u8>, ErrorList> {
     let package = compile::compile_file(path)?;
     let mut searcher = Box::new(ProvidedPackageSearcher::new());
     searcher.add(package);
-    let mut loader = PackageLoader::new(searcher);
+    let loader_cell = RefCell::new(PackageLoader::new(searcher));
+    let mut input = io::empty();
     let mut output = Vec::new();
-    let mut interp = Interpreter::new(&mut output);
-    let res = unsafe { loader.load_package("main", &mut interp) };
+    let env_cell = RefCell::new(Env {
+        r: &mut input,
+        w: &mut output,
+    });
+    let interp_fac = InterpreterFactory::new(&env_cell);
+    let res = unsafe { PackageLoader::load_package(&loader_cell, interp_fac, "main") };
     match res {
         Ok(_) => Ok(output),
         Err(err) => Err(ErrorList::from(err)),

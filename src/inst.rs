@@ -84,7 +84,8 @@ pub const SYS: u8 = 5;
 pub const TYPEOF: u8 = 63;
 pub const XOR: u8 = 62;
 
-// Next sys: 4
+// Next sys: 5
+pub const SYS_DOFILE: u8 = 4;
 pub const SYS_PRINT: u8 = 1;
 pub const SYS_TONUMBER: u8 = 2;
 pub const SYS_TOSTRING: u8 = 3;
@@ -242,6 +243,7 @@ pub fn sys_mnemonic(sys: u8) -> &'static str {
         SYS_PRINT => "print",
         SYS_TONUMBER => "tonumber",
         SYS_TOSTRING => "tostring",
+        SYS_DOFILE => "dofile",
         _ => "unknown",
     }
 }

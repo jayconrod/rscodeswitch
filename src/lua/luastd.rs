@@ -51,12 +51,14 @@ pub fn build_std_package() -> Package {
     b.finish_function("collectgarbage", 2, false);
 
     // dofile
-    // TODO: implement. This needs to hook into native code.
     {
-        let si = b.ensure_string("unimplemented");
-        b.asm.string(si);
-        b.asm.mode(inst::MODE_STRING);
-        b.asm.panic(0);
+        b.asm.loadarg(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.sys(inst::SYS_DOFILE);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
         b.finish_function("dofile", 1, false);
     }
 
@@ -424,6 +426,8 @@ impl Builder {
             insts,
             param_types: vec![Type::NanBox; param_count],
             var_param_type,
+            return_types: Vec::new(),
+            var_return_type: Some(Type::NanBox),
             cell_types: Vec::new(),
             line_map: flmap,
         });

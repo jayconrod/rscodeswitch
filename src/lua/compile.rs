@@ -20,6 +20,10 @@ pub fn compile_file(path: &Path) -> Result<Package, ErrorList> {
         let wrapped = Error::wrap(position, &err);
         ErrorList(vec![wrapped])
     })?;
+    compile_file_data(path, &data)
+}
+
+pub fn compile_file_data(path: &Path, data: &[u8]) -> Result<Package, ErrorList> {
     let mut lmap = LineMap::new();
     let mut errors = Vec::new();
     let tokens = token::lex(path, &data, &mut lmap, &mut errors);
@@ -108,6 +112,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     insts,
                     param_types: Vec::new(),
                     var_param_type: None,
+                    return_types: Vec::new(),
+                    var_return_type: Some(Type::NanBox),
                     cell_types: Vec::new(),
                     line_map,
                 });
@@ -1034,6 +1040,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             insts,
             param_types,
             var_param_type,
+            return_types: Vec::new(),
+            var_return_type: Some(Type::NanBox),
             cell_types: Vec::new(),
             line_map,
         });
