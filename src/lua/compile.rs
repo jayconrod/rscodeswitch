@@ -197,26 +197,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
                 for l in left {
                     let var = &self.scope_set.vars[l.var.0];
-                    match var.kind {
-                        VarKind::Global | VarKind::Parameter => unreachable!(),
-                        VarKind::Local => {
-                            // We've arranged for the adjusted list of values to
-                            // be evaluated into place, so there's no need for
-                            // a storelocal instruction.
-                        }
-                        VarKind::Capture => {
-                            // The value is in the slot where the cell should
-                            // go. Allocate a cell, store the value, and put
-                            // the cell in that slot.
-                            assert_eq!(var.slot, var.cell_slot);
-                            self.asm.alloc(mem::size_of::<usize>() as u32);
-                            self.asm.dup();
-                            self.asm.loadlocal(var.slot as u16);
-                            self.asm.mode(inst::MODE_LUA);
-                            self.asm.store();
-                            self.asm.storelocal(var.slot as u16);
-                        }
-                    }
+                    self.compile_define_from_list(var);
                 }
             }
             Stmt::Do { stmts, scope, .. } => {
@@ -494,6 +475,89 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm.mode(inst::MODE_LUA);
                 self.asm.ge();
                 self.asm.mode(inst::MODE_LUA);
+                self.asm.bif(&mut body_label);
+
+                // End of the loop.
+                self.bind_named_label(*break_lid);
+                self.pop_block(*ind_scope);
+            }
+            Stmt::ForIn {
+                names,
+                exprs,
+                body,
+                ind_scope,
+                body_scope,
+                vars: vids,
+                iter_var: iter_vid,
+                state_var: state_vid,
+                control_var: control_vid,
+                close_var: close_vid,
+                break_label: break_lid,
+                ..
+            } => {
+                // Evaluate the expressions and assign to the four induction
+                // variables. The induction variables must be local (not
+                // captured) and must be grouped together in order.
+                // This happens once at the beginning.
+                let iter_var = &self.scope_set.vars[iter_vid.0];
+                let state_var = &self.scope_set.vars[state_vid.0];
+                let control_var = &self.scope_set.vars[control_vid.0];
+                let close_var = &self.scope_set.vars[close_vid.0];
+                assert!(
+                    iter_var.kind == VarKind::Local
+                        && state_var.kind == VarKind::Local
+                        && state_var.slot == iter_var.slot + 1
+                        && control_var.kind == VarKind::Local
+                        && control_var.slot == iter_var.slot + 2
+                        && close_var.kind == VarKind::Local
+                        && close_var.slot == iter_var.slot + 3
+                );
+                let len_known = self.compile_expr_list(exprs, 0);
+                let exprs_pos = exprs
+                    .first()
+                    .unwrap()
+                    .pos()
+                    .combine(exprs.last().unwrap().pos());
+                self.compile_adjust(exprs.len(), len_known, 4, exprs_pos);
+                let mut cond_label = Label::new();
+                self.asm.b(&mut cond_label);
+
+                // Loop body.
+                let mut body_label = Label::new();
+                self.asm.bind(&mut body_label);
+                for stmt in body {
+                    self.compile_stmt(stmt);
+                }
+                self.pop_block(*body_scope);
+
+                // Loop condition.
+                // Call the iterator function with the control and state
+                // variables. Assign the results to the named variables, and
+                // copy the first result back to control. If control is nil,
+                // end the loop.
+                self.asm.bind(&mut cond_label);
+                self.compile_load_var(iter_var, None);
+                self.compile_load_var(state_var, None);
+                self.compile_load_var(control_var, None);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.callvalue(2);
+                let names_pos = names
+                    .first()
+                    .unwrap()
+                    .pos()
+                    .combine(names.last().unwrap().pos());
+                self.compile_adjust(1, ExprListLen::Dynamic, names.len(), names_pos);
+                for vid in vids {
+                    let var = &self.scope_set.vars[vid.0];
+                    self.compile_define_from_list(var);
+                }
+                self.compile_load_var(&self.scope_set.vars[vids[0].0], None);
+                self.compile_store_var(control_var, None);
+                self.compile_load_var(&self.scope_set.vars[vids[0].0], None);
+                self.asm.constzero();
+                self.asm.mode(inst::MODE_PTR);
+                self.asm.nanbox();
+                self.asm.ne();
                 self.asm.bif(&mut body_label);
 
                 // End of the loop.
@@ -859,6 +923,9 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     /// Compiles a list of expressions, as in an assignment, local definition,
     /// argument list, or return list.
     ///
+    /// The "extra" parameter indicates the number of implicit expressions at
+    /// the beginning of the list. This is only used for method receivers.
+    ///
     /// Every expression except the last pushes exactly one value. If an
     /// expression dynamically produces 0 values, nil is pushed. If an
     /// expression produces multiple values, all but the first are dropped.
@@ -1172,6 +1239,32 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         }
     }
 
+    /// Like compile_define, but intended to be called as part of a definition
+    /// of multiple local variables, as in a local or for-in statement.
+    /// compile_define_prepare should not be called first in this case.
+    fn compile_define_from_list(&mut self, var: &Var) {
+        match var.kind {
+            VarKind::Global | VarKind::Parameter => unreachable!(),
+            VarKind::Local => {
+                // We've arranged for the adjusted list of values to
+                // be evaluated into place, so there's no need for
+                // a storelocal instruction.
+            }
+            VarKind::Capture => {
+                // The value is in the slot where the cell should
+                // go. Allocate a cell, store the value, and put
+                // the cell in that slot.
+                assert_eq!(var.slot, var.cell_slot);
+                self.asm.alloc(mem::size_of::<usize>() as u32);
+                self.asm.dup();
+                self.asm.loadlocal(var.slot as u16);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.store();
+                self.asm.storelocal(var.slot as u16);
+            }
+        }
+    }
+
     fn compile_assign(&mut self, lval: &LValue<'src>) {
         self.line(lval.pos());
         match lval {
@@ -1313,6 +1406,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     }
 
     fn pop_block(&mut self, sid: ScopeID) {
+        // TODO: handle "close" variables.
         let scope = &self.scope_set.scopes[sid.0];
         for _ in 0..scope.slot_count {
             self.asm.pop();

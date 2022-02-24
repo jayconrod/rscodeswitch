@@ -480,11 +480,45 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 }
                 self.enter(*ind_scope, ScopeKind::Local);
                 self.declare_break_label(*break_label);
-                self.declare_hidden(*ind_var);
-                self.declare_hidden(*limit_var);
-                self.declare_hidden(*step_var);
+                self.declare_hidden(*ind_var, Attr::None);
+                self.declare_hidden(*limit_var, Attr::None);
+                self.declare_hidden(*step_var, Attr::None);
                 self.enter(*body_scope, ScopeKind::Local);
                 self.declare(*body_var, name.text, VarKind::Local, Attr::None, name.pos());
+                self.declare_labels(body);
+                for stmt in body {
+                    self.resolve_stmt(stmt);
+                }
+                self.leave();
+                self.leave();
+            }
+            Stmt::ForIn {
+                names,
+                exprs,
+                body,
+                ind_scope,
+                body_scope,
+                vars,
+                iter_var,
+                state_var,
+                control_var,
+                close_var,
+                break_label,
+                ..
+            } => {
+                for expr in exprs {
+                    self.resolve_expr(expr);
+                }
+                self.enter(*ind_scope, ScopeKind::Local);
+                self.declare_break_label(*break_label);
+                self.declare_hidden(*iter_var, Attr::None);
+                self.declare_hidden(*state_var, Attr::None);
+                self.declare_hidden(*control_var, Attr::None);
+                self.declare_hidden(*close_var, Attr::Close);
+                self.enter(*body_scope, ScopeKind::Local);
+                for (name, var) in names.iter().zip(vars.iter()) {
+                    self.declare(*var, name.text, VarKind::Local, Attr::None, name.pos());
+                }
                 self.declare_labels(body);
                 for stmt in body {
                     self.resolve_stmt(stmt);
@@ -710,14 +744,8 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
         *self.scope_set.ensure_var(vid) = var;
     }
 
-    fn declare_hidden(&mut self, vid: VarID) {
-        self.declare(
-            vid,
-            "",
-            VarKind::Local,
-            Attr::None,
-            Pos { begin: 0, end: 0 },
-        )
+    fn declare_hidden(&mut self, vid: VarID, attr: Attr) {
+        self.declare(vid, "", VarKind::Local, attr, Pos { begin: 0, end: 0 })
     }
 
     fn resolve(&mut self, name: Token<'src>, vuid: VarUseID) {
@@ -882,6 +910,18 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 }
             }
             Stmt::For {
+                body,
+                ind_scope,
+                body_scope,
+                ..
+            } => {
+                self.shift_vars_in_scope(*ind_scope, shift);
+                self.shift_vars_in_scope(*body_scope, shift);
+                for stmt in body {
+                    self.shift_vars_in_stmt(stmt, shift);
+                }
+            }
+            Stmt::ForIn {
                 body,
                 ind_scope,
                 body_scope,

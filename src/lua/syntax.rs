@@ -99,6 +99,20 @@ pub enum Stmt<'src> {
         break_label: LabelID,
         pos: Pos,
     },
+    ForIn {
+        names: Vec<Token<'src>>,
+        exprs: Vec<Expr<'src>>,
+        body: Vec<Stmt<'src>>,
+        ind_scope: ScopeID,
+        body_scope: ScopeID,
+        vars: Vec<VarID>,
+        iter_var: VarID,
+        state_var: VarID,
+        control_var: VarID,
+        close_var: VarID,
+        break_label: LabelID,
+        pos: Pos,
+    },
     Break {
         label_use: LabelUseID,
         pos: Pos,
@@ -154,6 +168,7 @@ impl<'src> Stmt<'src> {
             Stmt::While { pos, .. } => *pos,
             Stmt::Repeat { pos, .. } => *pos,
             Stmt::For { pos, .. } => *pos,
+            Stmt::ForIn { pos, .. } => *pos,
             Stmt::Break { pos, .. } => *pos,
             Stmt::Label { pos, .. } => *pos,
             Stmt::Goto { pos, .. } => *pos,
@@ -284,6 +299,30 @@ impl<'src> DisplayIndent for Stmt<'src> {
                 for stmt in body {
                     stmt.fmt_indent(f, level + 1)?;
                 }
+                self.write_indent(f, level)?;
+                write!(f, "end")
+            }
+            Stmt::ForIn {
+                names, exprs, body, ..
+            } => {
+                write!(f, "for ")?;
+                let mut sep = "";
+                for name in names {
+                    write!(f, "{}{}", sep, name.text)?;
+                    sep = ", ";
+                }
+                write!(f, " in ")?;
+                sep = "";
+                for expr in exprs {
+                    write!(f, "{}{}", sep, expr)?;
+                    sep = ", ";
+                }
+                write!(f, " do")?;
+                for stmt in body {
+                    write!(f, "\n")?;
+                    stmt.fmt_indent(f, level + 1)?;
+                }
+                write!(f, "\n")?;
                 self.write_indent(f, level)?;
                 write!(f, "end")
             }
@@ -880,6 +919,14 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     }
 
     fn parse_for_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let begin = self.expect(Kind::For)?.pos();
+        let name = self.expect(Kind::Ident)?;
+        let t = self.peek();
+        if t == Kind::In || t == Kind::Comma {
+            return self.parse_for_in_stmt(begin, name);
+        } else if t != Kind::Eq {
+            return Err(self.expect_error("'=', ',', or 'in'"));
+        }
         let ind_scope = self.next_scope();
         let body_scope = self.next_scope();
         let ind_var = self.next_var();
@@ -887,8 +934,6 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         let step_var = self.next_var();
         let body_var = self.next_var();
         let break_label = self.next_label();
-        let begin = self.expect(Kind::For)?.pos();
-        let name = self.expect(Kind::Ident)?;
         self.expect(Kind::Eq)?;
         let init = self.parse_expr()?;
         self.expect(Kind::Comma)?;
@@ -915,6 +960,43 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             limit_var,
             step_var,
             body_var,
+            break_label,
+            pos,
+        })
+    }
+
+    fn parse_for_in_stmt(&mut self, begin: Pos, name: Token<'src>) -> Result<Stmt<'src>, Error> {
+        let ind_scope = self.next_scope();
+        let body_scope = self.next_scope();
+        let iter_var = self.next_var();
+        let state_var = self.next_var();
+        let control_var = self.next_var();
+        let close_var = self.next_var();
+        let break_label = self.next_label();
+        let mut names = vec![name];
+        while self.peek() == Kind::Comma {
+            self.take();
+            names.push(self.expect(Kind::Ident)?);
+        }
+        let mut vars = Vec::with_capacity(names.len());
+        vars.resize_with(names.len(), || self.next_var());
+        self.expect(Kind::In)?;
+        let exprs = self.parse_non_empty_expr_list()?;
+        self.expect(Kind::Do)?;
+        let body = self.parse_block_stmts(Kind::End);
+        let end = self.expect(Kind::End)?.pos();
+        let pos = begin.combine(end);
+        Ok(Stmt::ForIn {
+            names,
+            exprs,
+            body,
+            ind_scope,
+            body_scope,
+            vars,
+            iter_var,
+            state_var,
+            control_var,
+            close_var,
             break_label,
             pos,
         })
