@@ -497,6 +497,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 exprs,
                 body,
                 ind_scope,
+                named_scope,
                 body_scope,
                 vars,
                 iter_var,
@@ -515,14 +516,16 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 self.declare_hidden(*state_var, Attr::None);
                 self.declare_hidden(*control_var, Attr::None);
                 self.declare_hidden(*close_var, Attr::Close);
-                self.enter(*body_scope, ScopeKind::Local);
+                self.enter(*named_scope, ScopeKind::Local);
                 for (name, var) in names.iter().zip(vars.iter()) {
                     self.declare(*var, name.text, VarKind::Local, Attr::None, name.pos());
                 }
+                self.enter(*body_scope, ScopeKind::Local);
                 self.declare_labels(body);
                 for stmt in body {
                     self.resolve_stmt(stmt);
                 }
+                self.leave();
                 self.leave();
                 self.leave();
             }

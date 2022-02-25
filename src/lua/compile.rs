@@ -486,6 +486,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 exprs,
                 body,
                 ind_scope,
+                named_scope,
                 body_scope,
                 vars: vids,
                 iter_var: iter_vid,
@@ -529,6 +530,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     self.compile_stmt(stmt);
                 }
                 self.pop_block(*body_scope);
+                self.pop_block(*named_scope);
 
                 // Loop condition.
                 // Call the iterator function with the control and state
@@ -562,6 +564,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
                 // End of the loop.
                 self.bind_named_label(*break_lid);
+                self.pop_block(*named_scope);
                 self.pop_block(*ind_scope);
             }
             Stmt::Break {

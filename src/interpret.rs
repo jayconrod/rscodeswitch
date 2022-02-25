@@ -1935,21 +1935,23 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::XOR)
                 }
                 (_, inst::MODE_I64) => {
+                    save_regs!();
                     panic!(
                         "{}",
                         self.error(format!("unknown opcode {} code {}", inst::mnemonic(op), op))
-                    )
+                    );
                 }
-                _ => panic!(
-                    "{}",
-                    self.error(format!(
+                _ => {
+                    save_regs!();
+                    let err = self.error(format!(
                         "unknown opcode {}{} code {} {}",
                         inst::mnemonic(op),
                         inst::mode_mnemonic(mode),
                         mode,
                         op
-                    ))
-                ),
+                    ));
+                    panic!("{}", err);
+                }
             };
             ip = (ip as usize + inst_size) as *const u8;
         }

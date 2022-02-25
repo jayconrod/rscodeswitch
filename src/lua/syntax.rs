@@ -104,6 +104,7 @@ pub enum Stmt<'src> {
         exprs: Vec<Expr<'src>>,
         body: Vec<Stmt<'src>>,
         ind_scope: ScopeID,
+        named_scope: ScopeID,
         body_scope: ScopeID,
         vars: Vec<VarID>,
         iter_var: VarID,
@@ -967,6 +968,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
 
     fn parse_for_in_stmt(&mut self, begin: Pos, name: Token<'src>) -> Result<Stmt<'src>, Error> {
         let ind_scope = self.next_scope();
+        let named_scope = self.next_scope();
         let body_scope = self.next_scope();
         let iter_var = self.next_var();
         let state_var = self.next_var();
@@ -991,6 +993,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             exprs,
             body,
             ind_scope,
+            named_scope,
             body_scope,
             vars,
             iter_var,

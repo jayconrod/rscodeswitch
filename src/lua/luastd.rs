@@ -9,6 +9,9 @@ use std::mem;
 
 pub fn build_std_package() -> Package {
     let mut b = Builder::new();
+    let env_index = b.add_global("_ENV");
+    let g_index = b.add_global("_G");
+    let ipairs_iter_index = b.add_global("ipairs_iter");
 
     // assert(v, message)
     {
@@ -131,7 +134,54 @@ pub fn build_std_package() -> Package {
         b.finish_function("getmetatable", 1, false);
     }
 
-    // TODO: ipairs
+    // ipairs(table)
+    let ipairs_iter_func_index: u32;
+    {
+        // ipairs_iter(table, index): the iterator function that ipairs returns.
+        // Returns index + 1, table[index + 1] if the property is non-nil.
+        // Otherwise, returns nil.
+        b.asm.loadarg(1);
+        b.asm.const_(1);
+        b.asm.nanbox();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.add();
+        b.asm.loadarg(0);
+        b.asm.loadlocal(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadindexpropornil();
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.eq();
+        let mut end_label = Label::new();
+        b.asm.bif(&mut end_label);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(2);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.asm.bind(&mut end_label);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        ipairs_iter_func_index = b.finish_function("ipairs_iter", 2, false);
+
+        // ipairs(table): returns ipairs_iter, table, 0, nil
+        b.asm.loadglobal(ipairs_iter_index);
+        b.asm.loadarg(0);
+        b.asm.constzero();
+        b.asm.nanbox();
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(4);
+        b.asm.nop(); // DEBUG
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("ipairs", 1, false);
+    }
 
     // load(chunk, chunkname, mode, env)
     {
@@ -387,8 +437,6 @@ pub fn build_std_package() -> Package {
     // TODO: debug
 
     // init - allocates and populates the _ENV table.
-    let env_index = b.add_global("_ENV");
-    let g_index = b.add_global("_G");
     b.asm.alloc(mem::size_of::<Object>() as u32);
     b.asm.mode(inst::MODE_OBJECT);
     b.asm.nanbox();
@@ -403,6 +451,10 @@ pub fn build_std_package() -> Package {
     b.asm.dup();
     b.asm.storeglobal(env_index);
     b.asm.storeglobal(g_index);
+    b.asm.newclosure(ipairs_iter_func_index, 0, 0);
+    b.asm.mode(inst::MODE_CLOSURE);
+    b.asm.nanbox();
+    b.asm.storeglobal(ipairs_iter_index);
     b.asm.mode(inst::MODE_LUA);
     b.asm.setv(0);
     b.asm.mode(inst::MODE_LUA);
@@ -443,7 +495,12 @@ impl Builder {
         self.package
     }
 
-    fn finish_function(&mut self, name: &'static str, param_count: usize, is_variadic: bool) {
+    fn finish_function(
+        &mut self,
+        name: &'static str,
+        param_count: usize,
+        is_variadic: bool,
+    ) -> u32 {
         let mut asm = Assembler::new();
         mem::swap(&mut self.asm, &mut asm);
         let (insts, flmap) = asm.finish().unwrap();
@@ -452,6 +509,7 @@ impl Builder {
         } else {
             None
         };
+        let fi: u32 = self.package.functions.len().try_into().unwrap();
         self.package.functions.push(Function {
             name: String::from(name),
             insts,
@@ -464,6 +522,7 @@ impl Builder {
         });
         let si = self.ensure_string(name);
         self.function_name_index.push(si);
+        fi
     }
 
     fn add_global(&mut self, s: &'static str) -> u32 {
