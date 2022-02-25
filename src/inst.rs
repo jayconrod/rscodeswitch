@@ -41,6 +41,7 @@ pub const LOADINDEXPROPORNIL: u8 = 72;
 pub const LOADLOCAL: u8 = 11;
 pub const LOADNAMEDPROP: u8 = 42;
 pub const LOADNAMEDPROPORNIL: u8 = 50;
+pub const LOADNEXTINDEXPROPORNIL: u8 = 79;
 pub const LOADPROTOTYPE: u8 = 40;
 pub const LOADVARARGS: u8 = 75;
 pub const LT: u8 = 17;
@@ -124,11 +125,50 @@ pub fn size_at(insts: &[u8]) -> usize {
 
 pub const fn size(op: u8) -> usize {
     match op {
-        ADD | AND | CALLVALUEV | CONSTZERO | DIV | DUP | EQ | EXP | FLOORDIV | GE | GT | LT
-        | LE | LEN | LOAD | LOADINDEXPROPORNIL | LOADPROTOTYPE | LOADVARARGS | MOD | MUL
-        | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | PANICLEVEL | POP | PROTOTYPE | RET | RETV
-        | SHL | SHR | STORE | STOREINDEXPROP | STOREPROTOTYPE | STRCAT | SUB | SWAP | TOFLOAT
-        | TYPEOF | XOR => 1,
+        ADD
+        | AND
+        | CALLVALUEV
+        | CONSTZERO
+        | DIV
+        | DUP
+        | EQ
+        | EXP
+        | FLOORDIV
+        | GE
+        | GT
+        | LT
+        | LE
+        | LEN
+        | LOAD
+        | LOADINDEXPROPORNIL
+        | LOADNEXTINDEXPROPORNIL
+        | LOADPROTOTYPE
+        | LOADVARARGS
+        | MOD
+        | MUL
+        | NANBOX
+        | NE
+        | NEG
+        | NOP
+        | NOT
+        | NOTB
+        | OR
+        | PANICLEVEL
+        | POP
+        | PROTOTYPE
+        | RET
+        | RETV
+        | SHL
+        | SHR
+        | STORE
+        | STOREINDEXPROP
+        | STOREPROTOTYPE
+        | STRCAT
+        | SUB
+        | SWAP
+        | TOFLOAT
+        | TYPEOF
+        | XOR => 1,
         PANIC | SWAPN | SYS => 2,
         ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETV | STOREARG
         | STORELOCAL => 3,
@@ -175,6 +215,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         LOADLOCAL => "loadlocal",
         LOADNAMEDPROP => "loadnamedprop",
         LOADNAMEDPROPORNIL => "loadnamedpropornil",
+        LOADNEXTINDEXPROPORNIL => "loadnextindexpropornil",
         LOADPROTOTYPE => "loadprototype",
         LOADVARARGS => "loadvarargs",
         LT => "lt",
@@ -462,6 +503,10 @@ impl Assembler {
     pub fn loadnamedpropornil(&mut self, name: u32) {
         self.write_u8(LOADNAMEDPROPORNIL);
         self.write_u32(name);
+    }
+
+    pub fn loadnextindexpropornil(&mut self) {
+        self.write_u8(LOADNEXTINDEXPROPORNIL);
     }
 
     pub fn loadprototype(&mut self) {
@@ -759,11 +804,50 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         };
         write!(f, "  {}{}", mnemonic(insts[p]), mode)?;
         match insts[p] {
-            ADD | AND | CALLVALUEV | CONSTZERO | DIV | DUP | EXP | EQ | FLOORDIV | GE | GT | LT
-            | LE | LEN | LOAD | LOADINDEXPROPORNIL | LOADPROTOTYPE | LOADVARARGS | MOD | MUL
-            | NANBOX | NE | NEG | NOP | NOT | NOTB | OR | PANICLEVEL | POP | PROTOTYPE | RET
-            | RETV | SHL | SHR | STORE | STOREINDEXPROP | STOREPROTOTYPE | STRCAT | SUB | SWAP
-            | TOFLOAT | TYPEOF | XOR => {
+            ADD
+            | AND
+            | CALLVALUEV
+            | CONSTZERO
+            | DIV
+            | DUP
+            | EXP
+            | EQ
+            | FLOORDIV
+            | GE
+            | GT
+            | LT
+            | LE
+            | LEN
+            | LOAD
+            | LOADINDEXPROPORNIL
+            | LOADNEXTINDEXPROPORNIL
+            | LOADPROTOTYPE
+            | LOADVARARGS
+            | MOD
+            | MUL
+            | NANBOX
+            | NE
+            | NEG
+            | NOP
+            | NOT
+            | NOTB
+            | OR
+            | PANICLEVEL
+            | POP
+            | PROTOTYPE
+            | RET
+            | RETV
+            | SHL
+            | SHR
+            | STORE
+            | STOREINDEXPROP
+            | STOREPROTOTYPE
+            | STRCAT
+            | SUB
+            | SWAP
+            | TOFLOAT
+            | TYPEOF
+            | XOR => {
                 f.write_str("\n")?;
             }
             B | BIF => {

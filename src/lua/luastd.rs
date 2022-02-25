@@ -198,6 +198,7 @@ pub fn build_std_package() -> Package {
         b.finish_function("load", 4, false);
     }
 
+    // loadfile(filename, mode, env)
     {
         b.asm.loadarg(0);
         b.asm.loadarg(1);
@@ -211,8 +212,32 @@ pub fn build_std_package() -> Package {
         b.finish_function("loadfile", 3, false);
     }
 
-    // TODO: loadfile
-    // TODO: next
+    // next(table, index)
+    {
+        b.asm.loadarg(0);
+        b.asm.loadarg(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadnextindexpropornil();
+        b.asm.loadlocal(0);
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.eq();
+        let mut last_label = Label::new();
+        b.asm.bif(&mut last_label);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(2);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.asm.bind(&mut last_label);
+        b.asm.pop();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("next", 2, false);
+    }
+
     // TODO: pairs
     // TODO: pcall
 

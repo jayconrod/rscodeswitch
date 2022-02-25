@@ -540,6 +540,40 @@ impl Object {
             }
         }
     }
+
+    pub unsafe fn first_own_property(&self) -> Option<(NanBoxKey, &Property)> {
+        if let Some((&key, prop)) = self.properties.first() {
+            return Some((key, prop));
+        }
+        if let Some((akey, prop)) = self.array_properties.first() {
+            let key = NanBoxKey::try_from(NanBox::from(akey)).unwrap();
+            return Some((key, prop));
+        }
+        None
+    }
+
+    pub unsafe fn next_own_property(&self, key: NanBoxKey) -> Option<(NanBoxKey, &Property)> {
+        if let Ok(i) = key.as_array_key() {
+            let iv = SetValue { value: i };
+            if let Some((next_akey, prop)) = self.array_properties.next(&iv) {
+                let next_key = NanBoxKey::try_from(NanBox::from(next_akey)).unwrap();
+                Some((next_key, prop))
+            } else {
+                None
+            }
+        } else {
+            if let Some((&next_key, prop)) = self.properties.next(&key) {
+                Some((next_key, prop))
+            } else if !self.properties.contains_key(&key) {
+                None
+            } else if let Some((next_akey, prop)) = self.array_properties.first() {
+                let next_key = NanBoxKey::try_from(NanBox::from(next_akey)).unwrap();
+                Some((next_key, prop))
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// A value held by an object.

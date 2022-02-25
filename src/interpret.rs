@@ -1243,6 +1243,36 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     push!(value.0);
                     inst::size(inst::LOADNAMEDPROPORNIL)
                 }
+                (inst::LOADNEXTINDEXPROPORNIL, inst::MODE_LUA) => {
+                    let index = NanBox(pop!());
+                    let boxed_receiver = NanBox(pop!());
+                    let receiver: &Object = match boxed_receiver.try_into() {
+                        Ok(o) => o,
+                        _ => return_errorf!("value is not an object: {:?}", boxed_receiver),
+                    };
+                    let entry_opt = if index.is_nil() {
+                        receiver.first_own_property()
+                    } else if let Ok(key) = NanBoxKey::try_from(index) {
+                        receiver.next_own_property(key)
+                    } else {
+                        return_errorf!("index is not a valid key");
+                    };
+                    let (key, value) = if let Some((key, prop)) = entry_opt {
+                        (NanBox::from(key), receiver.property_value(prop))
+                    } else {
+                        if !index.is_nil()
+                            && receiver
+                                .lookup_own_property(NanBoxKey::try_from(index).unwrap())
+                                .is_none()
+                        {
+                            return_errorf!("index is not a key in receiver");
+                        }
+                        (NanBox::from_nil(), NanBox::from_nil())
+                    };
+                    push!(key.0);
+                    push!(value.0);
+                    inst::size(inst::LOADNEXTINDEXPROPORNIL)
+                }
                 (inst::LOADPROTOTYPE, inst::MODE_OBJECT) => {
                     let v = pop!();
                     let o = (v as *const Object).as_ref().unwrap();

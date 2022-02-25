@@ -396,6 +396,10 @@ impl<K: Eq + Hash + Set, V: Set> HashMap<K, V> {
         HEAP.allocate(mem::size_of::<HashMap<K, V>>()) as *mut HashMap<K, V>
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -427,6 +431,49 @@ impl<K: Eq + Hash + Set, V: Set> HashMap<K, V> {
         self.entries[i].code = code;
         self.entries[i].key.set(key);
         self.entries[i].value.set(value);
+    }
+
+    /// Returns an arbitrary entry in the map, or None if the map is entry.
+    /// When the key from this entry is used as the initial value in a loop with
+    /// next, every entry in the map will be returned, assuming no entries are
+    /// added or removed.
+    pub fn first(&self) -> Option<(&K, &V)> {
+        for i in 0..self.entries.len() {
+            if self.entries[i].code != 0 {
+                return Some((&self.entries[i].key, &self.entries[i].value));
+            }
+        }
+        None
+    }
+
+    /// Returns an arbitrary entry in the map "after" the entry with the given
+    /// key, or None if there are no such entries or if the key is not in
+    /// the map.
+    pub fn next(&self, key: &K) -> Option<(&K, &V)> {
+        if self.is_empty() {
+            return None;
+        }
+        let mask = self.entries.len - 1;
+        let code = HashMap::<K, V>::hash_key(&key);
+        let initial = code & mask;
+        let mut i = initial;
+        while i < self.entries.len {
+            if self.entries[i].code == code && self.entries[i].key == *key {
+                i += 1;
+                break;
+            }
+            if self.entries[i].code == 0 {
+                return None;
+            }
+            i += 1;
+        }
+        while i < self.entries.len {
+            if self.entries[i].code != 0 {
+                return Some((&self.entries[i].key, &self.entries[i].value));
+            }
+            i += 1;
+        }
+        None
     }
 
     fn grow(&mut self) {

@@ -2,7 +2,7 @@
 //! IEEE-754 NaN values. This is useful for dynamically typed languages. Most
 //! operations may be performed on NaN-boxed values.
 
-use crate::data;
+use crate::data::{self, SetValue};
 use crate::heap::{Set, HEAP};
 use crate::runtime::{Closure, Object};
 use std::cmp::{Ordering, PartialOrd};
@@ -248,6 +248,22 @@ impl From<*mut i64> for NanBox {
     }
 }
 
+impl From<*const i64> for NanBox {
+    fn from(bi: *const i64) -> NanBox {
+        assert!(!bi.is_null());
+        NanBox(QNAN | TAG_BIG_INT | (bi as u64))
+    }
+}
+
+impl From<&SetValue<i64>> for NanBox {
+    fn from(i: &SetValue<i64>) -> NanBox {
+        match NanBox::try_from(i.value) {
+            Ok(n) => n,
+            _ => NanBox::from(&i.value as *const i64),
+        }
+    }
+}
+
 impl From<*const data::String> for NanBox {
     fn from(s: *const data::String) -> NanBox {
         if s.is_null() {
@@ -401,8 +417,15 @@ impl TryInto<&Object> for NanBox {
     }
 }
 
+impl From<NanBoxKey> for NanBox {
+    fn from(k: NanBoxKey) -> NanBox {
+        NanBox(k.0)
+    }
+}
+
 /// A NaN-boxed value that may be used as a hash table key. Actual NaN values
-/// are not allowed, since they don't compare equal to themselves.
+/// are not allowed, since they don't compare equal to themselves. Nil values
+/// are also not allowed, since nil may indicate the absence of a key.
 ///
 /// NaNBoxKey implements Eq and Hash. Like NanBox, two numbers are equal if
 /// they are numerically equal, even if they have different representations.
@@ -423,6 +446,9 @@ impl NanBoxKey {
 impl TryFrom<NanBox> for NanBoxKey {
     type Error = NanBoxKeyError;
     fn try_from(v: NanBox) -> Result<NanBoxKey, Self::Error> {
+        if v.is_nil() {
+            return Err(NanBoxKeyError {});
+        }
         let fr: ConvertResult<f64> = v.try_into();
         match fr {
             Ok(f) if f.is_nan() => Err(NanBoxKeyError {}),
