@@ -12,6 +12,7 @@ pub fn build_std_package() -> Package {
     let env_index = b.add_global("_ENV");
     let g_index = b.add_global("_G");
     let ipairs_iter_index = b.add_global("ipairs_iter");
+    let next_index = b.add_global("pairs");
 
     // assert(v, message)
     {
@@ -238,7 +239,52 @@ pub fn build_std_package() -> Package {
         b.finish_function("next", 2, false);
     }
 
-    // TODO: pairs
+    // pairs(table)
+    {
+        // If table has a metamethod __pairs, call that and return results.
+        b.asm.loadarg(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadprototype();
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.eq();
+        let mut not_meta_label = Label::new();
+        b.asm.bif(&mut not_meta_label);
+        let si = b.ensure_string("__pairs");
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadnamedpropornil(si);
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.eq();
+        b.asm.bif(&mut not_meta_label);
+        b.asm.loadarg(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.callvalue(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.adjustv(3);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+
+        // Otherwise, return next, table, nil.
+        b.asm.bind(&mut not_meta_label);
+        b.asm.pop();
+        b.asm.loadglobal(next_index);
+        b.asm.loadarg(0);
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_PTR);
+        b.asm.nanbox();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.setv(3);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+
+        b.finish_function("pairs", 1, false);
+    }
+
     // TODO: pcall
 
     // print
@@ -466,6 +512,9 @@ pub fn build_std_package() -> Package {
     b.asm.mode(inst::MODE_OBJECT);
     b.asm.nanbox();
     for i in 0..b.package.functions.len() {
+        if b.package.functions[i].name == "ipairs_iter" {
+            continue;
+        }
         b.asm.dup();
         b.asm.newclosure(i as u32, 0, 0);
         b.asm.mode(inst::MODE_CLOSURE);
@@ -480,6 +529,11 @@ pub fn build_std_package() -> Package {
     b.asm.mode(inst::MODE_CLOSURE);
     b.asm.nanbox();
     b.asm.storeglobal(ipairs_iter_index);
+    b.asm.loadglobal(env_index);
+    let next_si = b.ensure_string("next");
+    b.asm.mode(inst::MODE_LUA);
+    b.asm.loadnamedprop(next_si);
+    b.asm.storeglobal(next_index);
     b.asm.mode(inst::MODE_LUA);
     b.asm.setv(0);
     b.asm.mode(inst::MODE_LUA);
