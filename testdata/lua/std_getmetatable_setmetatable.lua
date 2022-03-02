@@ -6,3 +6,6 @@ local mt = {x = 1}
 local a = {}
 print(setmetatable(a, mt)) -- Output: nil
 print(getmetatable(a) == mt) -- Output: true
+
+print(setmetatable(a, nil) == mt) -- Output: true
+print(getmetatable(a) == nil) -- Output: true

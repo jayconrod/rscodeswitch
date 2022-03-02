@@ -426,8 +426,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Stmt::Print { expr, .. } => {
                 self.compile_expr(expr);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().setv(1);
+                self.asm().setvi(1);
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().sys(inst::SYS_PRINT);
             }

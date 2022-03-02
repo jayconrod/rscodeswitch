@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 79.
+// Next opcode: 86.
 pub const ADD: u8 = 20;
 pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
@@ -12,6 +12,7 @@ pub const AND: u8 = 60;
 pub const APPENDV: u8 = 70;
 pub const B: u8 = 27;
 pub const BIF: u8 = 28;
+pub const CALLHANDLER: u8 = 80;
 pub const CALLNAMEDPROP: u8 = 45;
 pub const CALLNAMEDPROPV: u8 = 74;
 pub const CALLNAMEDPROPWITHPROTOTYPE: u8 = 47;
@@ -29,12 +30,14 @@ pub const EXP: u8 = 56;
 pub const FLOORDIV: u8 = 54;
 pub const FUNCTION: u8 = 31;
 pub const GE: u8 = 18;
+pub const GETV: u8 = 83;
 pub const GT: u8 = 19;
 // pub const INT64: u8 = 49;
 pub const LE: u8 = 16;
 pub const LEN: u8 = 73;
 pub const LOAD: u8 = 36;
 pub const LOADARG: u8 = 29;
+pub const LOADERROR: u8 = 82;
 pub const LOADGLOBAL: u8 = 9;
 pub const LOADIMPORTGLOBAL: u8 = 76;
 pub const LOADINDEXPROPORNIL: u8 = 72;
@@ -51,6 +54,7 @@ pub const NANBOX: u8 = 6;
 pub const NE: u8 = 15;
 pub const NEG: u8 = 25;
 pub const NEWCLOSURE: u8 = 39;
+pub const NEXTHANDLER: u8 = 81;
 // pub const NIL: u8 = 33;
 pub const NOP: u8 = 1;
 pub const NOT: u8 = 24;
@@ -60,10 +64,12 @@ pub const PANIC: u8 = 65;
 pub const PANICLEVEL: u8 = 77;
 pub const POP: u8 = 3;
 pub const PROTOTYPE: u8 = 48;
+pub const PUSHHANDLER: u8 = 85;
 pub const RET: u8 = 4;
 pub const RETV: u8 = 67;
 pub const TOFLOAT: u8 = 64;
-pub const SETV: u8 = 66;
+pub const SETV: u8 = 84;
+pub const SETVI: u8 = 66;
 pub const SHL: u8 = 58;
 pub const SHR: u8 = 59;
 pub const STORE: u8 = 37;
@@ -127,6 +133,7 @@ pub const fn size(op: u8) -> usize {
     match op {
         ADD
         | AND
+        | CALLHANDLER
         | CALLVALUEV
         | CONSTZERO
         | DIV
@@ -135,11 +142,13 @@ pub const fn size(op: u8) -> usize {
         | EXP
         | FLOORDIV
         | GE
+        | GETV
         | GT
         | LT
         | LE
         | LEN
         | LOAD
+        | LOADERROR
         | LOADINDEXPROPORNIL
         | LOADNEXTINDEXPROPORNIL
         | LOADPROTOTYPE
@@ -149,6 +158,7 @@ pub const fn size(op: u8) -> usize {
         | NANBOX
         | NE
         | NEG
+        | NEXTHANDLER
         | NOP
         | NOT
         | NOTB
@@ -158,6 +168,7 @@ pub const fn size(op: u8) -> usize {
         | PROTOTYPE
         | RET
         | RETV
+        | SETV
         | SHL
         | SHR
         | STORE
@@ -170,10 +181,11 @@ pub const fn size(op: u8) -> usize {
         | TYPEOF
         | XOR => 1,
         PANIC | SWAPN | SYS => 2,
-        ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETV | STOREARG
+        ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETVI | STOREARG
         | STORELOCAL => 3,
         ALLOC | B | BIF | CALLNAMEDPROPV | FUNCTION | LOADGLOBAL | LOADNAMEDPROP
-        | LOADNAMEDPROPORNIL | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP | STRING => 5,
+        | LOADNAMEDPROPORNIL | PUSHHANDLER | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP
+        | STRING => 5,
         CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE | LOADIMPORTGLOBAL | STOREIMPORTGLOBAL => 7,
         CONST | NEWCLOSURE => 9,
         _ => 255,
@@ -189,6 +201,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         APPENDV => "appendv",
         B => "b",
         BIF => "bif",
+        CALLHANDLER => "callhandler",
         CALLNAMEDPROP => "callnamedprop",
         CALLNAMEDPROPV => "callnamedpropv",
         CALLNAMEDPROPWITHPROTOTYPE => "callnamedpropwithprototype",
@@ -204,11 +217,13 @@ pub fn mnemonic(op: u8) -> &'static str {
         FUNCTION => "function",
         FLOORDIV => "floordiv",
         GE => "ge",
+        GETV => "getv",
         GT => "gt",
         LE => "le",
         LEN => "len",
         LOAD => "load",
         LOADARG => "loadarg",
+        LOADERROR => "loaderror",
         LOADGLOBAL => "loadglobal",
         LOADIMPORTGLOBAL => "loadimportglobal",
         LOADINDEXPROPORNIL => "loadindexpropornil",
@@ -225,6 +240,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         NE => "ne",
         NEG => "neg",
         NEWCLOSURE => "newclosure",
+        NEXTHANDLER => "nexthandler",
         NOP => "nop",
         NOT => "not",
         NOTB => "notb",
@@ -233,9 +249,11 @@ pub fn mnemonic(op: u8) -> &'static str {
         PANICLEVEL => "paniclevel",
         POP => "pop",
         PROTOTYPE => "prototype",
+        PUSHHANDLER => "pushhandler",
         RET => "ret",
         RETV => "retv",
         SETV => "setv",
+        SETVI => "setvi",
         SHL => "shl",
         SHR => "shr",
         STORE => "store",
@@ -290,6 +308,13 @@ pub fn sys_mnemonic(sys: u8) -> &'static str {
         SYS_TONUMBER => "tonumber",
         SYS_TOSTRING => "tostring",
         _ => "unknown",
+    }
+}
+
+pub fn has_label(op: u8) -> bool {
+    match op {
+        B | BIF | PUSHHANDLER => true,
+        _ => false,
     }
 }
 
@@ -385,6 +410,10 @@ impl Assembler {
         self.write_label(label);
     }
 
+    pub fn callhandler(&mut self) {
+        self.write_u8(CALLHANDLER);
+    }
+
     pub fn callnamedprop(&mut self, name_index: u32, arg_count: u16) {
         self.write_u8(CALLNAMEDPROP);
         self.write_u32(name_index);
@@ -454,6 +483,10 @@ impl Assembler {
         self.write_u8(GE);
     }
 
+    pub fn getv(&mut self) {
+        self.write_u8(GETV);
+    }
+
     pub fn gt(&mut self) {
         self.write_u8(GT);
     }
@@ -473,6 +506,10 @@ impl Assembler {
     pub fn loadarg(&mut self, index: u16) {
         self.write_u8(LOADARG);
         self.write_u16(index);
+    }
+
+    pub fn loaderror(&mut self) {
+        self.write_u8(LOADERROR);
     }
 
     pub fn loadglobal(&mut self, index: u32) {
@@ -548,6 +585,10 @@ impl Assembler {
         self.write_u16(bound_arg_count);
     }
 
+    pub fn nexthandler(&mut self) {
+        self.write_u8(NEXTHANDLER);
+    }
+
     pub fn nop(&mut self) {
         self.write_u8(NOP);
     }
@@ -581,6 +622,11 @@ impl Assembler {
         self.write_u8(PROTOTYPE);
     }
 
+    pub fn pushhandler(&mut self, label: &mut Label) {
+        self.write_u8(PUSHHANDLER);
+        self.write_label(label);
+    }
+
     pub fn ret(&mut self) {
         self.write_u8(RET);
     }
@@ -589,8 +635,12 @@ impl Assembler {
         self.write_u8(RETV);
     }
 
-    pub fn setv(&mut self, value_count: u16) {
+    pub fn setv(&mut self) {
         self.write_u8(SETV);
+    }
+
+    pub fn setvi(&mut self, value_count: u16) {
+        self.write_u8(SETVI);
         self.write_u16(value_count);
     }
 
@@ -757,7 +807,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
             p += 1;
             continue;
         }
-        if insts[p] == B || insts[p] == BIF {
+        if has_label(insts[p]) {
             if p + 5 > insts.len() {
                 return Err(fmt::Error);
             }
@@ -806,6 +856,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
         match insts[p] {
             ADD
             | AND
+            | CALLHANDLER
             | CALLVALUEV
             | CONSTZERO
             | DIV
@@ -814,11 +865,13 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
             | EQ
             | FLOORDIV
             | GE
+            | GETV
             | GT
             | LT
             | LE
             | LEN
             | LOAD
+            | LOADERROR
             | LOADINDEXPROPORNIL
             | LOADNEXTINDEXPROPORNIL
             | LOADPROTOTYPE
@@ -828,6 +881,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
             | NANBOX
             | NE
             | NEG
+            | NEXTHANDLER
             | NOP
             | NOT
             | NOTB
@@ -837,6 +891,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
             | PROTOTYPE
             | RET
             | RETV
+            | SETV
             | SHL
             | SHR
             | STORE
@@ -850,7 +905,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
             | XOR => {
                 f.write_str("\n")?;
             }
-            B | BIF => {
+            B | BIF | PUSHHANDLER => {
                 if p + 5 > insts.len() {
                     return Err(fmt::Error);
                 }
@@ -873,7 +928,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let arg_count = u16::from_le_bytes(insts[p + 5..p + 7].try_into().unwrap());
                 write!(f, " {} {}\n", name_index, arg_count)?;
             }
-            ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETV | STOREARG
+            ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETVI | STOREARG
             | STORELOCAL => {
                 if p + 3 > insts.len() {
                     return Err(fmt::Error);

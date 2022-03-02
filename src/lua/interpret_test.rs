@@ -110,7 +110,7 @@ fn try_compile_and_interpret(path: &Path) -> Result<(), ErrorList> {
                 });
             }
             None => {
-                check_result(&path, chunk_data, Err(ErrorList::from(errors)))?;
+                check_result(&chunk_path, chunk_data, Err(ErrorList::from(errors)))?;
             }
         };
 

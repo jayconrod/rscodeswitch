@@ -80,7 +80,9 @@ pub enum Stmt<'src> {
     Repeat {
         body: Vec<Stmt<'src>>,
         cond: Expr<'src>,
-        scope: ScopeID,
+        body_scope: ScopeID,
+        cond_scope: ScopeID,
+        cond_var: VarID,
         break_label: LabelID,
         pos: Pos,
     },
@@ -150,6 +152,7 @@ pub enum Stmt<'src> {
     Call(Call<'src>),
     Return {
         exprs: Vec<Expr<'src>>,
+        ret: ReturnID,
         pos: Pos,
     },
 }
@@ -650,6 +653,9 @@ pub struct LabelID(pub usize);
 #[derive(Clone, Copy, Debug)]
 pub struct LabelUseID(pub usize);
 
+#[derive(Clone, Copy, Debug)]
+pub struct ReturnID(pub usize);
+
 pub fn parse<'src>(tokens: &[Token<'src>], lmap: &LineMap, errors: &mut Vec<Error>) -> Chunk<'src> {
     let mut parser = Parser::new(tokens, lmap);
     let chunk = parser.parse_chunk();
@@ -666,6 +672,7 @@ struct Parser<'src, 'tok, 'lm> {
     next_var_use: usize,
     next_label: usize,
     next_label_use: usize,
+    next_return: usize,
     errors: Vec<Error>,
 }
 
@@ -680,6 +687,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             next_var_use: 0,
             next_label: 0,
             next_label_use: 0,
+            next_return: 0,
             errors: Vec::new(),
         }
     }
@@ -903,7 +911,9 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     }
 
     fn parse_repeat_stmt(&mut self) -> Result<Stmt<'src>, Error> {
-        let scope = self.next_scope();
+        let cond_scope = self.next_scope();
+        let body_scope = self.next_scope();
+        let cond_var = self.next_var();
         let break_label = self.next_label();
         let begin = self.expect(Kind::Repeat)?.pos();
         let body = self.parse_block_stmts(Kind::Until);
@@ -913,7 +923,9 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         Ok(Stmt::Repeat {
             body,
             cond,
-            scope,
+            cond_scope,
+            body_scope,
+            cond_var,
             break_label,
             pos,
         })
@@ -1075,6 +1087,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     }
 
     fn parse_return_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let ret = self.next_return();
         let begin = self.expect(Kind::Return)?.pos();
         let exprs = self.parse_expr_list()?;
         let end = if self.peek() == Kind::Semi {
@@ -1085,7 +1098,7 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
             begin
         };
         let pos = begin.combine(end);
-        Ok(Stmt::Return { exprs, pos })
+        Ok(Stmt::Return { exprs, ret, pos })
     }
 
     fn parse_expr(&mut self) -> Result<Expr<'src>, Error> {
@@ -1589,6 +1602,12 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
         let id = self.next_label_use;
         self.next_label_use += 1;
         LabelUseID(id)
+    }
+
+    fn next_return(&mut self) -> ReturnID {
+        let id = self.next_return;
+        self.next_return += 1;
+        ReturnID(id)
     }
 }
 

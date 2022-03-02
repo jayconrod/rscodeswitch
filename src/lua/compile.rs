@@ -1,5 +1,5 @@
 use crate::inst::{self, Assembler, Label};
-use crate::lua::scope::{self, CaptureFrom, ScopeSet, Var, VarKind, VarUse};
+use crate::lua::scope::{self, Attr, CaptureFrom, ScopeSet, Var, VarKind, VarUse};
 use crate::lua::syntax::{
     self, Call, Chunk, Expr, LValue, LabelID, Param, ScopeID, Stmt, TableField, VarID,
 };
@@ -66,6 +66,7 @@ struct Compiler<'src, 'ss, 'lm, 'err> {
     asm: Assembler,
     param_count: u16,
     is_variadic: bool,
+    block_stack: Vec<Block>,
     func_stack: Vec<FuncState>,
     errors: &'err mut Vec<Error>,
 }
@@ -95,14 +96,14 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             asm: Assembler::new(),
             param_count: 0,
             is_variadic: false,
+            block_stack: Vec::new(),
             func_stack: Vec::new(),
             errors,
         }
     }
 
     fn finish(mut self) -> Option<Package> {
-        self.asm.mode(inst::MODE_LUA);
-        self.asm.setv(0);
+        self.asm.setvi(0);
         self.asm.mode(inst::MODE_LUA);
         self.asm.retv();
         match self.asm.finish() {
@@ -158,9 +159,11 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     }
 
     fn compile_chunk(&mut self, chunk: &Chunk<'src>) {
+        self.enter_block(chunk.chunk_scope, chunk.pos());
         for stmt in &chunk.stmts {
             self.compile_stmt(stmt);
         }
+        self.leave_block();
     }
 
     fn compile_stmt(&mut self, stmt: &Stmt<'src>) {
@@ -179,7 +182,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // Compile the expressions on the right, then adjust the number
                 // of values to match the number of expressions on the left.
                 let len_known = self.compile_expr_list(right, 0);
-                self.compile_adjust(right.len(), len_known, left.len(), stmt.pos());
+                self.compile_adjust(len_known, left.len(), stmt.pos());
 
                 // Perform the actual assignment, right to left.
                 // Again, the reference doesn't say what should happen here if
@@ -193,18 +196,70 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 left, right, pos, ..
             } => {
                 let len_known = self.compile_expr_list(right, 0);
-                self.compile_adjust(right.len(), len_known, left.len(), *pos);
+                self.compile_adjust(len_known, left.len(), *pos);
 
                 for l in left {
                     let var = &self.scope_set.vars[l.var.0];
                     self.compile_define_from_list(var);
+                    if var.attr == Attr::Close {
+                        // Check that the variable is nil, false, or has a
+                        // non-nil metatable field named "__close".
+                        self.compile_load_var(var, None);
+                        self.asm.dup();
+                        self.asm.mode(inst::MODE_LUA);
+                        self.asm.not();
+                        let mut is_nil_label = Label::new();
+                        self.asm.mode(inst::MODE_LUA);
+                        self.asm.bif(&mut is_nil_label);
+                        self.asm.mode(inst::MODE_LUA);
+                        self.asm.loadprototype();
+                        self.asm.dup();
+                        self.asm.constzero();
+                        self.asm.mode(inst::MODE_PTR);
+                        self.asm.nanbox();
+                        self.asm.eq();
+                        let mut close_missing_label = Label::new();
+                        self.asm.bif(&mut close_missing_label);
+                        let close_si = self.ensure_string(b"__close", *pos);
+                        self.asm.mode(inst::MODE_LUA);
+                        self.asm.loadnamedpropornil(close_si);
+                        self.asm.constzero();
+                        self.asm.mode(inst::MODE_PTR);
+                        self.asm.nanbox();
+                        self.asm.ne();
+                        let mut close_ok_label = Label::new();
+                        self.asm.bif(&mut close_ok_label);
+                        self.asm.bind(&mut close_missing_label);
+                        let error_msg = format!(
+                            "variable '{}' has close attribute but is not closable",
+                            l.name.text
+                        );
+                        let error_si = self.ensure_string(error_msg.as_bytes(), *pos);
+                        self.asm.string(error_si);
+                        self.asm.mode(inst::MODE_STRING);
+                        self.asm.panic(0);
+                        self.asm.bind(&mut is_nil_label);
+                        self.asm.pop();
+                        self.asm.bind(&mut close_ok_label);
+
+                        // Push the address of the handler to ensure the close
+                        // method is called later.
+                        let mut handler_label = Label::new();
+                        self.asm.pushhandler(&mut handler_label);
+                        let block = self.block_stack.last_mut().unwrap();
+                        block.closes.push(Close {
+                            vid: l.var,
+                            label: handler_label,
+                        });
+                    }
                 }
             }
             Stmt::Do { stmts, scope, .. } => {
+                self.enter_block(*scope, stmt.pos());
                 for stmt in stmts {
                     self.compile_stmt(stmt);
                 }
-                self.pop_block(*scope);
+                self.leave_block();
             }
             Stmt::If {
                 cond_stmts,
@@ -239,10 +294,11 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let mut body_label = Label::new();
                 self.asm.b(&mut cond_label);
                 self.asm.bind(&mut body_label);
+                self.enter_block(*scope, stmt.pos());
                 for stmt in body {
                     self.compile_stmt(stmt);
                 }
-                self.pop_block(*scope);
+                self.leave_block();
                 self.asm.bind(&mut cond_label);
                 self.compile_expr(cond);
                 self.asm.mode(inst::MODE_LUA);
@@ -252,25 +308,41 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Stmt::Repeat {
                 body,
                 cond,
+                cond_scope,
+                body_scope,
+                cond_var: cond_vid,
                 break_label: break_lid,
-                scope,
                 ..
             } => {
+                // Reserve a slot for the hidden condition variable.
+                // We evaluate the condition in the body scope, but we'll likely
+                // need to pop a bunch of stuff from the body before branching,
+                // so it's nice to be able to put the condition in a local
+                // instead of a temporary.
+                self.enter_block(*cond_scope, stmt.pos());
+                let cond_var = &self.scope_set.vars[cond_vid.0];
+                self.asm.constzero();
+                self.asm.nanbox();
+
+                // Compile the body.
                 let mut body_label = Label::new();
                 self.asm.bind(&mut body_label);
+                self.enter_block(*body_scope, stmt.pos());
                 for stmt in body {
                     self.compile_stmt(stmt);
                 }
+
+                // Compile the condition in the scope of the body.
+                // Store the condtion, leave the body scope, then branch.
                 self.compile_expr(cond);
                 self.asm.mode(inst::MODE_LUA);
                 self.asm.not();
-                let slot_count = self.scope_set.scopes[scope.0].slot_count;
-                for _ in 0..slot_count {
-                    self.asm.swap();
-                    self.asm.pop();
-                }
+                self.compile_store_var(cond_var, None);
+                self.leave_block();
+                self.asm.dup();
                 self.asm.mode(inst::MODE_LUA);
                 self.asm.bif(&mut body_label);
+                self.leave_block();
                 self.bind_named_label(*break_lid);
             }
             Stmt::For {
@@ -297,6 +369,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // Evaluate the init, limit, and step expressions.
                 // Check that step is a non-negative number.
                 // Assign to hidden variables.
+                self.enter_block(*ind_scope, stmt.pos());
                 self.compile_define_prepare(ind_var);
                 self.compile_expr(init);
                 self.compile_define(ind_var);
@@ -416,13 +489,14 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // bottom, so the body comes first. We copy the hidden induction
                 // variable to the visible variable first.
                 self.asm.bind(&mut body_label);
+                self.enter_block(*body_scope, stmt.pos());
                 self.compile_define_prepare(body_var);
                 self.compile_load_var(ind_var, None);
                 self.compile_define(body_var);
                 for stmt in body {
                     self.compile_stmt(stmt);
                 }
-                self.pop_block(*body_scope);
+                self.leave_block();
 
                 // Increment the induction variable by step.
                 // If step is an integer, check that the induction variable
@@ -479,7 +553,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
                 // End of the loop.
                 self.bind_named_label(*break_lid);
-                self.pop_block(*ind_scope);
+                self.leave_block();
             }
             Stmt::ForIn {
                 names,
@@ -513,24 +587,27 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         && close_var.kind == VarKind::Local
                         && close_var.slot == iter_var.slot + 3
                 );
+                self.enter_block(*ind_scope, stmt.pos());
                 let len_known = self.compile_expr_list(exprs, 0);
                 let exprs_pos = exprs
                     .first()
                     .unwrap()
                     .pos()
                     .combine(exprs.last().unwrap().pos());
-                self.compile_adjust(exprs.len(), len_known, 4, exprs_pos);
+                self.compile_adjust(len_known, 4, exprs_pos);
                 let mut cond_label = Label::new();
                 self.asm.b(&mut cond_label);
 
                 // Loop body.
                 let mut body_label = Label::new();
                 self.asm.bind(&mut body_label);
+                self.enter_block(*named_scope, stmt.pos());
+                self.enter_block(*body_scope, stmt.pos());
                 for stmt in body {
                     self.compile_stmt(stmt);
                 }
-                self.pop_block(*body_scope);
-                self.pop_block(*named_scope);
+                self.leave_block(); // body
+                self.leave_block(); // named
 
                 // Loop condition.
                 // Call the iterator function with the control and state
@@ -538,6 +615,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // copy the first result back to control. If control is nil,
                 // end the loop.
                 self.asm.bind(&mut cond_label);
+                self.enter_block(*named_scope, stmt.pos());
                 self.compile_load_var(iter_var, None);
                 self.compile_load_var(state_var, None);
                 self.compile_load_var(control_var, None);
@@ -548,7 +626,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     .unwrap()
                     .pos()
                     .combine(names.last().unwrap().pos());
-                self.compile_adjust(1, ExprListLen::Dynamic, names.len(), names_pos);
+                self.compile_adjust(ExprListLen::Dynamic, names.len(), names_pos);
                 for vid in vids {
                     let var = &self.scope_set.vars[vid.0];
                     self.compile_define_from_list(var);
@@ -563,21 +641,20 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm.bif(&mut body_label);
 
                 // End of the loop.
+                self.leave_block(); // named
+                self.leave_block(); // ind
                 self.bind_named_label(*break_lid);
-                self.pop_block(*named_scope);
-                self.pop_block(*ind_scope);
             }
             Stmt::Break {
                 label_use: luid, ..
             } => {
                 let label_use = &self.scope_set.label_uses[luid.0];
                 if let Some(lid) = label_use.label {
-                    let label = &self.scope_set.labels[lid.0];
-                    for _ in 0..(label_use.slot_count - label.slot_count) {
-                        self.asm.pop();
-                    }
-                    self.ensure_label(lid);
-                    self.asm.b(&mut self.named_labels[lid.0]);
+                    self.compile_pop_slots_and_handlers(
+                        label_use.slot_count,
+                        label_use.handler_count,
+                    );
+                    self.b_named_label(lid);
                 }
             }
             Stmt::Label { label: lid, .. } => {
@@ -588,14 +665,11 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             } => {
                 let label_use = &self.scope_set.label_uses[luid.0];
                 if let Some(lid) = label_use.label {
-                    let label = &self.scope_set.labels[lid.0];
-                    if label.slot_count < label_use.slot_count {
-                        for _ in 0..(label_use.slot_count - label.slot_count) {
-                            self.asm.pop();
-                        }
-                    }
-                    self.ensure_label(lid);
-                    self.asm.b(&mut self.named_labels[lid.0]);
+                    self.compile_pop_slots_and_handlers(
+                        label_use.slot_count,
+                        label_use.handler_count,
+                    );
+                    self.b_named_label(lid);
                 }
             }
             Stmt::Function {
@@ -603,6 +677,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 is_variadic,
                 parameters,
                 param_scope,
+                body_scope,
                 body,
                 pos,
                 ..
@@ -659,6 +734,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     parameters,
                     *is_variadic,
                     body,
+                    *param_scope,
+                    *body_scope,
                     *pos,
                 );
                 self.compile_closure(fn_index, *param_scope, *pos);
@@ -687,6 +764,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 name: name_tok,
                 parameters,
                 param_scope,
+                body_scope,
                 is_variadic,
                 body,
                 var: vid,
@@ -696,36 +774,51 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let var = &self.scope_set.vars[vid.0];
                 self.compile_define_prepare(var);
                 let name = String::from(name_tok.text);
-                let fn_index =
-                    self.compile_function(name, None, parameters, *is_variadic, body, *pos);
+                let fn_index = self.compile_function(
+                    name,
+                    None,
+                    parameters,
+                    *is_variadic,
+                    body,
+                    *param_scope,
+                    *body_scope,
+                    *pos,
+                );
                 self.compile_closure(fn_index, *param_scope, *pos);
                 self.compile_define(var);
             }
             Stmt::Call(call) => {
                 self.compile_call(call, ResultMode::Drop);
             }
-            Stmt::Return { exprs, pos, .. } => {
+            Stmt::Return {
+                exprs, ret: rid, ..
+            } => {
                 // TODO: support tail calls.
                 // TODO: disable code generation after return.
                 // Compile the expressions to return. If the last expression is
                 // a call or '...', we don't statically know the number of
                 // values being returned, but compile_expr_list will set the
-                // vc register for us. If we do statically know, we need to
+                // vc register for us. If we do statically know, we'll need to
                 // use setv explicitly. In either case, vc is set to the number
                 // of returned values, so the caller knows what to do with them.
-                match self.compile_expr_list(exprs, 0) {
-                    ExprListLen::Static => {
-                        let n = match exprs.len().try_into() {
-                            Ok(n) => n,
-                            Err(_) => {
-                                self.error(*pos, String::from("too many return values"));
-                                !0
-                            }
-                        };
-                        self.asm.mode(inst::MODE_LUA);
-                        self.asm.setv(n);
+                let len_known = self.compile_expr_list(exprs, 0);
+
+                // If there are error handlers introduced by "close" variables,
+                // run them now. Save vc if needed.
+                let ret = &self.scope_set.returns[rid.0];
+                if ret.handler_count > 0 {
+                    if len_known == ExprListLen::Dynamic {
+                        self.asm.getv();
                     }
-                    ExprListLen::Dynamic => (),
+                    for _ in 0..ret.handler_count {
+                        self.asm.callhandler();
+                    }
+                    if len_known == ExprListLen::Dynamic {
+                        self.asm.setv();
+                    }
+                }
+                if let ExprListLen::Static(n) = len_known {
+                    self.asm.setvi(n);
                 }
                 self.asm.mode(inst::MODE_LUA);
                 self.asm.retv();
@@ -852,14 +945,23 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             Expr::Function {
                 parameters,
                 param_scope,
+                body_scope,
                 is_variadic,
                 body,
                 pos,
                 ..
             } => {
                 let name = String::from("·anonymous");
-                let fn_index =
-                    self.compile_function(name, None, parameters, *is_variadic, body, *pos);
+                let fn_index = self.compile_function(
+                    name,
+                    None,
+                    parameters,
+                    *is_variadic,
+                    body,
+                    *param_scope,
+                    *body_scope,
+                    *pos,
+                );
                 self.compile_closure(fn_index, *param_scope, *pos);
             }
             Expr::Call(call) => {
@@ -947,7 +1049,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.compile_expr(expr);
             }
         }
-        let static_expr_count = match (exprs.len() + extra).try_into() {
+        let static_expr_count: u16 = match (exprs.len() + extra).try_into() {
             Ok(n) => n,
             Err(_) => {
                 self.error(
@@ -979,9 +1081,9 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             }
             Some(expr) => {
                 self.compile_expr(expr);
-                ExprListLen::Static
+                ExprListLen::Static(static_expr_count)
             }
-            None => ExprListLen::Static,
+            None => ExprListLen::Static(static_expr_count),
         }
     }
 
@@ -995,30 +1097,30 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     /// the last expression is a function call, compile_adjust emits adjustv,
     /// which pushes or pops based on the vc register, which compile_expr_list
     /// should have set.
-    fn compile_adjust(&mut self, expr_count: usize, len_known: ExprListLen, want: usize, pos: Pos) {
+    fn compile_adjust(&mut self, len_known: ExprListLen, want: usize, pos: Pos) {
+        let want_narrow: u16 = match want.try_into() {
+            Ok(n) => n,
+            _ => {
+                self.error(pos, String::from("too many expressions"));
+                !0
+            }
+        };
         match len_known {
-            ExprListLen::Static => {
-                if want > expr_count {
+            ExprListLen::Static(expr_count) => {
+                if want_narrow > expr_count {
                     self.asm.constzero();
                     self.asm.mode(inst::MODE_PTR);
                     self.asm.nanbox();
-                    for _ in 0..(want - expr_count - 1) {
+                    for _ in 0..(want_narrow - expr_count - 1) {
                         self.asm.dup();
                     }
                 } else {
-                    for _ in 0..(expr_count - want) {
+                    for _ in 0..(expr_count - want_narrow) {
                         self.asm.pop();
                     }
                 }
             }
             ExprListLen::Dynamic => {
-                let want_narrow = match want.try_into() {
-                    Ok(n) => n,
-                    Err(_) => {
-                        self.error(pos, String::from("too many expressions"));
-                        !0
-                    }
-                };
                 self.asm.mode(inst::MODE_LUA);
                 self.asm.adjustv(want_narrow);
             }
@@ -1044,11 +1146,14 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         parameters: &[Param<'src>],
         is_variadic: bool,
         body: &[Stmt<'src>],
+        param_sid: ScopeID,
+        body_sid: ScopeID,
         pos: Pos,
     ) -> u32 {
         // Start compiling the function.
         self.push_func(parameters.len().try_into().unwrap(), is_variadic);
         self.line(pos);
+        self.enter_block(param_sid, pos);
 
         // Move captured parameters into cells.
         let mut cell_slot = 0;
@@ -1079,14 +1184,16 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         }
 
         // Compile the function body.
+        self.enter_block(body_sid, pos);
         for stmt in body {
             self.compile_stmt(stmt);
         }
 
         // If the function didn't end with a return statement,
         // return nothing.
-        self.asm.mode(inst::MODE_LUA);
-        self.asm.setv(0);
+        self.leave_block();
+        self.leave_block();
+        self.asm.setvi(0);
         self.asm.mode(inst::MODE_LUA);
         self.asm.retv();
 
@@ -1164,14 +1271,6 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     }
 
     fn compile_call(&mut self, call: &Call<'src>, rmode: ResultMode) {
-        let static_arg_count = match call.arguments.len().try_into() {
-            Ok(i) if call.method_name.is_some() => i + 1,
-            Ok(i) => i,
-            Err(_) => {
-                self.error(call.pos, String::from("too many arguments"));
-                !0
-            }
-        };
         self.compile_expr(&call.callee);
         let extra = if call.method_name.is_some() {
             // Lua doesn't have methods. A call like a:b(c) just copies the
@@ -1186,12 +1285,12 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         if let Some(name) = call.method_name {
             let si = self.ensure_string(name.text.as_bytes(), name.pos());
             match arg_len {
-                ExprListLen::Static => self.asm.callnamedprop(si, static_arg_count),
+                ExprListLen::Static(n) => self.asm.callnamedprop(si, n),
                 ExprListLen::Dynamic => self.asm.callnamedpropv(si),
             }
         } else {
             match arg_len {
-                ExprListLen::Static => self.asm.callvalue(static_arg_count),
+                ExprListLen::Static(n) => self.asm.callvalue(n),
                 ExprListLen::Dynamic => self.asm.callvaluev(),
             }
         }
@@ -1408,10 +1507,62 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         self.asm.b(&mut self.named_labels[lid.0]);
     }
 
-    fn pop_block(&mut self, sid: ScopeID) {
-        // TODO: handle "close" variables.
-        let scope = &self.scope_set.scopes[sid.0];
-        for _ in 0..scope.slot_count {
+    fn enter_block(&mut self, sid: ScopeID, pos: Pos) {
+        self.block_stack.push(Block {
+            sid,
+            closes: Vec::new(),
+            pos,
+        })
+    }
+
+    /// Emits code for leaving a local block. In most cases, this just pops
+    /// slots for local variables, but for "close" variables, it also calls and
+    /// pops error handlers that call their __close metamethods. goto, return,
+    /// and break statements do some of this, too, but the actual handlers
+    /// are only emitted once, here.
+    fn leave_block(&mut self) {
+        let mut block = self.block_stack.pop().unwrap();
+        let scope = &self.scope_set.scopes[block.sid.0];
+        assert_eq!(block.closes.len(), scope.handler_count());
+        self.compile_pop_slots_and_handlers(scope.slot_count(), scope.handler_count());
+        if !block.closes.is_empty() {
+            let mut after_handlers_label = Label::new();
+            self.asm.b(&mut after_handlers_label);
+            for close in block.closes.iter_mut().rev() {
+                self.asm.bind(&mut close.label);
+                let var = &self.scope_set.vars[close.vid.0];
+                self.compile_load_var(var, None);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.not();
+                let mut after_close_label = Label::new();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.bif(&mut after_close_label);
+                self.compile_load_var(var, None);
+                self.asm.dup();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.loadprototype();
+                let close_si = self.ensure_string(b"__close", block.pos);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.loadnamedprop(close_si);
+                self.asm.swap();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.loaderror();
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.callvalue(2);
+                self.asm.mode(inst::MODE_LUA);
+                self.asm.adjustv(0);
+                self.asm.bind(&mut after_close_label);
+                self.asm.nexthandler();
+            }
+            self.asm.bind(&mut after_handlers_label);
+        }
+    }
+
+    fn compile_pop_slots_and_handlers(&mut self, slot_count: usize, handler_count: usize) {
+        for _ in 0..handler_count {
+            self.asm.callhandler();
+        }
+        for _ in 0..slot_count {
             self.asm.pop();
         }
     }
@@ -1468,7 +1619,19 @@ enum ResultMode {
 
 /// Indicates whether an expression list produces a statically-known number
 /// of values.
+#[derive(Eq, PartialEq)]
 enum ExprListLen {
-    Static,
+    Static(u16),
     Dynamic,
+}
+
+struct Block {
+    sid: ScopeID,
+    closes: Vec<Close>,
+    pos: Pos,
+}
+
+struct Close {
+    vid: VarID,
+    label: Label,
 }

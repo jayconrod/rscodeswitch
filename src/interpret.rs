@@ -26,6 +26,14 @@ const FRAME_IP_OFFSET: usize = 8;
 const FRAME_CP_OFFSET: usize = 16;
 const FRAME_FUNC_OFFSET: usize = 24;
 
+// Error handlers may be pushed on the stack. Each error handler comprises:
+//
+// - Pointer to error handling code within the same function.
+// - Pointer to next error handler on the stack or null.
+const HANDLER_SIZE: usize = 16;
+const HANDLER_HP_OFFSET: usize = 0;
+const HANDLER_IP_OFFSET: usize = 8;
+
 pub struct Env<'r, 'w> {
     pub r: &'r mut dyn Read,
     pub w: &'w mut dyn Write,
@@ -66,6 +74,15 @@ pub struct Interpreter<'env, 'r, 'w, 'pl> {
 
     /// Instruction pointer. Points to the instruction being executed.
     ip: *const u8,
+
+    /// Handler pointer. Acts as the head of a linked list of error handlers on
+    /// the stack. Each error handler comprises a pointer to the next handler,
+    /// and a pointer to code that should be executed.
+    hp: usize,
+
+    /// Error value. When an error occurs, this value is set, and error handlers
+    /// (if any) are executed.
+    error: Option<Error>,
 }
 
 impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
@@ -86,6 +103,8 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
             sp,
             fp,
             ip: 0 as *const u8,
+            hp: 0,
+            error: None,
         }
     }
 
@@ -124,6 +143,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         let mut fp;
         let mut ip = &func.insts[0] as *const u8;
         let mut ret_sp; // used to return at the end
+        let mut hp = 0;
 
         // Construct the stack frame.
         for i in 0..args.len() {
@@ -147,6 +167,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 self.sp = sp;
                 self.fp = fp;
                 self.ip = ip;
+                self.hp = hp;
             }};
         }
 
@@ -162,16 +183,28 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     sp = self.sp;
                     fp = self.fp;
                     ip = self.ip;
+                    hp = self.hp;
                 }
             };
         }
 
-        // return_errorf constructs and returns an error immediately.
-        macro_rules! return_errorf {
+        // unwindw_errorf constructs an error and begins unwinding the stack.
+        // If there's an error handler (pushhandler), the stack will be unwound
+        // to that point, and it will be executed next. Otherwise, the
+        // interpreter's state is cleared, and the error is returned
+        // immediately.
+        macro_rules! unwind_errorf {
             ($($x:expr),*) => {{
-                let message = format!($($x,)*);
                 save_regs!();
-                return Err(self.error(message))
+                let message = format!($($x,)*);
+                let error = self.error(message);
+                match self.unwind_with_error(error) {
+                    Ok(()) => {
+                        load_regs!();
+                        continue;
+                    },
+                    Err(err) => return Err(err),
+                };
             }};
         }
 
@@ -327,7 +360,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 let v = if let Some(c) = l.partial_cmp(&r) {
                     NanBox::from(c.$ordmethod())
                 } else {
-                    return_errorf!("can't compare values: {:?} and {:?}", l, r);
+                    unwind_errorf!("can't compare values: {:?} and {:?}", l, r);
                 };
                 push!(v.0)
             }};
@@ -365,7 +398,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 } else if let (Ok(lf), Ok(rf)) = (l.as_f64(), r.as_f64()) {
                     NanBox::from(lf $op rf)
                 } else {
-                    return_errorf!("arithmetic operands must both be numbers: {:?} and {:?}", l, r)
+                    unwind_errorf!("arithmetic operands must both be numbers: {:?} and {:?}", l, r)
                 };
                 push!(v.0);
             }};
@@ -397,7 +430,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 } else if let Ok(f) = o.as_f64() {
                     NanBox::from($op f)
                 } else {
-                    return_errorf!("arithmetic operand must be number: {:?}", o)
+                    unwind_errorf!("arithmetic operand must be number: {:?}", o)
                 };
                 push!(v.0);
             }};
@@ -475,9 +508,9 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 if let Ok(i) = v.as_i64() {
                     i
                 } else if v.is_number() {
-                    return_errorf!("number has no integer representation")
+                    unwind_errorf!("number has no integer representation")
                 } else {
-                    return_errorf!("cannot perform numeric operation on {:?} value", v)
+                    unwind_errorf!("cannot perform numeric operation on {:?} value", v)
                 }
             }};
         }
@@ -497,7 +530,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let s = f.to_string();
                     data::String::from_bytes(s.as_bytes()).as_ref().unwrap()
                 } else {
-                    return_errorf!("can't convert concatenation operand to string: {:?}", v)
+                    unwind_errorf!("can't convert concatenation operand to string: {:?}", v)
                 }
             }};
         }
@@ -550,7 +583,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 // arguments.
                 let mut total_arg_count = arg_count + callee.bound_arg_count as usize;
                 if total_arg_count > u16::MAX as usize {
-                    return_errorf!("too many arguments");
+                    unwind_errorf!("too many arguments");
                 }
                 let param_count = callee_func.param_types.len();
                 if total_arg_count < param_count {
@@ -653,7 +686,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     ) {
                         NanBox::from(ls + rs)
                     } else {
-                        return_errorf!(
+                        unwind_errorf!(
                             "arithmetic operands must both be numbers: {:?} and {:?}",
                             l,
                             r
@@ -711,6 +744,18 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     // fall through
                     inst::size(inst::BIF)
                 }
+                (inst::CALLHANDLER, inst::MODE_I64) => {
+                    // Pop and execute an error handler but prepare to continue
+                    // normal execution afterward. Used in the non-error case
+                    // for constructs like "finally" where code must be run
+                    // whether there's an error or not.
+                    push!(ip as u64 + inst::size(inst::CALLHANDLER) as u64);
+                    push!(vc as u64);
+                    ip = *((hp + HANDLER_IP_OFFSET) as *const *const u8);
+                    hp = *((hp + HANDLER_HP_OFFSET) as *const usize);
+                    debug_assert!(hp < fp);
+                    continue;
+                }
                 (inst::CALLNAMEDPROP, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
@@ -720,15 +765,15 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let raw_receiver = NanBox(*(receiver_addr as *const u64));
                     let receiver: &Object = match raw_receiver.try_into() {
                         Ok(o) => o,
-                        _ => return_errorf!("receiver is not an object: {:?}", raw_receiver),
+                        _ => unwind_errorf!("receiver is not an object: {:?}", raw_receiver),
                     };
                     let prop = match receiver.lookup_property(key) {
                         Some(p) => p,
-                        _ => return_errorf!("property {} is not defined", name),
+                        _ => unwind_errorf!("property {} is not defined", name),
                     };
                     let callee: &Closure = match prop.value.try_into() {
                         Ok(c) => c,
-                        _ => return_errorf!("property {} is not a function", name),
+                        _ => unwind_errorf!("property {} is not a function", name),
                     };
                     let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
                         // If this is not a method but a regular field that
@@ -755,15 +800,15 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let raw_receiver = NanBox(*(receiver_addr as *const u64));
                     let receiver: &Object = match raw_receiver.try_into() {
                         Ok(o) => o,
-                        _ => return_errorf!("receiver is not an object: {:?}", raw_receiver),
+                        _ => unwind_errorf!("receiver is not an object: {:?}", raw_receiver),
                     };
                     let prop = match receiver.lookup_property(key) {
                         Some(p) => p,
-                        _ => return_errorf!("property {} is not defined", name),
+                        _ => unwind_errorf!("property {} is not defined", name),
                     };
                     let callee: &Closure = match prop.value.try_into() {
                         Ok(c) => c,
-                        _ => return_errorf!("property {} is not a function", name),
+                        _ => unwind_errorf!("property {} is not a function", name),
                     };
                     let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
                         // If this is not a method but a regular field that
@@ -791,15 +836,15 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let prototype = NanBox(*(prototype_addr as *const u64));
                     let prototype_obj: &Object = match prototype.try_into() {
                         Ok(p) => p,
-                        _ => return_errorf!("prototype is not an object: {:?}", prototype),
+                        _ => unwind_errorf!("prototype is not an object: {:?}", prototype),
                     };
                     let prop = match prototype_obj.lookup_property(key) {
                         Some(p) => p,
-                        _ => return_errorf!("property {} is not defined", key),
+                        _ => unwind_errorf!("property {} is not defined", key),
                     };
                     let callee: &Closure = match prop.value.try_into() {
                         Ok(c) => c,
-                        _ => return_errorf!("property {} is not a function", name),
+                        _ => unwind_errorf!("property {} is not a function", name),
                     };
                     let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
                         // Not a method but a regular field that happens to
@@ -821,7 +866,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let raw_callee = NanBox(*(callee_addr as *const u64));
                     let callee = match raw_callee.try_into() {
                         Ok(c) => c,
-                        _ => return_errorf!("called value is not a function: {:?}", raw_callee),
+                        _ => unwind_errorf!("called value is not a function: {:?}", raw_callee),
                     };
                     // Remove the callee from the stack before the call.
                     // CALLNAMEDPROP does this too when the called property
@@ -836,7 +881,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let raw_callee = NanBox(*(callee_addr as *const u64));
                     let callee = match raw_callee.try_into() {
                         Ok(c) => c,
-                        _ => return_errorf!("called value is not a function: {:?}", raw_callee),
+                        _ => unwind_errorf!("called value is not a function: {:?}", raw_callee),
                     };
                     shift_args!(vc, 1);
                     lua_call_closure!(callee, vc);
@@ -904,7 +949,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let v = if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
                         NanBox::from(lf / rf)
                     } else {
-                        return_errorf!(
+                        unwind_errorf!(
                             "arithmetic operands must both be numbers: {:?} and {:?}",
                             l,
                             r
@@ -940,7 +985,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let v = if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
                         NanBox::from(f64::powf(lf, rf))
                     } else {
-                        return_errorf!(
+                        unwind_errorf!(
                             "arithmetic operands must both be numbers: {:?} and {:?}",
                             l,
                             r
@@ -957,7 +1002,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     } else if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
                         NanBox::from(lf.floor() / rf.floor())
                     } else {
-                        return_errorf!(
+                        unwind_errorf!(
                             "arithmetic operands must both be numbers: {:?} and {:?}",
                             l,
                             r
@@ -1015,6 +1060,10 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 (inst::GE, inst::MODE_LUA) => {
                     binop_cmp!(is_ge, lua);
                     inst::size(inst::GE)
+                }
+                (inst::GETV, inst::MODE_I64) => {
+                    push!(vc as u64);
+                    inst::size(inst::GETV)
                 }
                 (inst::GT, inst::MODE_I64) => {
                     binop_cmp!(>, i64);
@@ -1130,7 +1179,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                         }
                         n
                     } else {
-                        return_errorf!("value is not an object: {:?}", o);
+                        unwind_errorf!("value is not an object: {:?}", o);
                     };
                     push!(maybe_box_int!(v).0);
                     inst::size(inst::LEN)
@@ -1174,6 +1223,19 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     push!(v);
                     inst::size(inst::LOADARG)
                 }
+                (inst::LOADERROR, inst::MODE_LUA) => {
+                    // Box and push the current error value. Push nil if there
+                    // is no error.
+                    let v = match &self.error {
+                        None => NanBox::from_nil(),
+                        Some(err) => {
+                            let str = data::String::from_bytes(err.to_string().as_bytes());
+                            NanBox::from(str)
+                        }
+                    };
+                    push!(v.0);
+                    inst::size(inst::LOADERROR)
+                }
                 (inst::LOADGLOBAL, inst::MODE_I64) => {
                     let i = read_imm!(u32, 1) as usize;
                     let v = pp.globals[i].value;
@@ -1192,7 +1254,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let raw_receiver = NanBox(pop!());
                     let receiver: &Object = match raw_receiver.try_into() {
                         Ok(o) => o,
-                        _ => return_errorf!("value is not an object: {:?}", raw_receiver),
+                        _ => unwind_errorf!("value is not an object: {:?}", raw_receiver),
                     };
                     let v = match index.try_into() {
                         Err(_) => NanBox::from_nil(),
@@ -1217,11 +1279,11 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let raw_receiver = NanBox(pop!());
                     let receiver: &Object = match raw_receiver.try_into() {
                         Ok(o) => o,
-                        _ => return_errorf!("value is not an object: {:?}", raw_receiver),
+                        _ => unwind_errorf!("value is not an object: {:?}", raw_receiver),
                     };
                     let prop = match receiver.lookup_property(key) {
                         Some(p) => p,
-                        None => return_errorf!("object does not have property {}", key),
+                        None => unwind_errorf!("object does not have property {}", key),
                     };
                     let value = receiver.property_value(prop);
                     push!(value.0);
@@ -1234,7 +1296,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let receiver = NanBox(pop!());
                     let receiver_obj: &Object = match receiver.try_into() {
                         Ok(o) => o,
-                        _ => return_errorf!("value is not an object: {:?}", receiver),
+                        _ => unwind_errorf!("value is not an object: {:?}", receiver),
                     };
                     let value = match receiver_obj.lookup_property(key) {
                         Some(p) => receiver_obj.property_value(p),
@@ -1248,14 +1310,14 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let boxed_receiver = NanBox(pop!());
                     let receiver: &Object = match boxed_receiver.try_into() {
                         Ok(o) => o,
-                        _ => return_errorf!("value is not an object: {:?}", boxed_receiver),
+                        _ => unwind_errorf!("value is not an object: {:?}", boxed_receiver),
                     };
                     let entry_opt = if index.is_nil() {
                         receiver.first_own_property()
                     } else if let Ok(key) = NanBoxKey::try_from(index) {
                         receiver.next_own_property(key)
                     } else {
-                        return_errorf!("index is not a valid key");
+                        unwind_errorf!("index is not a valid key");
                     };
                     let (key, value) = if let Some((key, prop)) = entry_opt {
                         (NanBox::from(key), receiver.property_value(prop))
@@ -1265,7 +1327,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                                 .lookup_own_property(NanBoxKey::try_from(index).unwrap())
                                 .is_none()
                         {
-                            return_errorf!("index is not a key in receiver");
+                            unwind_errorf!("index is not a key in receiver");
                         }
                         (NanBox::from_nil(), NanBox::from_nil())
                     };
@@ -1287,7 +1349,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     } else if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(v) {
                         c.prototype.unwrap()
                     } else {
-                        return_errorf!("value is not an object: {:?}", v)
+                        unwind_errorf!("value is not an object: {:?}", v)
                     };
                     push!(NanBox::from(p).0);
                     inst::size(inst::LOADPROTOTYPE)
@@ -1394,14 +1456,14 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let l = NanBox(pop!());
                     let v = if let (Ok(li), Ok(ri)) = (l.as_i64(), r.as_i64()) {
                         if ri == 0 {
-                            return_errorf!("attempt to perform n%0");
+                            unwind_errorf!("attempt to perform n%0");
                         }
                         let vi = li.wrapping_rem(ri);
                         maybe_box_int!(vi)
                     } else if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
                         NanBox::from(lf.floor() % rf.floor())
                     } else {
-                        return_errorf!(
+                        unwind_errorf!(
                             "arithmetic operands must both be numbers: {:?} and {:?}",
                             l,
                             r
@@ -1499,7 +1561,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 }
                 (inst::NANBOX, inst::MODE_PTR) => {
                     if pop!() != 0 {
-                        return_errorf!("can't box non-zero value as nil");
+                        unwind_errorf!("can't box non-zero value as nil");
                     }
                     push!(NanBox::from_nil().0);
                     inst::size(inst::NANBOX)
@@ -1585,6 +1647,26 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     push!(c as *const Closure as u64);
                     inst::size(inst::NEWCLOSURE)
                 }
+                (inst::NEXTHANDLER, inst::MODE_I64) => {
+                    // Used at the end of an error handler.
+                    // If the handler was started with CALLHANDLER, and there is
+                    // no error, continue after the CALLHANDLER instruction.
+                    // If the handler was started with an error, continue
+                    // unwinding.
+                    vc = pop!() as usize;
+                    ip = pop!() as *const u8;
+                    if ip.is_null() {
+                        save_regs!();
+                        match self.unwind() {
+                            Ok(()) => {
+                                load_regs!();
+                                continue;
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    continue;
+                }
                 (inst::NOP, inst::MODE_I64) => inst::size(inst::NOP),
                 (inst::NOT, inst::MODE_BOOL) => {
                     let o = pop!() as u64;
@@ -1656,6 +1738,14 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     sp += 8;
                     inst::size(inst::POP)
                 }
+                (inst::PUSHHANDLER, inst::MODE_I64) => {
+                    let delta = read_imm!(i32, 1) as usize;
+                    let eip = ((ip as isize) + (delta as isize) + 1) as u64;
+                    push!(eip);
+                    push!(hp as u64);
+                    hp = sp;
+                    inst::size(inst::PUSHHANDLER)
+                }
                 (inst::PROTOTYPE, inst::MODE_I64) => {
                     let c = cp.as_ref().unwrap();
                     let p = c.prototype.unwrap();
@@ -1703,9 +1793,13 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     push!(maybe_box_int!(vi as i64).0);
                     inst::size(inst::SHR)
                 }
-                (inst::SETV, inst::MODE_LUA) => {
-                    vc = read_imm!(u16, 1) as usize;
+                (inst::SETV, inst::MODE_I64) => {
+                    vc = pop!() as usize;
                     inst::size(inst::SETV)
+                }
+                (inst::SETVI, inst::MODE_I64) => {
+                    vc = read_imm!(u16, 1) as usize;
+                    inst::size(inst::SETVI)
                 }
                 (inst::STORE, inst::MODE_I64) => {
                     let v = pop!() as i64;
@@ -1769,11 +1863,11 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let raw_receiver = NanBox(pop!());
                     let receiver: &mut Object = match raw_receiver.try_into() {
                         Ok(o) => o,
-                        _ => return_errorf!("value is not an object: {:?}", raw_receiver),
+                        _ => unwind_errorf!("value is not an object: {:?}", raw_receiver),
                     };
                     let key = match i.try_into() {
                         Ok(key) => key,
-                        Err(_) => return_errorf!("cannot use NaN as table key"),
+                        Err(_) => unwind_errorf!("cannot use NaN as table key"),
                     };
                     receiver.set_property(key, PropertyKind::Field, v);
                     inst::size(inst::STOREINDEXPROP)
@@ -1790,12 +1884,12 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let key = NanBox::from(name).try_into().unwrap();
                     let raw_method = NanBox(pop!());
                     if raw_method.type_tag() != nanbox::TAG_CLOSURE {
-                        return_errorf!("method value is not a function: {:?}", raw_method);
+                        unwind_errorf!("method value is not a function: {:?}", raw_method);
                     }
                     let raw_receiver = NanBox(pop!());
                     let receiver: &mut Object = match raw_receiver.try_into() {
                         Ok(o) => o,
-                        _ => return_errorf!("value is not an object: {:?}", raw_receiver),
+                        _ => unwind_errorf!("value is not an object: {:?}", raw_receiver),
                     };
                     receiver.set_own_property(key, PropertyKind::Method, raw_method);
                     inst::size(inst::STOREMETHOD)
@@ -1808,7 +1902,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let raw_receiver = NanBox(pop!());
                     let receiver: &mut Object = match raw_receiver.try_into() {
                         Ok(o) => o,
-                        _ => return_errorf!("value is not an object: {:?}", raw_receiver),
+                        _ => unwind_errorf!("value is not an object: {:?}", raw_receiver),
                     };
                     receiver.set_property(key, PropertyKind::Field, v);
                     inst::size(inst::STORENAMEDPROP)
@@ -1831,17 +1925,17 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let receiver = match <NanBox as TryInto<&mut Object>>::try_into(boxed_receiver)
                     {
                         Ok(r) => r,
-                        _ => return_errorf!("value is not an object: {:?}", boxed_receiver),
+                        _ => unwind_errorf!("value is not an object: {:?}", boxed_receiver),
                     };
-                    let prototype =
-                        match <NanBox as TryInto<*mut Object>>::try_into(boxed_prototype) {
-                            Ok(p) => p,
-                            _ => return_errorf!(
-                                "prototype is not an object or nil: {:?}",
-                                boxed_prototype
-                            ),
-                        };
-                    receiver.prototype.set_ptr(prototype);
+                    if boxed_prototype.is_nil() {
+                        receiver.prototype.set_ptr(0 as *mut Object);
+                    } else if let Ok(p) =
+                        <NanBox as TryInto<*mut Object>>::try_into(boxed_prototype)
+                    {
+                        receiver.prototype.set_ptr(p);
+                    } else {
+                        unwind_errorf!("prototype is not an object or nil: {:?}", boxed_prototype);
+                    }
                     inst::size(inst::STOREPROTOTYPE)
                 }
                 (inst::STRCAT, inst::MODE_LUA) => {
@@ -1950,7 +2044,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let i = NanBox(pop!());
                     match i.as_f64_imprecise() {
                         Ok(o) => push!(o.to_bits()),
-                        _ => return_errorf!("could not convert value of type {:?} to float", i),
+                        _ => unwind_errorf!("could not convert value of type {:?} to float", i),
                     }
                     inst::size(inst::TOFLOAT)
                 }
@@ -2365,6 +2459,47 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         let raw_rets = self.interpret_closure_rec(closure, &raw_args)?;
         let rets = raw_rets.iter().map(|&n| NanBox(n)).collect();
         Ok(rets)
+    }
+
+    unsafe fn unwind_with_error(&mut self, error: Error) -> Result<(), Error> {
+        // TODO: wrap any previous error. Currently, we ignore it, which makes
+        // double panics confusing to debug.
+        self.error = Some(error);
+        self.unwind()
+    }
+
+    unsafe fn unwind(&mut self) -> Result<(), Error> {
+        if self.hp == 0 {
+            // No error handler. Clear all state, and return the error result.
+            self.func = 0 as *const Function;
+            self.vc = 0;
+            self.cp = 0 as *const Closure;
+            self.sp = self.stack.end();
+            self.fp = self.stack.end();
+            self.ip = 0 as *const u8;
+            let mut error: Option<Error> = None;
+            mem::swap(&mut self.error, &mut error);
+            Err(error.unwrap())
+        } else {
+            // Prepare the interpreter to execute the error handler.
+            // - set error state.
+            // - pop frames until we're in the containing function.
+            // - set sp to where the handler was.
+            // - pop the handler itself from the hp linked list.
+            // - set sp to where the handler was.
+            // - set ip to the handler's code.
+            // - clear vc.
+            while self.fp < self.hp {
+                self.fp = *(self.fp as *const usize);
+            }
+            self.vc = 0;
+            self.func = *((self.fp + FRAME_FUNC_OFFSET) as *const *const Function);
+            self.cp = *((self.fp + FRAME_CP_OFFSET) as *const *const Closure);
+            self.sp = self.hp + HANDLER_SIZE;
+            self.ip = *((self.hp + HANDLER_IP_OFFSET) as *const *const u8);
+            self.hp = *((self.hp + HANDLER_HP_OFFSET) as *const usize);
+            Ok(())
+        }
     }
 
     unsafe fn error(&self, message: String) -> Error {

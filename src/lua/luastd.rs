@@ -39,8 +39,7 @@ pub fn build_std_package() -> Package {
         b.asm.mode(inst::MODE_LUA);
         b.asm.panic(1);
         b.asm.bind(&mut ok_label);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(0);
+        b.asm.setvi(0);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
         b.finish_function("assert", 2, false);
@@ -48,8 +47,7 @@ pub fn build_std_package() -> Package {
 
     // collectgarbage(opt, arg)
     // TODO: implement garbage collection.
-    b.asm.mode(inst::MODE_LUA);
-    b.asm.setv(0);
+    b.asm.setvi(0);
     b.asm.mode(inst::MODE_LUA);
     b.asm.retv();
     b.finish_function("collectgarbage", 2, false);
@@ -57,8 +55,7 @@ pub fn build_std_package() -> Package {
     // dofile
     {
         b.asm.loadarg(0);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(1);
+        b.asm.setvi(1);
         b.asm.mode(inst::MODE_LUA);
         b.asm.sys(inst::SYS_DOFILE);
         b.asm.mode(inst::MODE_LUA);
@@ -98,8 +95,7 @@ pub fn build_std_package() -> Package {
         b.asm.constzero();
         b.asm.mode(inst::MODE_PTR);
         b.asm.nanbox();
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(1);
+        b.asm.setvi(1);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
 
@@ -128,8 +124,7 @@ pub fn build_std_package() -> Package {
         b.asm.bif(&mut return_label);
         b.asm.pop();
         b.asm.bind(&mut return_label);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(1);
+        b.asm.setvi(1);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
         b.finish_function("getmetatable", 1, false);
@@ -157,13 +152,11 @@ pub fn build_std_package() -> Package {
         b.asm.eq();
         let mut end_label = Label::new();
         b.asm.bif(&mut end_label);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(2);
+        b.asm.setvi(2);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
         b.asm.bind(&mut end_label);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(1);
+        b.asm.setvi(1);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
         ipairs_iter_func_index = b.finish_function("ipairs_iter", 2, false);
@@ -176,8 +169,7 @@ pub fn build_std_package() -> Package {
         b.asm.constzero();
         b.asm.mode(inst::MODE_PTR);
         b.asm.nanbox();
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(4);
+        b.asm.setvi(4);
         b.asm.nop(); // DEBUG
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
@@ -190,8 +182,7 @@ pub fn build_std_package() -> Package {
         b.asm.loadarg(1);
         b.asm.loadarg(2);
         b.asm.loadarg(3);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(4);
+        b.asm.setvi(4);
         b.asm.mode(inst::MODE_LUA);
         b.asm.sys(inst::SYS_LOAD);
         b.asm.mode(inst::MODE_LUA);
@@ -204,8 +195,7 @@ pub fn build_std_package() -> Package {
         b.asm.loadarg(0);
         b.asm.loadarg(1);
         b.asm.loadarg(2);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(3);
+        b.asm.setvi(3);
         b.asm.mode(inst::MODE_LUA);
         b.asm.sys(inst::SYS_LOADFILE);
         b.asm.mode(inst::MODE_LUA);
@@ -226,14 +216,12 @@ pub fn build_std_package() -> Package {
         b.asm.eq();
         let mut last_label = Label::new();
         b.asm.bif(&mut last_label);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(2);
+        b.asm.setvi(2);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
         b.asm.bind(&mut last_label);
         b.asm.pop();
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(1);
+        b.asm.setvi(1);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
         b.finish_function("next", 2, false);
@@ -277,8 +265,7 @@ pub fn build_std_package() -> Package {
         b.asm.constzero();
         b.asm.mode(inst::MODE_PTR);
         b.asm.nanbox();
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(3);
+        b.asm.setvi(3);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
 
@@ -292,8 +279,7 @@ pub fn build_std_package() -> Package {
     b.asm.loadvarargs();
     b.asm.mode(inst::MODE_LUA);
     b.asm.sys(inst::SYS_PRINT);
-    b.asm.mode(inst::MODE_LUA);
-    b.asm.setv(0);
+    b.asm.setvi(0);
     b.asm.mode(inst::MODE_LUA);
     b.asm.retv();
     b.finish_function("print", 0, true);
@@ -371,8 +357,7 @@ pub fn build_std_package() -> Package {
         b.asm.swap();
         b.asm.mode(inst::MODE_LUA);
         b.asm.storeprototype();
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(1);
+        b.asm.setvi(1);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
         b.finish_function("setmetatable", 2, false);
@@ -392,8 +377,7 @@ pub fn build_std_package() -> Package {
     // tostring
     {
         b.asm.loadarg(0);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(1);
+        b.asm.setvi(1);
         b.asm.mode(inst::MODE_LUA);
         b.asm.sys(inst::SYS_TOSTRING);
         b.asm.mode(inst::MODE_LUA);
@@ -477,8 +461,7 @@ pub fn build_std_package() -> Package {
         b.asm.bind(&mut box_label);
         b.asm.mode(inst::MODE_STRING);
         b.asm.nanbox();
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.setv(1);
+        b.asm.setvi(1);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
         b.finish_function("type", 1, false);
@@ -534,8 +517,7 @@ pub fn build_std_package() -> Package {
     b.asm.mode(inst::MODE_LUA);
     b.asm.loadnamedprop(next_si);
     b.asm.storeglobal(next_index);
-    b.asm.mode(inst::MODE_LUA);
-    b.asm.setv(0);
+    b.asm.setvi(0);
     b.asm.mode(inst::MODE_LUA);
     b.asm.retv();
     b.finish_function("", 0, false);
