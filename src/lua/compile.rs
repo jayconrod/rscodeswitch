@@ -205,42 +205,11 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         // Check that the variable is nil, false, or has a
                         // non-nil metatable field named "__close".
                         self.compile_load_var(var, None);
-                        self.asm.dup();
-                        self.asm.mode(inst::MODE_LUA);
-                        self.asm.not();
-                        let mut is_nil_label = Label::new();
-                        self.asm.mode(inst::MODE_LUA);
-                        self.asm.bif(&mut is_nil_label);
-                        self.asm.mode(inst::MODE_LUA);
-                        self.asm.loadprototype();
-                        self.asm.dup();
-                        self.asm.constzero();
-                        self.asm.mode(inst::MODE_PTR);
-                        self.asm.nanbox();
-                        self.asm.eq();
-                        let mut close_missing_label = Label::new();
-                        self.asm.bif(&mut close_missing_label);
-                        let close_si = self.ensure_string(b"__close", *pos);
-                        self.asm.mode(inst::MODE_LUA);
-                        self.asm.loadnamedpropornil(close_si);
-                        self.asm.constzero();
-                        self.asm.mode(inst::MODE_PTR);
-                        self.asm.nanbox();
-                        self.asm.ne();
-                        let mut close_ok_label = Label::new();
-                        self.asm.bif(&mut close_ok_label);
-                        self.asm.bind(&mut close_missing_label);
-                        let error_msg = format!(
+                        let error_message = format!(
                             "variable '{}' has close attribute but is not closable",
                             l.name.text
                         );
-                        let error_si = self.ensure_string(error_msg.as_bytes(), *pos);
-                        self.asm.string(error_si);
-                        self.asm.mode(inst::MODE_STRING);
-                        self.asm.panic(0);
-                        self.asm.bind(&mut is_nil_label);
-                        self.asm.pop();
-                        self.asm.bind(&mut close_ok_label);
+                        self.compile_check_closable(error_message.as_bytes(), *pos);
 
                         // Push the address of the handler to ensure the close
                         // method is called later.
@@ -595,6 +564,27 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     .pos()
                     .combine(exprs.last().unwrap().pos());
                 self.compile_adjust(len_known, 4, exprs_pos);
+
+                // Check that the last induction variable is closable.
+                // Push its handler.
+                let exprs_pos = exprs
+                    .first()
+                    .unwrap()
+                    .pos()
+                    .combine(exprs.last().unwrap().pos());
+                self.asm.dup();
+                self.compile_check_closable(
+                    b"in for-in loop, close value is not closeable",
+                    exprs_pos,
+                );
+                let mut handler_label = Label::new();
+                self.asm.pushhandler(&mut handler_label);
+                let block = self.block_stack.last_mut().unwrap();
+                block.closes.push(Close {
+                    vid: *close_vid,
+                    label: handler_label,
+                });
+
                 let mut cond_label = Label::new();
                 self.asm.b(&mut cond_label);
 
@@ -1463,6 +1453,45 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm.load();
             }
         }
+    }
+
+    /// Emits code to check that the value on the top of the stack is closable.
+    /// The value on top of the stack is consumed. It must be nil, false, or
+    /// have a metatable with a non-nil __close property. The __close property
+    /// need not be callable at this point.
+    fn compile_check_closable(&mut self, message: &[u8], pos: Pos) {
+        self.asm.dup();
+        self.asm.mode(inst::MODE_LUA);
+        self.asm.not();
+        let mut is_nil_label = Label::new();
+        self.asm.mode(inst::MODE_LUA);
+        self.asm.bif(&mut is_nil_label);
+        self.asm.mode(inst::MODE_LUA);
+        self.asm.loadprototype();
+        self.asm.dup();
+        self.asm.constzero();
+        self.asm.mode(inst::MODE_PTR);
+        self.asm.nanbox();
+        self.asm.eq();
+        let mut close_missing_label = Label::new();
+        self.asm.bif(&mut close_missing_label);
+        let close_si = self.ensure_string(b"__close", pos);
+        self.asm.mode(inst::MODE_LUA);
+        self.asm.loadnamedpropornil(close_si);
+        self.asm.constzero();
+        self.asm.mode(inst::MODE_PTR);
+        self.asm.nanbox();
+        self.asm.ne();
+        let mut close_ok_label = Label::new();
+        self.asm.bif(&mut close_ok_label);
+        self.asm.bind(&mut close_missing_label);
+        let error_si = self.ensure_string(message, pos);
+        self.asm.string(error_si);
+        self.asm.mode(inst::MODE_STRING);
+        self.asm.panic(0);
+        self.asm.bind(&mut is_nil_label);
+        self.asm.pop();
+        self.asm.bind(&mut close_ok_label);
     }
 
     fn ensure_string(&mut self, s: &[u8], pos: Pos) -> u32 {

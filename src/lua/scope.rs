@@ -591,6 +591,7 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 self.declare_hidden(*state_var, Attr::None);
                 self.declare_hidden(*control_var, Attr::None);
                 self.declare_hidden(*close_var, Attr::Close);
+                self.top_mut().add_handler();
                 self.enter(*named_scope, ScopeKind::Local);
                 for (name, var) in names.iter().zip(vars.iter()) {
                     self.declare(*var, name.text, VarKind::Local, Attr::None, name.pos());
@@ -1090,8 +1091,8 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
             if let Some(break_label) = scope.break_label {
                 *self.scope_set.ensure_label_use(luid) = LabelUse {
                     label: Some(break_label),
-                    slot_count: slot_count_at_use - scope.next_slot,
-                    handler_count: handler_count_at_use - scope.next_handler,
+                    slot_count: slot_count_at_use - scope.parent_next_slot,
+                    handler_count: handler_count_at_use - scope.parent_next_handler,
                 };
                 return;
             }
