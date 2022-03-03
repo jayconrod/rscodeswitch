@@ -173,7 +173,7 @@ fn check_result(
         (Ok(got), Want::Output(want_text)) => {
             let got_text = str::from_utf8(&got)
                 .map_err(|err| ErrorList::wrap(Position::from(path), &err))
-                .map(|s| s.trim())?;
+                .map(|s| s.trim_end())?;
             if got_text == want_text {
                 Ok(())
             } else {

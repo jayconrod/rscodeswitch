@@ -595,8 +595,10 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 }
                 if callee_func.var_param_type.is_some() {
                     push!(total_arg_count as u64);
-                } else if total_arg_count > param_count {
+                    vc = total_arg_count - param_count;
+                } else {
                     sp += (total_arg_count - param_count) * 8;
+                    vc = 0;
                 }
 
                 // Construct a stack frame for the callee, and set the
@@ -2101,6 +2103,18 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let o = i.type_tag();
                     push!(o);
                     inst::size(inst::TYPEOF)
+                }
+                (inst::UNBOX, inst::MODE_I64) => {
+                    // Pops a nanboxed number and pushes the corresponding
+                    // integer. Raises an error if the value is not a number or
+                    // is a float without a precise integer representation.
+                    let i = NanBox(pop!());
+                    let o = match i.as_i64() {
+                        Ok(n) => n,
+                        _ => unwind_errorf!("could not convert value to integer"),
+                    };
+                    push!(o as u64);
+                    inst::size(inst::UNBOX)
                 }
                 (inst::XOR, inst::MODE_LUA) => {
                     lua_binop_bit!(^);

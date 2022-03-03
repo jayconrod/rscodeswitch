@@ -320,7 +320,105 @@ pub fn build_std_package() -> Package {
     // TODO: rawget
     // TODO: rawlen
     // TODO: rawset
-    // TODO: select
+
+    // select(index, ...)
+    {
+        // Decide what to do based on the type of index.
+        b.asm.loadarg(0);
+        b.asm.dup();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.typeof_();
+        b.asm.dup();
+        b.asm.const_(nanbox::TAG_SMALL_INT);
+        b.asm.eq();
+        let mut is_number_label = Label::new();
+        b.asm.bif(&mut is_number_label);
+        b.asm.dup();
+        b.asm.const_(nanbox::TAG_BIG_INT);
+        b.asm.eq();
+        b.asm.bif(&mut is_number_label);
+        b.asm.dup();
+        b.asm.const_(nanbox::TAG_FLOAT);
+        b.asm.eq();
+        b.asm.bif(&mut is_number_label);
+        b.asm.pop();
+        let len_si = b.ensure_string("#");
+        b.asm.string(len_si);
+        b.asm.mode(inst::MODE_STRING);
+        b.asm.nanbox();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.eq();
+        let mut is_len_label = Label::new();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.bif(&mut is_len_label);
+        let error_si = b.ensure_string("index argument must be \"#\" or integer");
+        b.asm.string(error_si);
+        b.asm.mode(inst::MODE_STRING);
+        b.asm.panic(0);
+
+        // If index is "#", return the number of variadic arguments.
+        b.asm.bind(&mut is_len_label);
+        b.asm.getv();
+        b.asm.nanbox();
+        b.asm.setvi(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+
+        // If index is a number, try to convert to an integer.
+        b.asm.bind(&mut is_number_label);
+        b.asm.pop(); // type tag
+        b.asm.unbox();
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.lt();
+        let mut is_negative_label = Label::new();
+        b.asm.bif(&mut is_negative_label);
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.gt();
+        let mut is_positive_label = Label::new();
+        b.asm.bif(&mut is_positive_label);
+        let zero_error_si = b.ensure_string("index argument may not be zero");
+        b.asm.string(zero_error_si);
+        b.asm.mode(inst::MODE_STRING);
+        b.asm.panic(0);
+
+        // If index is positive, return the last max(0, vc - index + 1) values.
+        b.asm.bind(&mut is_positive_label);
+        b.asm.getv();
+        b.asm.swap();
+        b.asm.sub();
+        b.asm.const_(1);
+        b.asm.add();
+        b.asm.dup();
+        b.asm.constzero();
+        b.asm.gt();
+        let mut return_label = Label::new();
+        b.asm.bif(&mut return_label);
+        b.asm.pop();
+        b.asm.constzero();
+        b.asm.b(&mut return_label);
+
+        // If index is negative, return the last min(vc, -index) values.
+        b.asm.bind(&mut is_negative_label);
+        b.asm.neg();
+        b.asm.dup();
+        b.asm.getv();
+        b.asm.le();
+        b.asm.bif(&mut return_label);
+        b.asm.pop();
+        b.asm.getv();
+
+        // Return the last N values, where N is in local slot 0.
+        b.asm.bind(&mut return_label);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadvarargs();
+        b.asm.loadlocal(0);
+        b.asm.setv();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("select", 1, true);
+    }
 
     // setmetatable(table, metatable)
     {

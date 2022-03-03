@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 90.
+// Next opcode: 91.
 pub const ADD: u8 = 20;
 pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
@@ -92,6 +92,7 @@ pub const SWAPN: u8 = 44;
 pub const SYS: u8 = 5;
 // pub const TRUE: u8 = 7;
 pub const TYPEOF: u8 = 63;
+pub const UNBOX: u8 = 90;
 pub const XOR: u8 = 62;
 
 // Next sys: 7
@@ -185,6 +186,7 @@ pub const fn size(op: u8) -> usize {
         | SWAP
         | TOFLOAT
         | TYPEOF
+        | UNBOX
         | XOR => 1,
         PANIC | SWAPN | SYS => 2,
         ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETVI | STOREARG
@@ -282,6 +284,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         SYS => "sys",
         TOFLOAT => "tofloat",
         TYPEOF => "typeof",
+        UNBOX => "unbox",
         XOR => "xor",
         _ => "unknown",
     }
@@ -751,6 +754,10 @@ impl Assembler {
         self.write_u8(TYPEOF);
     }
 
+    pub fn unbox(&mut self) {
+        self.write_u8(UNBOX);
+    }
+
     pub fn xor(&mut self) {
         self.write_u8(XOR);
     }
@@ -926,6 +933,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
             | SWAP
             | TOFLOAT
             | TYPEOF
+            | UNBOX
             | XOR => {
                 f.write_str("\n")?;
             }
