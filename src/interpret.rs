@@ -1061,6 +1061,19 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     binop_cmp!(is_ge, lua);
                     inst::size(inst::GE)
                 }
+                (inst::GETERROR, inst::MODE_LUA) => {
+                    // Box and push the current error value, or push nil if
+                    // there is no error.
+                    let v = match &self.error {
+                        Some(e) => {
+                            let s = data::String::from_bytes(e.to_string().as_bytes());
+                            NanBox::from(s)
+                        }
+                        None => NanBox::from_nil(),
+                    };
+                    push!(v.0);
+                    inst::size(inst::GETERROR)
+                }
                 (inst::GETV, inst::MODE_I64) => {
                     push!(vc as u64);
                     inst::size(inst::GETV)
@@ -1713,7 +1726,14 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let s = (*(sp as *const *const data::String)).as_ref().unwrap();
                     let message = s.to_string();
                     save_regs!();
-                    return Err(self.error_level(level, message));
+                    let error = self.error_level(level, message);
+                    match self.unwind_with_error(error) {
+                        Ok(()) => {
+                            load_regs!();
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                    }
                 }
                 (inst::PANIC, inst::MODE_LUA) => {
                     let level = read_imm!(u8, 1) as usize;
@@ -1721,7 +1741,14 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     let s = v.to_string();
                     let message = s.to_string();
                     save_regs!();
-                    return Err(self.error_level(level, message));
+                    let error = self.error_level(level, message);
+                    match self.unwind_with_error(error) {
+                        Ok(()) => {
+                            load_regs!();
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                    }
                 }
                 (inst::PANICLEVEL, inst::MODE_LUA) => {
                     let raw_level = NanBox(*(sp as *const u64));
@@ -1732,11 +1759,25 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     };
                     let message = raw_message.to_string();
                     save_regs!();
-                    return Err(self.error_level(level, message));
+                    let error = self.error_level(level, message);
+                    match self.unwind_with_error(error) {
+                        Ok(()) => {
+                            load_regs!();
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                    }
                 }
                 (inst::POP, inst::MODE_I64) => {
                     sp += 8;
                     inst::size(inst::POP)
+                }
+                (inst::POPHANDLER, inst::MODE_I64) => {
+                    // Set hp to the next error handler without executing the
+                    // handler. This instruction doesn't actually remove the
+                    // handler's data from the stack or change sp or ip.
+                    hp = *((hp + HANDLER_HP_OFFSET) as *const usize);
+                    inst::size(inst::POPHANDLER)
                 }
                 (inst::PUSHHANDLER, inst::MODE_I64) => {
                     let delta = read_imm!(i32, 1) as usize;
@@ -1800,6 +1841,10 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 (inst::SETVI, inst::MODE_I64) => {
                     vc = read_imm!(u16, 1) as usize;
                     inst::size(inst::SETVI)
+                }
+                (inst::STOPERROR, inst::MODE_I64) => {
+                    self.error = None;
+                    inst::size(inst::STOPERROR)
                 }
                 (inst::STORE, inst::MODE_I64) => {
                     let v = pop!() as i64;
@@ -2490,13 +2535,13 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
             // - set ip to the handler's code.
             // - clear vc.
             while self.fp < self.hp {
+                self.func = *((self.fp + FRAME_FUNC_OFFSET) as *const *const Function);
+                self.cp = *((self.fp + FRAME_CP_OFFSET) as *const *const Closure);
+                self.sp = self.hp + HANDLER_SIZE;
+                self.ip = *((self.hp + HANDLER_IP_OFFSET) as *const *const u8);
                 self.fp = *(self.fp as *const usize);
             }
             self.vc = 0;
-            self.func = *((self.fp + FRAME_FUNC_OFFSET) as *const *const Function);
-            self.cp = *((self.fp + FRAME_CP_OFFSET) as *const *const Closure);
-            self.sp = self.hp + HANDLER_SIZE;
-            self.ip = *((self.hp + HANDLER_IP_OFFSET) as *const *const u8);
             self.hp = *((self.hp + HANDLER_HP_OFFSET) as *const usize);
             Ok(())
         }

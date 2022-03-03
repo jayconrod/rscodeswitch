@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 86.
+// Next opcode: 90.
 pub const ADD: u8 = 20;
 pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
@@ -30,6 +30,7 @@ pub const EXP: u8 = 56;
 pub const FLOORDIV: u8 = 54;
 pub const FUNCTION: u8 = 31;
 pub const GE: u8 = 18;
+pub const GETERROR: u8 = 88;
 pub const GETV: u8 = 83;
 pub const GT: u8 = 19;
 // pub const INT64: u8 = 49;
@@ -63,6 +64,7 @@ pub const OR: u8 = 61;
 pub const PANIC: u8 = 65;
 pub const PANICLEVEL: u8 = 77;
 pub const POP: u8 = 3;
+pub const POPHANDLER: u8 = 87;
 pub const PROTOTYPE: u8 = 48;
 pub const PUSHHANDLER: u8 = 85;
 pub const RET: u8 = 4;
@@ -72,6 +74,7 @@ pub const SETV: u8 = 84;
 pub const SETVI: u8 = 66;
 pub const SHL: u8 = 58;
 pub const SHR: u8 = 59;
+pub const STOPERROR: u8 = 89;
 pub const STORE: u8 = 37;
 pub const STOREARG: u8 = 30;
 pub const STOREGLOBAL: u8 = 10;
@@ -142,6 +145,7 @@ pub const fn size(op: u8) -> usize {
         | EXP
         | FLOORDIV
         | GE
+        | GETERROR
         | GETV
         | GT
         | LT
@@ -165,12 +169,14 @@ pub const fn size(op: u8) -> usize {
         | OR
         | PANICLEVEL
         | POP
+        | POPHANDLER
         | PROTOTYPE
         | RET
         | RETV
         | SETV
         | SHL
         | SHR
+        | STOPERROR
         | STORE
         | STOREINDEXPROP
         | STOREPROTOTYPE
@@ -217,6 +223,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         FUNCTION => "function",
         FLOORDIV => "floordiv",
         GE => "ge",
+        GETERROR => "geterror",
         GETV => "getv",
         GT => "gt",
         LE => "le",
@@ -248,6 +255,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         PANIC => "panic",
         PANICLEVEL => "paniclevel",
         POP => "pop",
+        POPHANDLER => "pophandler",
         PROTOTYPE => "prototype",
         PUSHHANDLER => "pushhandler",
         RET => "ret",
@@ -256,6 +264,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         SETVI => "setvi",
         SHL => "shl",
         SHR => "shr",
+        STOPERROR => "stoperror",
         STORE => "store",
         STOREARG => "storearg",
         STOREINDEXPROP => "storeindexprop",
@@ -483,6 +492,10 @@ impl Assembler {
         self.write_u8(GE);
     }
 
+    pub fn geterror(&mut self) {
+        self.write_u8(GETERROR);
+    }
+
     pub fn getv(&mut self) {
         self.write_u8(GETV);
     }
@@ -618,6 +631,10 @@ impl Assembler {
         self.write_u8(POP);
     }
 
+    pub fn pophandler(&mut self) {
+        self.write_u8(POPHANDLER);
+    }
+
     pub fn prototype(&mut self) {
         self.write_u8(PROTOTYPE);
     }
@@ -650,6 +667,10 @@ impl Assembler {
 
     pub fn shr(&mut self) {
         self.write_u8(SHR);
+    }
+
+    pub fn stoperror(&mut self) {
+        self.write_u8(STOPERROR);
     }
 
     pub fn store(&mut self) {
@@ -865,6 +886,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
             | EQ
             | FLOORDIV
             | GE
+            | GETERROR
             | GETV
             | GT
             | LT
@@ -888,12 +910,14 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
             | OR
             | PANICLEVEL
             | POP
+            | POPHANDLER
             | PROTOTYPE
             | RET
             | RETV
             | SETV
             | SHL
             | SHR
+            | STOPERROR
             | STORE
             | STOREINDEXPROP
             | STOREPROTOTYPE

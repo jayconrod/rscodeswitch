@@ -231,24 +231,32 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.leave_block();
             }
             Stmt::If {
-                cond_stmts,
-                false_stmt,
+                cond_blocks,
+                false_block,
                 ..
             } => {
                 let mut end_label = Label::new();
-                for (cond, stmt) in cond_stmts {
+                for block in cond_blocks {
                     let mut next_label = Label::new();
-                    self.compile_expr(cond);
+                    self.compile_expr(&block.cond);
                     self.asm.mode(inst::MODE_LUA);
                     self.asm.not();
                     self.asm.mode(inst::MODE_LUA);
                     self.asm.bif(&mut next_label);
-                    self.compile_stmt(stmt);
+                    self.enter_block(block.scope, stmt.pos());
+                    for stmt in &block.stmts {
+                        self.compile_stmt(stmt);
+                    }
+                    self.leave_block();
                     self.asm.b(&mut end_label);
                     self.asm.bind(&mut next_label);
                 }
-                if let Some(false_stmt) = false_stmt {
-                    self.compile_stmt(false_stmt);
+                if let Some(block) = false_block {
+                    self.enter_block(block.scope, stmt.pos());
+                    for stmt in &block.stmts {
+                        self.compile_stmt(stmt);
+                    }
+                    self.leave_block();
                 }
                 self.asm.bind(&mut end_label);
             }

@@ -272,7 +272,39 @@ pub fn build_std_package() -> Package {
         b.finish_function("pairs", 1, false);
     }
 
-    // TODO: pcall
+    // pcall(f, ...)
+    {
+        let mut handler_label = Label::new();
+        b.asm.pushhandler(&mut handler_label);
+        b.asm.loadarg(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadvarargs();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.callvaluev();
+        b.asm.pophandler();
+        b.asm.const_(1);
+        b.asm.mode(inst::MODE_BOOL);
+        b.asm.nanbox();
+        b.asm.storelocal(1);
+        b.asm.getv();
+        b.asm.const_(1);
+        b.asm.mode(inst::MODE_U16);
+        b.asm.add();
+        b.asm.setv();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.asm.bind(&mut handler_label);
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_BOOL);
+        b.asm.nanbox();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.geterror();
+        b.asm.stoperror();
+        b.asm.setvi(2);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("pcall", 1, true);
+    }
 
     // print
     b.asm.mode(inst::MODE_LUA);

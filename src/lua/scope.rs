@@ -484,16 +484,24 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 self.leave();
             }
             Stmt::If {
-                cond_stmts,
-                false_stmt,
+                cond_blocks,
+                false_block,
                 ..
             } => {
-                for (cond, stmt) in cond_stmts {
-                    self.resolve_expr(cond);
-                    self.resolve_stmt(stmt);
+                for block in cond_blocks {
+                    self.resolve_expr(&block.cond);
+                    self.enter(block.scope, ScopeKind::Local);
+                    for stmt in &block.stmts {
+                        self.resolve_stmt(stmt);
+                    }
+                    self.leave();
                 }
-                if let Some(false_stmt) = false_stmt {
-                    self.resolve_stmt(false_stmt);
+                if let Some(block) = false_block {
+                    self.enter(block.scope, ScopeKind::Local);
+                    for stmt in &block.stmts {
+                        self.resolve_stmt(stmt);
+                    }
+                    self.leave();
                 }
             }
             Stmt::While {
@@ -979,15 +987,21 @@ impl<'src, 'lm> Resolver<'src, 'lm> {
                 }
             }
             Stmt::If {
-                cond_stmts,
-                false_stmt,
+                cond_blocks,
+                false_block,
                 ..
             } => {
-                for (_, stmt) in cond_stmts {
-                    self.shift_vars_in_stmt(stmt, shift);
+                for block in cond_blocks {
+                    self.shift_vars_in_scope(block.scope, shift);
+                    for stmt in &block.stmts {
+                        self.shift_vars_in_stmt(stmt, shift);
+                    }
                 }
-                if let Some(false_stmt) = false_stmt {
-                    self.shift_vars_in_stmt(false_stmt, shift);
+                if let Some(block) = false_block {
+                    self.shift_vars_in_scope(block.scope, shift);
+                    for stmt in &block.stmts {
+                        self.shift_vars_in_stmt(stmt, shift);
+                    }
                 }
             }
             Stmt::While { body, scope, .. } => {

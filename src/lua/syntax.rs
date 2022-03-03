@@ -66,8 +66,8 @@ pub enum Stmt<'src> {
         pos: Pos,
     },
     If {
-        cond_stmts: Vec<(Expr<'src>, Stmt<'src>)>,
-        false_stmt: Option<Box<Stmt<'src>>>,
+        cond_blocks: Vec<IfBlock<'src>>,
+        false_block: Option<IfFalseBlock<'src>>,
         pos: Pos,
     },
     While {
@@ -253,21 +253,34 @@ impl<'src> DisplayIndent for Stmt<'src> {
                 write!(f, "end")
             }
             Stmt::If {
-                cond_stmts,
-                false_stmt,
+                cond_blocks,
+                false_block,
                 ..
             } => {
-                let mut sep = "if";
-                for (cond, stmt) in cond_stmts {
-                    write!(f, "{} {}", sep, cond)?;
-                    sep = "\nelseif";
-                    stmt.fmt_indent(f, level)?;
+                let true_block = cond_blocks.first().unwrap();
+                write!(f, "if {} then\n", true_block.cond)?;
+                for stmt in &true_block.stmts {
+                    stmt.fmt_indent(f, level + 1)?;
+                    write!(f, "\n")?;
                 }
-                if let Some(false_stmt) = false_stmt {
-                    write!(f, "\nelse ")?;
-                    false_stmt.fmt_indent(f, level)?;
+                for cond_block in &cond_blocks[1..] {
+                    self.write_indent(f, level)?;
+                    write!(f, "elseif {} then\n", cond_block.cond)?;
+                    for stmt in &cond_block.stmts {
+                        stmt.fmt_indent(f, level + 1)?;
+                        write!(f, "\n")?;
+                    }
                 }
-                Ok(())
+                if let Some(false_block) = false_block {
+                    self.write_indent(f, level)?;
+                    write!(f, "else\n")?;
+                    for stmt in &false_block.stmts {
+                        stmt.fmt_indent(f, level + 1)?;
+                        write!(f, "\n")?;
+                    }
+                }
+                self.write_indent(f, level)?;
+                write!(f, "end")
             }
             Stmt::While { cond, body, .. } => {
                 write!(f, "while {} do\n", cond)?;
@@ -419,6 +432,17 @@ impl<'src> Display for FunctionName<'src> {
 pub struct MethodName<'src> {
     pub name: Token<'src>,
     pub receiver_var: VarID,
+}
+
+pub struct IfBlock<'src> {
+    pub cond: Expr<'src>,
+    pub stmts: Vec<Stmt<'src>>,
+    pub scope: ScopeID,
+}
+
+pub struct IfFalseBlock<'src> {
+    pub stmts: Vec<Stmt<'src>>,
+    pub scope: ScopeID,
 }
 
 pub enum Expr<'src> {
@@ -708,8 +732,12 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     }
 
     fn parse_block_stmts(&mut self, end: Kind) -> Vec<Stmt<'src>> {
+        self.parse_block_stmts_pred(|kind| kind == end)
+    }
+
+    fn parse_block_stmts_pred<F: Fn(Kind) -> bool>(&mut self, end: F) -> Vec<Stmt<'src>> {
         let mut stmts = Vec::new();
-        while self.peek() != end {
+        while !end(self.peek()) {
             match self.parse_stmt() {
                 Ok(stmt) => stmts.push(stmt),
                 Err(err) => {
@@ -864,30 +892,42 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
     }
 
     fn parse_if_stmt(&mut self) -> Result<Stmt<'src>, Error> {
+        let end_block_pred = |kind| match kind {
+            Kind::Elseif | Kind::Else | Kind::End => true,
+            _ => false,
+        };
+        let true_scope = self.next_scope();
         let begin = self.expect(Kind::If)?.pos();
-        let mut cond_stmts = Vec::new();
+        let mut cond_blocks = Vec::new();
         let true_cond = self.parse_expr()?;
         self.expect(Kind::Then)?;
-        let true_stmt = self.parse_stmt()?;
-        cond_stmts.push((true_cond, true_stmt));
+        let true_stmts = self.parse_block_stmts_pred(end_block_pred);
+        cond_blocks.push(IfBlock {
+            cond: true_cond,
+            stmts: true_stmts,
+            scope: true_scope,
+        });
         while self.peek() == Kind::Elseif {
+            let scope = self.next_scope();
             self.take();
             let cond = self.parse_expr()?;
             self.expect(Kind::Then)?;
-            let stmt = self.parse_stmt()?;
-            cond_stmts.push((cond, stmt));
+            let stmts = self.parse_block_stmts_pred(end_block_pred);
+            cond_blocks.push(IfBlock { cond, stmts, scope });
         }
-        let false_stmt = if self.peek() == Kind::Else {
+        let false_block = if self.peek() == Kind::Else {
+            let scope = self.next_scope();
             self.take();
-            Some(Box::new(self.parse_stmt()?))
+            let stmts = self.parse_block_stmts(Kind::End);
+            Some(IfFalseBlock { stmts, scope })
         } else {
             None
         };
         let end = self.expect(Kind::End)?.pos();
         let pos = begin.combine(end);
         Ok(Stmt::If {
-            cond_stmts,
-            false_stmt,
+            cond_blocks,
+            false_block,
             pos,
         })
     }
