@@ -501,7 +501,9 @@ pub fn build_std_package() -> Package {
 
     // TODO: _VERSION
     // TODO: warn
-    // TODO: xpcall
+    // TODO: xpcall: this is difficult to support without a more invasive
+    // interpreter change. The handler given to xpcall runs before the stack
+    // is unwound.
 
     // TODO: coroutine
 

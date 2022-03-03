@@ -178,6 +178,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 #[allow(unused_assignments)] // for vc
                 {
                     func = self.func.as_ref().unwrap();
+                    pp = func.package.as_mut().unwrap();
                     vc = self.vc;
                     cp = self.cp;
                     sp = self.sp;
@@ -1662,14 +1663,13 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 }
                 (inst::NEXTHANDLER, inst::MODE_I64) => {
                     // Used at the end of an error handler.
-                    // If the handler was started with CALLHANDLER, and there is
-                    // no error, continue after the CALLHANDLER instruction.
-                    // If the handler was started with an error, continue
-                    // unwinding.
-                    vc = pop!() as usize;
-                    ip = pop!() as *const u8;
-                    if ip.is_null() {
-                        save_regs!();
+                    // If there is an error, continue unwinding by popping and
+                    // executing the next handler, or returning the error if
+                    // there is no handler.
+                    // If there is no handler (likely, the handler was started
+                    // with CALLHANDLER), pop vc and ip from the stack.
+                    save_regs!();
+                    if self.error.is_some() {
                         match self.unwind() {
                             Ok(()) => {
                                 load_regs!();
@@ -1677,8 +1677,11 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                             }
                             Err(err) => return Err(err),
                         }
+                    } else {
+                        vc = pop!() as usize;
+                        ip = pop!() as *const u8;
+                        continue;
                     }
-                    continue;
                 }
                 (inst::NOP, inst::MODE_I64) => inst::size(inst::NOP),
                 (inst::NOT, inst::MODE_BOOL) => {
@@ -2556,12 +2559,12 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         let mut fp = self.fp;
         let mut ip = self.ip;
         while level > 0 {
-            func = match (*((fp + 24) as *const *const Function)).as_ref() {
+            func = match (*((fp + FRAME_FUNC_OFFSET) as *const *const Function)).as_ref() {
                 Some(f) => f,
                 None => break,
             };
-            ip = *((fp + 8) as *const *const u8);
-            fp = *(fp as *const usize);
+            ip = *((fp + FRAME_IP_OFFSET) as *const *const u8);
+            fp = *((fp + FRAME_FP_OFFSET) as *const usize);
             level -= 1;
         }
         let inst_offset = (ip as usize - &func.insts[0] as *const u8 as usize)

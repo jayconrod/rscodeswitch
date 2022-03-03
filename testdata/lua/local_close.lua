@@ -116,4 +116,16 @@ end
 f() -- Output: close: s = a
 
 ---
--- TODO: variable closed on error.
+-- Variable closed on error.
+local mt = {__close = function(self) print("close: s = " .. self.s) end}
+local function make(s)
+  local a = {s = s}
+  setmetatable(a, mt)
+  return a
+end
+local function close_and_crash()
+  local a<close> = make("a")
+  error("crash")
+end
+local code = pcall(close_and_crash) -- Output: close: s = a
+print(code) -- Output: false
