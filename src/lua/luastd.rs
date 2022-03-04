@@ -597,7 +597,6 @@ pub fn build_std_package() -> Package {
         b.finish_function("type", 1, false);
     }
 
-    // TODO: _VERSION
     // TODO: warn
     // TODO: xpcall: this is difficult to support without a more invasive
     // interpreter change. The handler given to xpcall runs before the stack
@@ -649,6 +648,14 @@ pub fn build_std_package() -> Package {
     b.asm.mode(inst::MODE_LUA);
     b.asm.loadnamedprop(next_si);
     b.asm.storeglobal(next_index);
+    b.asm.loadglobal(env_index);
+    let version_si = b.ensure_string("Lua 5.4");
+    b.asm.string(version_si);
+    b.asm.mode(inst::MODE_STRING);
+    b.asm.nanbox();
+    b.asm.mode(inst::MODE_LUA);
+    let version_name_si = b.ensure_string("_VERSION");
+    b.asm.storenamedprop(version_name_si);
     b.asm.setvi(0);
     b.asm.mode(inst::MODE_LUA);
     b.asm.retv();
