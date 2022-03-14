@@ -229,7 +229,6 @@ pub enum Attr {
 
     /// The variable's __close metamethod will be called when it goes out of
     /// scope. Like Const, Close variables may not be assigned.
-    /// TODO: implement Close
     Close,
 }
 
