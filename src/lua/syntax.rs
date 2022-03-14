@@ -583,7 +583,9 @@ impl<'src> DisplayIndent for Call<'src> {
             [Expr::Literal(t)] if t.kind == Kind::String =>
                 write!(f, "{}", t.text)
             ,
-            // TODO: f {...} for single table constructor arg
+            [Expr::Table{..}] => {
+                write!(f, " {}", self.arguments[0])
+            },
             _ => {
                 write!(f, "(")?;
                 let mut sep = "";
