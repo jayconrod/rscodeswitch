@@ -215,11 +215,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         // method is called later.
                         let mut handler_label = Label::new();
                         self.asm.pushhandler(&mut handler_label);
-                        let block = self.block_stack.last_mut().unwrap();
-                        block.closes.push(Close {
-                            vid: l.var,
-                            label: handler_label,
-                        });
+                        self.add_close(l.var, handler_label);
                     }
                 }
             }
@@ -236,6 +232,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 ..
             } => {
                 let mut end_label = Label::new();
+                let pre_enabled = self.enabled();
+                let mut post_enabled = false;
                 for block in cond_blocks {
                     let mut next_label = Label::new();
                     self.compile_expr(&block.cond);
@@ -249,6 +247,10 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     }
                     self.leave_block();
                     self.asm.b(&mut end_label);
+                    post_enabled |= self.enabled();
+                    if pre_enabled {
+                        self.set_enabled(true);
+                    }
                     self.asm.bind(&mut next_label);
                 }
                 if let Some(block) = false_block {
@@ -256,8 +258,13 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     for stmt in &block.stmts {
                         self.compile_stmt(stmt);
                     }
+                    post_enabled |= self.enabled();
+                    if pre_enabled {
+                        self.set_enabled(true);
+                    }
                     self.leave_block();
                 }
+                self.set_enabled(post_enabled);
                 self.asm.bind(&mut end_label);
             }
             Stmt::While {
@@ -269,6 +276,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             } => {
                 let mut cond_label = Label::new();
                 let mut body_label = Label::new();
+                let enabled = self.enabled();
                 self.asm.b(&mut cond_label);
                 self.asm.bind(&mut body_label);
                 self.enter_block(*scope, stmt.pos());
@@ -276,6 +284,9 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     self.compile_stmt(stmt);
                 }
                 self.leave_block();
+                if enabled {
+                    self.set_enabled(true);
+                }
                 self.asm.bind(&mut cond_label);
                 self.compile_expr(cond);
                 self.asm.mode(inst::MODE_LUA);
@@ -296,6 +307,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // need to pop a bunch of stuff from the body before branching,
                 // so it's nice to be able to put the condition in a local
                 // instead of a temporary.
+                let enabled = self.enabled();
                 self.enter_block(*cond_scope, stmt.pos());
                 let cond_var = &self.scope_set.vars[cond_vid.0];
                 self.asm.constzero();
@@ -320,6 +332,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm.mode(inst::MODE_LUA);
                 self.asm.bif(&mut body_label);
                 self.leave_block();
+                self.set_enabled(enabled);
                 self.bind_named_label(*break_lid);
             }
             Stmt::For {
@@ -342,6 +355,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 let body_var = &self.scope_set.vars[body_vid.0];
                 let mut body_label = Label::new();
                 let mut cond_label = Label::new();
+                let enabled = self.enabled();
 
                 // Evaluate the init, limit, and step expressions.
                 // Check that step is a non-negative number.
@@ -506,6 +520,9 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // If step is positive, we check ind <= limit.
                 // Otherwise, we check ind >= limit.
                 let mut negative_cond_label = Label::new();
+                if enabled {
+                    self.set_enabled(true);
+                }
                 self.line(limit.pos());
                 self.asm.bind(&mut cond_label);
                 self.compile_load_var(ind_var, None);
@@ -564,6 +581,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                         && close_var.kind == VarKind::Local
                         && close_var.slot == iter_var.slot + 3
                 );
+                let enabled = self.enabled();
                 self.enter_block(*ind_scope, stmt.pos());
                 let len_known = self.compile_expr_list(exprs, 0);
                 let exprs_pos = exprs
@@ -587,11 +605,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 );
                 let mut handler_label = Label::new();
                 self.asm.pushhandler(&mut handler_label);
-                let block = self.block_stack.last_mut().unwrap();
-                block.closes.push(Close {
-                    vid: *close_vid,
-                    label: handler_label,
-                });
+                self.add_close(*close_vid, handler_label);
 
                 let mut cond_label = Label::new();
                 self.asm.b(&mut cond_label);
@@ -612,6 +626,9 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // variables. Assign the results to the named variables, and
                 // copy the first result back to control. If control is nil,
                 // end the loop.
+                if enabled {
+                    self.set_enabled(true);
+                }
                 self.asm.bind(&mut cond_label);
                 self.enter_block(*named_scope, stmt.pos());
                 self.compile_load_var(iter_var, None);
@@ -654,8 +671,14 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     );
                     self.b_named_label(lid);
                 }
+                self.set_enabled(false);
             }
             Stmt::Label { label: lid, .. } => {
+                // We don't know whether the label is referenced by any
+                // reachable goto, so we unconditionally enable code generation.
+                // We could potentially do a reachability analysis in an earlier
+                // phase, but it doesn't seem worthwhile.
+                self.set_enabled(true);
                 self.bind_named_label(*lid);
             }
             Stmt::Goto {
@@ -669,6 +692,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     );
                     self.b_named_label(lid);
                 }
+                self.set_enabled(false);
             }
             Stmt::Function {
                 name,
@@ -820,6 +844,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 }
                 self.asm.mode(inst::MODE_LUA);
                 self.asm.retv();
+                self.set_enabled(false);
             }
         }
     }
@@ -1503,6 +1528,9 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     }
 
     fn ensure_string(&mut self, s: &[u8], pos: Pos) -> u32 {
+        if !self.enabled() {
+            return !0;
+        }
         match self.string_index.get(s) {
             Some(&i) => i,
             None => {
@@ -1547,6 +1575,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     fn enter_block(&mut self, sid: ScopeID, pos: Pos) {
         self.block_stack.push(Block {
             sid,
+            enabled: self.enabled(),
             closes: Vec::new(),
             pos,
         })
@@ -1560,11 +1589,18 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     fn leave_block(&mut self) {
         let mut block = self.block_stack.pop().unwrap();
         let scope = &self.scope_set.scopes[block.sid.0];
-        assert_eq!(block.closes.len(), scope.handler_count());
         self.compile_pop_slots_and_handlers(scope.slot_count(), scope.handler_count());
         if !block.closes.is_empty() {
             let mut after_handlers_label = Label::new();
             self.asm.b(&mut after_handlers_label);
+            let was_enabled = self.enabled();
+            if block.enabled {
+                // If the block contains closes and is reachable but contains a
+                // break, goto, or return statement that disables code
+                // generation, re-enable code generation to emit code to call
+                // the close functions.
+                self.set_enabled(true);
+            }
             for close in block.closes.iter_mut().rev() {
                 self.asm.bind(&mut close.label);
                 let var = &self.scope_set.vars[close.vid.0];
@@ -1591,8 +1627,35 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm.bind(&mut after_close_label);
                 self.asm.nexthandler();
             }
+            self.set_enabled(was_enabled);
             self.asm.bind(&mut after_handlers_label);
         }
+    }
+
+    fn add_close(&mut self, close_vid: VarID, handler_label: Label) {
+        if !self.enabled() {
+            return;
+        }
+        let block = self.block_stack.last_mut().unwrap();
+        block.closes.push(Close {
+            vid: close_vid,
+            label: handler_label,
+        });
+    }
+
+    /// Returns true if the code being compiled may be reachable, and
+    /// instructions are being emitted.
+    fn enabled(&self) -> bool {
+        self.asm.enabled()
+    }
+
+    /// Allows or prevents the assembler from emitting instructions, depending
+    /// on whether the code being compiled is reachable or unreachabe.
+    /// set_enabled(false) should be called after return, break, and goto
+    /// statements. set_enabled(true) should be called at any point where
+    /// control flows merge and at least one predecessor block is reachable.
+    fn set_enabled(&mut self, enabled: bool) {
+        self.asm.set_enabled(enabled);
     }
 
     fn compile_pop_slots_and_handlers(&mut self, slot_count: usize, handler_count: usize) {
@@ -1609,6 +1672,13 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         mem::swap(&mut self.asm, &mut asm);
         mem::swap(&mut self.param_count, &mut param_count);
         mem::swap(&mut self.is_variadic, &mut is_variadic);
+        if !asm.enabled() {
+            let si = self.ensure_string(b"unreachable", Pos::default());
+            self.asm.string(si);
+            self.asm.mode(inst::MODE_STRING);
+            self.asm.panic(0);
+            self.asm.set_enabled(false);
+        }
         self.func_stack.push(FuncState {
             asm,
             param_count,
@@ -1664,6 +1734,7 @@ enum ExprListLen {
 
 struct Block {
     sid: ScopeID,
+    enabled: bool,
     closes: Vec<Close>,
     pos: Pos,
 }

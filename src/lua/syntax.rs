@@ -580,12 +580,10 @@ impl<'src> DisplayIndent for Call<'src> {
             write!(f, ":{}", method_name.text)?;
         }
         match self.arguments[..] {
-            [Expr::Literal(t)] if t.kind == Kind::String =>
-                write!(f, "{}", t.text)
-            ,
-            [Expr::Table{..}] => {
+            [Expr::Literal(t)] if t.kind == Kind::String => write!(f, "{}", t.text),
+            [Expr::Table { .. }] => {
                 write!(f, " {}", self.arguments[0])
-            },
+            }
             _ => {
                 write!(f, "(")?;
                 let mut sep = "";
@@ -1149,7 +1147,13 @@ impl<'src, 'tok, 'lm> Parser<'src, 'tok, 'lm> {
 
     fn parse_expr_list(&mut self) -> Result<Vec<Expr<'src>>, Error> {
         let k = self.peek();
-        if k == Kind::RParen || k == Kind::Semi || k == Kind::End || k == Kind::EOF {
+        if k == Kind::RParen
+            || k == Kind::Semi
+            || k == Kind::Else
+            || k == Kind::Elseif
+            || k == Kind::End
+            || k == Kind::EOF
+        {
             // In many contexts, the expression list may be empty, for example,
             // a function call with no arguments. Ideally, we'd match tokens
             // that can begin an expression, but there are a lot of them. None

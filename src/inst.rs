@@ -332,6 +332,7 @@ pub fn has_label(op: u8) -> bool {
 
 pub struct Assembler {
     insts: Vec<u8>,
+    enabled: bool,
     flmap: FunctionLineMapBuilder,
 }
 
@@ -339,6 +340,7 @@ impl Assembler {
     pub fn new() -> Assembler {
         Assembler {
             insts: Vec::new(),
+            enabled: true,
             flmap: FunctionLineMapBuilder::new(),
         }
     }
@@ -356,6 +358,20 @@ impl Assembler {
         self.flmap.add_line(self.insts.len(), el);
     }
 
+    /// Returns whether code generation is enabled. When disabled, methods that
+    /// emit instructions have no effect. bind should not be called for labels
+    /// that are referenced when the assembler is enabled; that is, the caller
+    /// should not branch to an instruction that isn't emitted.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Sets whether code generation is enabled. Used around return, break,
+    /// goto, and similar statements.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled
+    }
+
     pub fn bind(&mut self, label: &mut Label) {
         match label {
             Label::Bound { .. } => panic!("label already bound"),
@@ -368,6 +384,7 @@ impl Assembler {
                     // see an error from finish though.
                     *label = Label::Bound { offset: !0 }
                 }
+                assert!(self.enabled || offset == !0);
                 let bound_offset: i32 = self.insts.len().try_into().unwrap();
                 while offset != -1 {
                     let patch_site = &mut self.insts[offset as usize..offset as usize + 4];
@@ -763,22 +780,33 @@ impl Assembler {
     }
 
     fn write_u8(&mut self, n: u8) {
-        self.insts.push(n)
+        if self.enabled {
+            self.insts.push(n)
+        }
     }
 
     fn write_u16(&mut self, n: u16) {
-        self.insts.extend_from_slice(&n.to_le_bytes());
+        if self.enabled {
+            self.insts.extend_from_slice(&n.to_le_bytes());
+        }
     }
 
     fn write_u32(&mut self, n: u32) {
-        self.insts.extend_from_slice(&n.to_le_bytes());
+        if self.enabled {
+            self.insts.extend_from_slice(&n.to_le_bytes());
+        }
     }
 
     fn write_u64(&mut self, n: u64) {
-        self.insts.extend_from_slice(&n.to_le_bytes());
+        if self.enabled {
+            self.insts.extend_from_slice(&n.to_le_bytes());
+        }
     }
 
     fn write_label(&mut self, label: &mut Label) {
+        if !self.enabled {
+            return;
+        }
         if i32::try_from(self.insts.len()).is_err() {
             self.write_u32(0);
             return;
