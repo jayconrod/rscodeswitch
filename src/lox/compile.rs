@@ -605,7 +605,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             self.compile_expr(arg);
                         }
                         let si = self.ensure_string(name.text.as_bytes(), name.pos);
-                        self.asm().mode(inst::MODE_LUA);
+                        self.asm().mode(inst::MODE_BOX);
                         self.asm().callnamedpropwithprototype(si, arg_count);
                     }
                     _ => {
@@ -660,16 +660,30 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.asm().not();
                         self.asm().bind(&mut after_label);
                     }
+                    Kind::Gt => {
+                        self.compile_expr(r);
+                        self.asm().swap();
+                        self.asm().mode(inst::MODE_LUA);
+                        self.asm().lt();
+                    }
+                    Kind::Ge => {
+                        self.compile_expr(r);
+                        self.asm().swap();
+                        self.asm().mode(inst::MODE_LUA);
+                        self.asm().le();
+                    }
                     _ => {
                         self.compile_expr(r);
                         self.asm().mode(inst::MODE_LUA);
                         match op.type_ {
                             Kind::Eq => self.asm().eq(),
-                            Kind::Ne => self.asm().ne(),
+                            Kind::Ne => {
+                                self.asm().eq();
+                                self.asm().mode(inst::MODE_LUA);
+                                self.asm().not();
+                            }
                             Kind::Lt => self.asm().lt(),
                             Kind::Le => self.asm().le(),
-                            Kind::Gt => self.asm().gt(),
-                            Kind::Ge => self.asm().ge(),
                             Kind::Plus => self.asm().add(),
                             Kind::Minus => self.asm().sub(),
                             Kind::Star => self.asm().mul(),
@@ -682,7 +696,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             Expr::Property { receiver, name, .. } => {
                 self.compile_expr(receiver);
                 let si = self.ensure_string(name.text.as_bytes(), name.pos);
-                self.asm().mode(inst::MODE_LUA);
+                self.asm().mode(inst::MODE_BOX);
                 self.asm().loadnamedprop(si);
             }
             Expr::Super { name, var_use, .. } => {
@@ -690,7 +704,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.asm().mode(inst::MODE_LUA);
                 self.asm().loadprototype();
                 let si = self.ensure_string(name.text.as_bytes(), name.pos);
-                self.asm().mode(inst::MODE_LUA);
+                self.asm().mode(inst::MODE_BOX);
                 self.asm().loadnamedprop(si);
             }
             Expr::Assign(l, r) => {
@@ -708,7 +722,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.asm().swapn(1);
                         self.asm().swap();
                         let si = self.ensure_string(name.text.as_bytes(), name.pos);
-                        self.asm().mode(inst::MODE_LUA);
+                        self.asm().mode(inst::MODE_BOX);
                         self.asm().storenamedprop(si);
                     }
                 }

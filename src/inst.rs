@@ -118,6 +118,7 @@ pub const MODE_PTR: u8 = 244;
 pub const MODE_STRING: u8 = 243;
 pub const MODE_CLOSURE: u8 = 242;
 pub const MODE_OBJECT: u8 = 241;
+pub const MODE_BOX: u8 = 240;
 pub const MODE_LUA: u8 = 224;
 pub const MODE_MIN: u8 = 224;
 
@@ -306,6 +307,7 @@ pub fn mode_mnemonic(mode: u8) -> &'static str {
         MODE_STRING => ".string",
         MODE_CLOSURE => ".closure",
         MODE_OBJECT => ".object",
+        MODE_BOX => ".box",
         MODE_LUA => ".lua",
         _ => ".unknown",
     }

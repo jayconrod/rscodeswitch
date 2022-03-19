@@ -540,8 +540,9 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm.bif(&mut body_label);
                 self.b_named_label(*break_lid);
                 self.asm.bind(&mut negative_cond_label);
+                self.asm.swap();
                 self.asm.mode(inst::MODE_LUA);
-                self.asm.ge();
+                self.asm.le();
                 self.asm.mode(inst::MODE_LUA);
                 self.asm.bif(&mut body_label);
 
@@ -937,27 +938,95 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                     self.asm.bind(&mut after_label);
                 } else {
                     self.compile_expr(right);
-                    self.asm.mode(inst::MODE_LUA);
                     match op.kind {
-                        token::Kind::Lt => self.asm.lt(),
-                        token::Kind::LtEq => self.asm.le(),
-                        token::Kind::Gt => self.asm.gt(),
-                        token::Kind::GtEq => self.asm.ge(),
-                        token::Kind::EqEq => self.asm.eq(),
-                        token::Kind::TildeEq => self.asm.ne(),
-                        token::Kind::Pipe => self.asm.or(),
-                        token::Kind::Tilde => self.asm.xor(),
-                        token::Kind::Amp => self.asm.and(),
-                        token::Kind::LtLt => self.asm.shl(),
-                        token::Kind::GtGt => self.asm.shr(),
-                        token::Kind::DotDot => self.asm.strcat(),
-                        token::Kind::Plus => self.asm.add(),
-                        token::Kind::Minus => self.asm.sub(),
-                        token::Kind::Star => self.asm.mul(),
-                        token::Kind::Slash => self.asm.div(),
-                        token::Kind::SlashSlash => self.asm.floordiv(),
-                        token::Kind::Percent => self.asm.mod_(),
-                        token::Kind::Caret => self.asm.exp(),
+                        token::Kind::Lt => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.lt();
+                        }
+                        token::Kind::LtEq => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.le();
+                        }
+                        token::Kind::Gt => {
+                            // Lua translates a > b to b < a.
+                            // The __lt metamethod may be implemented to
+                            // override <, but there is no __gt metamethod.
+                            self.asm.swap();
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.lt();
+                        }
+                        token::Kind::GtEq => {
+                            // Lua translates a >= b to b <= a.
+                            // See above.
+                            self.asm.swap();
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.le();
+                        }
+                        token::Kind::EqEq => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.eq();
+                        }
+                        token::Kind::TildeEq => {
+                            // ~= is defined as the negation of ==. == may call
+                            // the __eq metamethod (there is no __ne metamethod)
+                            // and we need an instruction after to negate it.
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.eq();
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.not();
+                        }
+                        token::Kind::Pipe => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.or();
+                        }
+                        token::Kind::Tilde => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.xor();
+                        }
+                        token::Kind::Amp => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.and();
+                        }
+                        token::Kind::LtLt => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.shl();
+                        }
+                        token::Kind::GtGt => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.shr();
+                        }
+                        token::Kind::DotDot => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.strcat();
+                        }
+                        token::Kind::Plus => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.add();
+                        }
+                        token::Kind::Minus => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.sub();
+                        }
+                        token::Kind::Star => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.mul();
+                        }
+                        token::Kind::Slash => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.div();
+                        }
+                        token::Kind::SlashSlash => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.floordiv();
+                        }
+                        token::Kind::Percent => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.mod_();
+                        }
+                        token::Kind::Caret => {
+                            self.asm.mode(inst::MODE_LUA);
+                            self.asm.exp();
+                        }
                         _ => panic!("unexpected operator: {:?}", op.kind),
                     }
                 }

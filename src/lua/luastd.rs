@@ -26,9 +26,7 @@ pub fn build_std_package() -> Package {
         b.asm.constzero();
         b.asm.mode(inst::MODE_PTR);
         b.asm.nanbox();
-        b.asm.mode(inst::MODE_LUA);
         b.asm.ne();
-        b.asm.mode(inst::MODE_LUA);
         b.asm.bif(&mut panic_label);
         b.asm.pop();
         let si = b.ensure_string("assertion failed!");

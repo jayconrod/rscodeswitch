@@ -290,7 +290,7 @@ impl<T> IndexMut<usize> for List<T> {
     }
 }
 
-#[derive(Eq, Debug, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Eq, Debug, Ord, PartialEq, PartialOrd)]
 pub struct String {
     pub data: Slice<u8>,
 }
@@ -341,6 +341,16 @@ impl String {
     pub fn is_empty(&self) -> bool {
         return self.len() == 0;
     }
+
+    /// Hashes a string of bytes. We use a handwritten implementation instead of
+    /// the derived one to ensure we can hash both a data::String and a &str and
+    /// come up with the same result.
+    pub fn hash_bytes<H: Hasher>(state: &mut H, data: &[u8]) {
+        state.write_usize(data.len());
+        for &b in data {
+            state.write_u8(b);
+        }
+    }
 }
 
 impl Set for String {
@@ -378,6 +388,12 @@ impl Add for &String {
     }
 }
 
+impl Hash for String {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        String::hash_bytes(state, self.as_bytes())
+    }
+}
+
 #[derive(Debug)]
 pub struct HashMap<K: Eq + Hash + Set, V: Set> {
     entries: Slice<HashEntry<K, V>>,
@@ -408,15 +424,15 @@ impl<K: Eq + Hash + Set, V: Set> HashMap<K, V> {
         self.entries.len
     }
 
-    pub fn contains_key(&self, key: &K) -> bool {
+    pub fn contains_key<K2: Hash + PartialEq<K>>(&self, key: &K2) -> bool {
         HashMap::<K, V>::lookup(&self.entries, key).is_some()
     }
 
-    pub fn get(&self, key: &K) -> Option<&V> {
+    pub fn get<K2: Hash + PartialEq<K>>(&self, key: &K2) -> Option<&V> {
         HashMap::<K, V>::lookup(&self.entries, key).map(|i| &self.entries[i].value)
     }
 
-    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+    pub fn get_mut<K2: Hash + PartialEq<K>>(&mut self, key: &K2) -> Option<&mut V> {
         HashMap::<K, V>::lookup(&self.entries, key).map(|i| &mut self.entries[i].value)
     }
 
@@ -499,7 +515,10 @@ impl<K: Eq + Hash + Set, V: Set> HashMap<K, V> {
         self.entries.set(new_entries);
     }
 
-    fn lookup(entries: &Slice<HashEntry<K, V>>, key: &K) -> Option<usize> {
+    fn lookup<K2: Hash + PartialEq<K>>(
+        entries: &Slice<HashEntry<K, V>>,
+        key: &K2,
+    ) -> Option<usize> {
         if entries.len == 0 {
             return None;
         }
@@ -508,7 +527,7 @@ impl<K: Eq + Hash + Set, V: Set> HashMap<K, V> {
         let initial = code & mask;
         let mut i = initial;
         loop {
-            if entries[i].code == code && entries[i].key == *key {
+            if entries[i].code == code && *key == entries[i].key {
                 return Some(i);
             }
             if entries[i].code == 0 {
@@ -545,7 +564,7 @@ impl<K: Eq + Hash + Set, V: Set> HashMap<K, V> {
         }
     }
 
-    fn hash_key(key: &K) -> usize {
+    fn hash_key<K2: Hash>(key: &K2) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let code = hasher.finish() as usize;

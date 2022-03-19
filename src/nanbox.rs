@@ -491,6 +491,23 @@ impl Hash for NanBoxKey {
     }
 }
 
+pub struct NanBoxStringKey<'s>(pub &'s [u8]);
+
+impl<'s> PartialEq<NanBoxKey> for NanBoxStringKey<'s> {
+    fn eq(&self, other: &NanBoxKey) -> bool {
+        match <NanBox as TryInto<&data::String>>::try_into(NanBox(other.0)) {
+            Ok(rs) => self.0 == rs.as_bytes(),
+            _ => false,
+        }
+    }
+}
+
+impl<'s> Hash for NanBoxStringKey<'s> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        data::String::hash_bytes(state, self.0)
+    }
+}
+
 #[derive(Debug)]
 pub struct NanBoxKeyError {}
 

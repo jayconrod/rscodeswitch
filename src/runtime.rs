@@ -1,7 +1,7 @@
 use crate::data::{self, SetValue, Slice};
 use crate::heap::{self, Handle, Ptr, Set, HEAP};
 use crate::interpret::InterpreterFactory;
-use crate::nanbox::{NanBox, NanBoxKey};
+use crate::nanbox::{NanBox, NanBoxKey, NanBoxStringKey};
 use crate::package::{self, Type};
 use crate::pos::{Error, FunctionLineMap, PackageLineMap, Position};
 
@@ -408,21 +408,37 @@ impl Object {
     /// Looks up and returns a property, which may be in this object or the
     /// prototype chain.
     pub fn lookup_property(&self, key: NanBoxKey) -> Option<&Property> {
-        unsafe {
-            let mut o = self;
-            loop {
-                let prop = o.lookup_own_property(key);
-                if prop.is_some() {
-                    return prop;
+        let mut o = self;
+        loop {
+            let prop = o.lookup_own_property(key);
+            if prop.is_some() {
+                return prop;
+            }
+            match o.prototype.as_ref() {
+                Some(p) => {
+                    o = p;
                 }
-                match o.prototype.unwrap().as_ref() {
-                    Some(p) => {
-                        o = p;
-                    }
-                    None => {
-                        return None;
-                    }
+                None => {
+                    return None;
                 }
+            }
+        }
+    }
+
+    /// Like lookup_property, but uses a native string as a key instead of a
+    /// string on the heap.
+    pub fn lookup_named_property(&self, key: &[u8]) -> Option<&Property> {
+        let mut o = self;
+        loop {
+            let prop = o.lookup_own_named_property(key);
+            if prop.is_some() {
+                return prop;
+            }
+            match o.prototype.as_ref() {
+                Some(p) => {
+                    o = p;
+                }
+                None => return None,
             }
         }
     }
@@ -435,6 +451,12 @@ impl Object {
         } else {
             self.properties.get(&key)
         }
+    }
+
+    /// Like lookup_own_property, but uses a native string as a key instead of
+    /// a string on the heap.
+    pub fn lookup_own_named_property(&self, key: &[u8]) -> Option<&Property> {
+        self.properties.get(&NanBoxStringKey(key))
     }
 
     /// Looks up and returns an array property stored in the object itself, not
@@ -504,11 +526,26 @@ impl Object {
         self.lookup_property(key).map(|p| self.property_value(p))
     }
 
+    /// Looks up a named property and returns its value. This is a convenience
+    /// method for lookup_named_property followed by property_value.
+    pub unsafe fn named_property(&self, key: &[u8]) -> Option<NanBox> {
+        self.lookup_named_property(key)
+            .map(|p| self.property_value(p))
+    }
+
     /// Looks up a property on this object (not the prototype chain) and returns
     /// its value. This is a convenience method for lookup_own_property followed
     /// by property_value.
     pub unsafe fn own_property(&self, key: NanBoxKey) -> Option<NanBox> {
         self.lookup_own_property(key)
+            .map(|p| self.property_value(p))
+    }
+
+    /// Looks up a named property on this object (not the prototype chain) and
+    /// returns its value. This is a convenience method for
+    /// lookup_own_named_property followed by property_value.
+    pub unsafe fn own_named_property(&self, key: &[u8]) -> Option<NanBox> {
+        self.lookup_own_named_property(key)
             .map(|p| self.property_value(p))
     }
 

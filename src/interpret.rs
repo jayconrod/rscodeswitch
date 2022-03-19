@@ -157,6 +157,14 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         *((sp + FRAME_FP_OFFSET) as *mut usize) = self.fp;
         fp = sp;
 
+        let lua_load_meta_value = |v: NanBox, name: &str| -> Option<NanBox> {
+            <NanBox as TryInto<&Object>>::try_into(v)
+                .ok()
+                .and_then(|o| o.prototype.as_ref())
+                .and_then(|p| p.own_named_property(name.as_bytes()))
+                .filter(|m| !m.is_nil())
+        };
+
         // save_regs writes the local values of ip and other registers into the
         // Interpreter object.
         macro_rules! save_regs {
@@ -313,27 +321,180 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
             }};
         }
 
+        // lua_try_meta_unop! checks if the operand is a table with the named
+        // metamethod. If so, the method is called. It's an error if the
+        // metatable has a non-nil, non-callable property. If the operand does
+        // not have the metamethod, control falls through.
+        //
+        // TODO: BUG: if the metamethod returns multiple values, there's no
+        // code here to adjust down to one.
+        macro_rules! lua_try_meta_unop {
+            ($i:expr, $name:literal) => {{
+                let i = $i;
+                if let Some(mm) = lua_load_meta_value(i, $name) {
+                    let c = match mm.try_into() {
+                        Ok(c) => c,
+                        _ => unwind_errorf!("metamethod '{}' is not a function", $name),
+                    };
+                    push!(i.0);
+                    lua_call_closure!(c, 1);
+                    continue;
+                }
+            }};
+        }
+
+        // lua_try_meta_binop! checks if the left value is a table with the
+        // named metamethod, then checks the same on the right. If one of the
+        // values has the metamethod, both values are pushed, and the method
+        // is called. It's an error if a metatable has a non-nil, non-callable
+        // property. If neither value has the metamethod, control falls through.
+        //
+        // TODO: BUG: if the metamethod returns multiple values, there's no
+        // code here to adjust down to one.
+        macro_rules! lua_try_meta_binop {
+            ($l:expr, $r:expr, $name:literal) => {{
+                let l = $l;
+                let r = $r;
+                let mut mm: Option<&Closure> = None;
+                if let Some(lmm) = lua_load_meta_value(l, $name) {
+                    match lmm.try_into() {
+                        Ok(c) => {
+                            mm = Some(c);
+                        }
+                        _ => unwind_errorf!("metamethod '{}' is not a function", $name),
+                    };
+                } else if let Some(rmm) = lua_load_meta_value(r, $name) {
+                    match rmm.try_into() {
+                        Ok(c) => {
+                            mm = Some(c);
+                        }
+                        _ => unwind_errorf!("metamethod '{}' is not a function", $name),
+                    };
+                }
+                if let Some(c) = mm {
+                    push!(l.0);
+                    push!(r.0);
+                    lua_call_closure!(c, 2);
+                    continue;
+                }
+            }};
+        }
+
+        // lua_meta_index implements the table[key] expression. If the
+        // receiver is not a table, an error is raised. If the key is in the
+        // table, its value is returned. If the table has an __index metavalue
+        // that is a function, the function is called. If the table has a
+        // non-nil __index metavalue, the index operation is retried with that
+        // value as the receiver. If __index is nil or not present, control
+        // falls through.
+        // TODO: BUG: if the metamethod returns multiple values, there's no
+        // code here to adjust down to one.
+        macro_rules! lua_meta_index {
+            ($receiver:expr, $key:expr, $mainloop:tt) => {{
+                let mut receiver: NanBox = $receiver;
+                let key: NanBoxKey = $key;
+                let mut result: Option<NanBox>;
+                loop {
+                    let receiver_obj: &Object = match receiver.try_into() {
+                        Ok(o) => o,
+                        _ => unwind_errorf!("value is not an object: {:?}", receiver),
+                    };
+                    result = receiver_obj.own_property(key);
+                    if result.is_some() {
+                        break;
+                    }
+                    let meta_value_opt = receiver_obj.prototype.as_ref()
+                        .and_then(|p| p.own_named_property(b"__index"))
+                        .filter(|m| !m.is_nil());
+                    let meta_value = match meta_value_opt {
+                        Some(v) => v,
+                        None => {break;}
+                    };
+                    if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(meta_value) {
+                        push!(NanBox::from(receiver).0);
+                        push!(NanBox::from(key).0);
+                        lua_call_closure!(c, 2);
+                        continue $mainloop;
+                    }
+                    receiver = meta_value;
+                }
+                result
+            }};
+        }
+
+        // lua_meta_newindex implements 'table[key] = value' assignment. If the
+        // receiver is not a table, an error is raised. If the key is in the
+        // table, its value is replaced with the given value. If the table has
+        // a __newindex metavalue that is a function, the function is called.
+        // If the table has a non-nil __newindex metavalue, the operation is
+        // retried with that value as the receiver. If __newindex is nil or
+        // not present, a new property is added to the receiver.
+        // TODO: BUG: if the metamethod returns values, there's no code here
+        // to pop them.
+        macro_rules! lua_meta_newindex {
+            ($receiver:expr, $key:expr, $value:expr, $mainloop:tt) => {{
+                let mut receiver: NanBox = $receiver;
+                let key: NanBoxKey = $key;
+                let value: NanBox = $value;
+                loop {
+                    let receiver_obj: &mut Object = match receiver.try_into() {
+                        Ok(o) => o,
+                        _ => unwind_errorf!("value is not an object: {:?}", receiver),
+                    };
+                    if receiver_obj.lookup_own_property(key).is_some() {
+                        receiver_obj.set_property(key, PropertyKind::Field, value);
+                        break;
+                    }
+                    let meta_value_opt = receiver_obj.prototype.as_ref()
+                        .and_then(|p| p.own_named_property(b"__newindex"))
+                        .filter(|m| !m.is_nil());
+                    let meta_value = match meta_value_opt {
+                        Some(v) => v,
+                        None => {
+                            receiver_obj.set_property(key, PropertyKind::Field, value);
+                            break;
+                        }
+                    };
+                    if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(meta_value) {
+                        push!(receiver.0);
+                        push!(NanBox::from(key).0);
+                        push!(value.0);
+                        lua_call_closure!(c, 3);
+                        continue $mainloop;
+                    }
+                    receiver = meta_value;
+                }
+            }};
+        }
+
         // binop_eq! implements the == and != operators.
         macro_rules! binop_eq {
-            ($op:tt, f32) => {{
+            (f32, $op:tt) => {{
                 let r = pop_float!(f32);
                 let l = pop_float!(f32);
                 let v = (l $op r) as u64;
                 push!(v);
             }};
-            ($op:tt, f64) => {{
+            (f64, $op:tt) => {{
                 let r = pop_float!(f64);
                 let l = pop_float!(f64);
                 let v = (l $op r) as u64;
                 push!(v);
             }};
-            ($op:tt, lua) => {{
+            (box, $op:tt) => {{
                 let r = NanBox(pop!());
                 let l = NanBox(pop!());
                 let v = NanBox::from(l $op r);
                 push!(v.0);
             }};
-            ($op:tt, $ty:ty) => {{
+            (lua, $op:tt, $name:literal) => {{
+                let r = NanBox(pop!());
+                let l = NanBox(pop!());
+                lua_try_meta_binop!(l, r, $name);
+                let v = NanBox::from(l $op r);
+                push!(v.0)
+            }};
+            ($ty:ty, $op:tt) => {{
                 let r = pop!() as $ty;
                 let l = pop!() as $ty;
                 let v = (l $op r) as u64;
@@ -343,19 +504,19 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
 
         // binop_cmp! implements the <, <=, >, >= operators.
         macro_rules! binop_cmp {
-            ($op:tt, f32) => {{
+            (f32, $op:tt) => {{
                 let r = pop_float!(f32);
                 let l = pop_float!(f32);
                 let v = (l $op r) as u64;
                 push!(v);
             }};
-            ($op:tt, f64) => {{
+            (f64, $op:tt) => {{
                 let r = pop_float!(f64);
                 let l = pop_float!(f64);
                 let v = (l $op r) as u64;
                 push!(v);
             }};
-            ($ordmethod:ident, lua) => {{
+            (box, $ordmethod:ident) => {{
                 let r = NanBox(pop!());
                 let l = NanBox(pop!());
                 let v = if let Some(c) = l.partial_cmp(&r) {
@@ -365,7 +526,18 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 };
                 push!(v.0)
             }};
-            ($op:tt, $ty:ty) => {{
+            (lua, $ordmethod:ident, $name:literal) => {{
+                let r = NanBox(pop!());
+                let l = NanBox(pop!());
+                lua_try_meta_binop!(l, r, $name);
+                let v = if let Some(c) = l.partial_cmp(&r) {
+                    NanBox::from(c.$ordmethod())
+                } else {
+                    unwind_errorf!("can't compare values: {:?} and {:?}", l, r);
+                };
+                push!(v.0)
+            }};
+            ($ty:ty, $op:tt) => {{
                 let r = pop!() as $ty;
                 let l = pop!() as $ty;
                 let v = (l $op r) as u64;
@@ -376,19 +548,19 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         // binop_num! implements numeric operators that produce a value of
         // the same type.
         macro_rules! binop_num {
-            ($op:tt, f32) => {{
+            (f32, $op:tt) => {{
                 let r = pop_float!(f32);
                 let l = pop_float!(f32);
                 let v = l $op r;
                 push_float!(v, f32);
             }};
-            ($op:tt, f64) => {{
+            (f64, $op:tt) => {{
                 let r = pop_float!(f64);
                 let l = pop_float!(f64);
                 let v = l $op r;
                 push_float!(v, f64);
             }};
-            ($op:tt, $checked:ident, lua) => {{
+            (box, $op:tt, $checked:ident) => {{
                 let r = NanBox(pop!());
                 let l = NanBox(pop!());
                 let v = if let (Ok(li), Ok(ri)) = (<NanBox as TryInto<i64>>::try_into(l), <NanBox as TryInto<i64>>::try_into(r)) {
@@ -403,7 +575,23 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 };
                 push!(v.0);
             }};
-            ($wrapping:ident, $ty:ty) => {{
+            (lua, $op:tt, $checked:ident, $name:literal) => {{
+                let r = NanBox(pop!());
+                let l = NanBox(pop!());
+                lua_try_meta_binop!(l, r, $name);
+                let v = if let (Ok(li), Ok(ri)) = (<NanBox as TryInto<i64>>::try_into(l), <NanBox as TryInto<i64>>::try_into(r)) {
+                    match li.$checked(ri) {
+                        Some(vi) => maybe_box_int!(vi),
+                        None => NanBox::from((li as f64) $op (ri as f64))
+                    }
+                } else if let (Ok(lf), Ok(rf)) = (l.as_f64(), r.as_f64()) {
+                    NanBox::from(lf $op rf)
+                } else {
+                    unwind_errorf!("arithmetic operands must both be numbers: {:?} and {:?}", l, r)
+                };
+                push!(v.0);
+            }};
+            ($ty:ty, $wrapping:ident) => {{
                 let r = pop!() as $ty;
                 let l = pop!() as $ty;
                 let v = l.$wrapping(r) as u64;
@@ -414,17 +602,17 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         // unop_num! implements unary numeric operators that produce a value
         // of the same type.
         macro_rules! unop_num {
-            ($op:tt, f32) => {{
+            (f32, $op:tt) => {{
                 let v = pop_float!(f32);
                 let r = $op v;
                 push_float!(r, f32);
             }};
-            ($op:tt, f64) => {{
+            (f64, $op:tt) => {{
                 let v = pop_float!(f64);
                 let r = $op v;
                 push_float!(r, f64);
             }};
-            ($op:tt, lua) => {{
+            (box, $op:tt) => {{
                 let o = NanBox(pop!());
                 let v = if let Ok(i) = <NanBox as TryInto<i64>>::try_into(o) {
                     maybe_box_int!($op i)
@@ -435,7 +623,19 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 };
                 push!(v.0);
             }};
-            ($op:tt, $ty:ty) => {{
+            (lua, $op:tt, $name:literal) => {{
+                let o = NanBox(pop!());
+                lua_try_meta_unop!(o, $name);
+                let v = if let Ok(i) = <NanBox as TryInto<i64>>::try_into(o) {
+                    maybe_box_int!($op i)
+                } else if let Ok(f) = o.as_f64() {
+                    NanBox::from($op f)
+                } else {
+                    unwind_errorf!("arithmetic operand must be number: {:?}", o)
+                };
+                push!(v.0);
+            }};
+            ($ty:ty, $op:tt) => {{
                 let o = pop!() as $ty;
                 let v = $op o;
                 push!(v as u64);
@@ -541,9 +741,10 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         // error if either is not a number. It then performs the operation,
         // boxes, and pushes the result.
         macro_rules! lua_binop_bit {
-            ($op:tt) => {{
+            ($op:tt, $name:literal) => {{
                 let r = NanBox(pop!());
                 let l = NanBox(pop!());
+                lua_try_meta_binop!(l, r, $name);
                 let li = lua_value_as_int!(l);
                 let ri = lua_value_as_int!(r);
                 let v = li $op ri;
@@ -618,7 +819,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
         }
 
         // Main loop
-        loop {
+        'mainloop: loop {
             let mut op = *ip;
             let mode = if op < inst::MODE_MIN {
                 inst::MODE_I64
@@ -631,48 +832,49 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
 
             let inst_size = match (op, mode) {
                 (inst::ADD, inst::MODE_I64) => {
-                    binop_num!(wrapping_add, i64);
+                    binop_num!(i64, wrapping_add);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_I32) => {
-                    binop_num!(wrapping_add, i32);
+                    binop_num!(i32, wrapping_add);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_I16) => {
-                    binop_num!(wrapping_add, i16);
+                    binop_num!(i16, wrapping_add);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_I8) => {
-                    binop_num!(wrapping_add, i8);
+                    binop_num!(i8, wrapping_add);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_U64) => {
-                    binop_num!(wrapping_add, u64);
+                    binop_num!(u64, wrapping_add);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_U32) => {
-                    binop_num!(wrapping_add, u32);
+                    binop_num!(u32, wrapping_add);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_U16) => {
-                    binop_num!(wrapping_add, u16);
+                    binop_num!(u16, wrapping_add);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_U8) => {
-                    binop_num!(wrapping_add, u8);
+                    binop_num!(u8, wrapping_add);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_F64) => {
-                    binop_num!(+, f64);
+                    binop_num!(f64, +);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_F32) => {
-                    binop_num!(+, f32);
+                    binop_num!(f32, +);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_LUA) => {
                     let r = NanBox(pop!());
                     let l = NanBox(pop!());
+                    lua_try_meta_binop!(l, r, "__add");
                     let v = if let (Ok(li), Ok(ri)) = (
                         <NanBox as TryInto<i64>>::try_into(l),
                         <NanBox as TryInto<i64>>::try_into(r),
@@ -716,7 +918,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::ALLOC)
                 }
                 (inst::AND, inst::MODE_LUA) => {
-                    lua_binop_bit!(&);
+                    lua_binop_bit!(&, "__band");
                     inst::size(inst::AND)
                 }
                 (inst::APPENDV, inst::MODE_LUA) => {
@@ -830,7 +1032,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     lua_call_closure!(callee, arg_count_including_receiver);
                     continue;
                 }
-                (inst::CALLNAMEDPROPWITHPROTOTYPE, inst::MODE_LUA) => {
+                (inst::CALLNAMEDPROPWITHPROTOTYPE, inst::MODE_BOX) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
                     let key = NanBox::from(name).try_into().unwrap();
@@ -907,48 +1109,49 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::CONSTZERO)
                 }
                 (inst::DIV, inst::MODE_I64) => {
-                    binop_num!(wrapping_div, i64);
+                    binop_num!(i64, wrapping_div);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_I32) => {
-                    binop_num!(wrapping_div, i32);
+                    binop_num!(i32, wrapping_div);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_I16) => {
-                    binop_num!(wrapping_div, i16);
+                    binop_num!(i16, wrapping_div);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_I8) => {
-                    binop_num!(wrapping_div, i8);
+                    binop_num!(i8, wrapping_div);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_U64) => {
-                    binop_num!(wrapping_div, u64);
+                    binop_num!(u64, wrapping_div);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_U32) => {
-                    binop_num!(wrapping_div, u32);
+                    binop_num!(u32, wrapping_div);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_U16) => {
-                    binop_num!(wrapping_div, u16);
+                    binop_num!(u16, wrapping_div);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_U8) => {
-                    binop_num!(wrapping_div, u8);
+                    binop_num!(u8, wrapping_div);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_F64) => {
-                    binop_num!(/, f64);
+                    binop_num!(f64, /);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_F32) => {
-                    binop_num!(/, f32);
+                    binop_num!(f32, /);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_LUA) => {
                     let r = NanBox(pop!());
                     let l = NanBox(pop!());
+                    lua_try_meta_binop!(l, r, "__div");
                     let v = if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
                         NanBox::from(lf / rf)
                     } else {
@@ -967,24 +1170,25 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::DUP)
                 }
                 (inst::EQ, inst::MODE_I64) => {
-                    binop_eq!(==, i64);
+                    binop_eq!(i64, ==);
                     inst::size(inst::EQ)
                 }
                 (inst::EQ, inst::MODE_F64) => {
-                    binop_eq!(==, f64);
+                    binop_eq!(f64, ==);
                     inst::size(inst::EQ)
                 }
                 (inst::EQ, inst::MODE_F32) => {
-                    binop_eq!(==, f32);
+                    binop_eq!(f32, ==);
                     inst::size(inst::EQ)
                 }
                 (inst::EQ, inst::MODE_LUA) => {
-                    binop_eq!(==, lua);
+                    binop_eq!(lua, ==, "__eq");
                     inst::size(inst::EQ)
                 }
                 (inst::EXP, inst::MODE_LUA) => {
                     let r = NanBox(pop!());
                     let l = NanBox(pop!());
+                    lua_try_meta_binop!(l, r, "__pow");
                     let v = if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
                         NanBox::from(f64::powf(lf, rf))
                     } else {
@@ -1000,6 +1204,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 (inst::FLOORDIV, inst::MODE_LUA) => {
                     let r = NanBox(pop!());
                     let l = NanBox(pop!());
+                    lua_try_meta_binop!(l, r, "__idiv");
                     let v = if let (Ok(li), Ok(ri)) = (l.as_i64(), r.as_i64()) {
                         maybe_box_int!(li / ri)
                     } else if let (Ok(lf), Ok(rf)) = (l.as_f64_imprecise(), r.as_f64_imprecise()) {
@@ -1021,47 +1226,43 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::FUNCTION)
                 }
                 (inst::GE, inst::MODE_I64) => {
-                    binop_cmp!(>=, i64);
+                    binop_cmp!(i64, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GE, inst::MODE_I32) => {
-                    binop_cmp!(>=, i32);
+                    binop_cmp!(i32, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GE, inst::MODE_I16) => {
-                    binop_cmp!(>=, i16);
+                    binop_cmp!(i16, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GE, inst::MODE_I8) => {
-                    binop_cmp!(>=, i8);
+                    binop_cmp!(i8, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GE, inst::MODE_U64) => {
-                    binop_cmp!(>=, u64);
+                    binop_cmp!(u64, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GE, inst::MODE_U32) => {
-                    binop_cmp!(>=, u32);
+                    binop_cmp!(u32, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GE, inst::MODE_U16) => {
-                    binop_cmp!(>=, u16);
+                    binop_cmp!(u16, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GE, inst::MODE_U8) => {
-                    binop_cmp!(>=, u8);
+                    binop_cmp!(u8, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GE, inst::MODE_F64) => {
-                    binop_cmp!(>=, f64);
+                    binop_cmp!(f64, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GE, inst::MODE_F32) => {
-                    binop_cmp!(>=, f32);
-                    inst::size(inst::GE)
-                }
-                (inst::GE, inst::MODE_LUA) => {
-                    binop_cmp!(is_ge, lua);
+                    binop_cmp!(f32, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GETERROR, inst::MODE_LUA) => {
@@ -1082,95 +1283,92 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::GETV)
                 }
                 (inst::GT, inst::MODE_I64) => {
-                    binop_cmp!(>, i64);
+                    binop_cmp!(i64, >);
                     inst::size(inst::GT)
                 }
                 (inst::GT, inst::MODE_I32) => {
-                    binop_cmp!(>, i32);
+                    binop_cmp!(i32, >);
                     inst::size(inst::GT)
                 }
                 (inst::GT, inst::MODE_I16) => {
-                    binop_cmp!(>, i16);
+                    binop_cmp!(i16, >);
                     inst::size(inst::GT)
                 }
                 (inst::GT, inst::MODE_I8) => {
-                    binop_cmp!(>, i8);
+                    binop_cmp!(i8, >);
                     inst::size(inst::GT)
                 }
                 (inst::GT, inst::MODE_U64) => {
-                    binop_cmp!(>, u64);
+                    binop_cmp!(u64, >);
                     inst::size(inst::GT)
                 }
                 (inst::GT, inst::MODE_U32) => {
-                    binop_cmp!(>, u32);
+                    binop_cmp!(u32, >);
                     inst::size(inst::GT)
                 }
                 (inst::GT, inst::MODE_U16) => {
-                    binop_cmp!(>, u16);
+                    binop_cmp!(u16, >);
                     inst::size(inst::GT)
                 }
                 (inst::GT, inst::MODE_U8) => {
-                    binop_cmp!(>, u8);
+                    binop_cmp!(u8, >);
                     inst::size(inst::GT)
                 }
                 (inst::GT, inst::MODE_F64) => {
-                    binop_cmp!(>, f64);
+                    binop_cmp!(f64, >);
                     inst::size(inst::GT)
                 }
                 (inst::GT, inst::MODE_F32) => {
-                    binop_cmp!(>, f32);
-                    inst::size(inst::GT)
-                }
-                (inst::GT, inst::MODE_LUA) => {
-                    binop_cmp!(is_gt, lua);
+                    binop_cmp!(f32, >);
                     inst::size(inst::GT)
                 }
                 (inst::LE, inst::MODE_I64) => {
-                    binop_cmp!(<=, i64);
+                    binop_cmp!(i64, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_I32) => {
-                    binop_cmp!(<=, i32);
+                    binop_cmp!(i32, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_I16) => {
-                    binop_cmp!(<=, i16);
+                    binop_cmp!(i16, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_I8) => {
-                    binop_cmp!(<=, i8);
+                    binop_cmp!(i8, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_U64) => {
-                    binop_cmp!(<=, u64);
+                    binop_cmp!(u64, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_U32) => {
-                    binop_cmp!(<=, u32);
+                    binop_cmp!(u32, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_U16) => {
-                    binop_cmp!(<=, u16);
+                    binop_cmp!(u16, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_U8) => {
-                    binop_cmp!(<=, u8);
+                    binop_cmp!(u8, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_F64) => {
-                    binop_cmp!(<=, f64);
+                    binop_cmp!(f64, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_F32) => {
-                    binop_cmp!(<=, f32);
+                    binop_cmp!(f32, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_LUA) => {
-                    binop_cmp!(is_le, lua);
+                    binop_cmp!(lua, is_le, "__le");
                     inst::size(inst::LE)
                 }
                 (inst::LEN, inst::MODE_LUA) => {
                     let o = NanBox(pop!());
+                    lua_try_meta_unop!(o, "__len");
                     let v = if let Ok(s) = <NanBox as TryInto<&data::String>>::try_into(o) {
                         s.len() as i64
                     } else if let Ok(o) = <NanBox as TryInto<&Object>>::try_into(o) {
@@ -1267,19 +1465,14 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 }
                 (inst::LOADINDEXPROPORNIL, inst::MODE_LUA) => {
                     let index = NanBox(pop!());
-                    let raw_receiver = NanBox(pop!());
-                    let receiver: &Object = match raw_receiver.try_into() {
-                        Ok(o) => o,
-                        _ => unwind_errorf!("value is not an object: {:?}", raw_receiver),
+                    let receiver = NanBox(pop!());
+                    let key: NanBoxKey = match index.try_into() {
+                        Ok(k) => k,
+                        _ => NanBox::from_nil().try_into().unwrap(),
                     };
-                    let v = match index.try_into() {
-                        Err(_) => NanBox::from_nil(),
-                        Ok(key) => match receiver.lookup_property(key) {
-                            None => NanBox::from_nil(),
-                            Some(p) => receiver.property_value(p),
-                        },
-                    };
-                    push!(v.0);
+                    let result_opt = lua_meta_index!(receiver, key, 'mainloop);
+                    let result = result_opt.unwrap_or(NanBox::from_nil());
+                    push!(result.0);
                     inst::size(inst::LOADINDEXPROPORNIL)
                 }
                 (inst::LOADLOCAL, inst::MODE_I64) => {
@@ -1288,24 +1481,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     push!(v);
                     inst::size(inst::LOADLOCAL)
                 }
-                (inst::LOADNAMEDPROP, inst::MODE_LUA) => {
-                    let name_index = read_imm!(u32, 1) as usize;
-                    let name = &pp.strings[name_index];
-                    let key = NanBox::from(name).try_into().unwrap();
-                    let raw_receiver = NanBox(pop!());
-                    let receiver: &Object = match raw_receiver.try_into() {
-                        Ok(o) => o,
-                        _ => unwind_errorf!("value is not an object: {:?}", raw_receiver),
-                    };
-                    let prop = match receiver.lookup_property(key) {
-                        Some(p) => p,
-                        None => unwind_errorf!("object does not have property {}", key),
-                    };
-                    let value = receiver.property_value(prop);
-                    push!(value.0);
-                    inst::size(inst::LOADNAMEDPROP)
-                }
-                (inst::LOADNAMEDPROPORNIL, inst::MODE_LUA) => {
+                (inst::LOADNAMEDPROP, inst::MODE_BOX) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
                     let key = NanBox::from(name).try_into().unwrap();
@@ -1314,11 +1490,51 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                         Ok(o) => o,
                         _ => unwind_errorf!("value is not an object: {:?}", receiver),
                     };
-                    let value = match receiver_obj.lookup_property(key) {
-                        Some(p) => receiver_obj.property_value(p),
-                        None => NanBox::from_nil(),
+                    let prop = match receiver_obj.lookup_property(key) {
+                        Some(p) => p,
+                        None => unwind_errorf!("object does not have property {}", key),
                     };
+                    let value = receiver_obj.property_value(prop);
                     push!(value.0);
+                    inst::size(inst::LOADNAMEDPROP)
+                }
+                (inst::LOADNAMEDPROP, inst::MODE_LUA) => {
+                    let name_index = read_imm!(u32, 1) as usize;
+                    let name = &pp.strings[name_index];
+                    let key = NanBox::from(name).try_into().unwrap();
+                    let receiver = NanBox(pop!());
+                    let result_opt = lua_meta_index!(receiver, key, 'mainloop);
+                    let result = match result_opt {
+                        Some(v) => v,
+                        None => unwind_errorf!("object does not have property {}", key),
+                    };
+                    push!(result.0);
+                    inst::size(inst::LOADNAMEDPROP)
+                }
+                (inst::LOADNAMEDPROPORNIL, inst::MODE_BOX) => {
+                    let name_index = read_imm!(u32, 1) as usize;
+                    let name = &pp.strings[name_index];
+                    let key = NanBox::from(name).try_into().unwrap();
+                    let receiver = NanBox(pop!());
+                    let receiver_obj: &Object = match receiver.try_into() {
+                        Ok(o) => o,
+                        _ => unwind_errorf!("value is not an object: {:?}", receiver),
+                    };
+                    let value = receiver_obj
+                        .lookup_property(key)
+                        .map(|prop| receiver_obj.property_value(prop))
+                        .unwrap_or(NanBox::from_nil());
+                    push!(value.0);
+                    inst::size(inst::LOADNAMEDPROPORNIL)
+                }
+                (inst::LOADNAMEDPROPORNIL, inst::MODE_LUA) => {
+                    let name_index = read_imm!(u32, 1) as usize;
+                    let name = &pp.strings[name_index];
+                    let key = NanBox::from(name).try_into().unwrap();
+                    let receiver = NanBox(pop!());
+                    let result_opt = lua_meta_index!(receiver, key, 'mainloop);
+                    let result = result_opt.unwrap_or(NanBox::from_nil());
+                    push!(result.0);
                     inst::size(inst::LOADNAMEDPROPORNIL)
                 }
                 (inst::LOADNEXTINDEXPROPORNIL, inst::MODE_LUA) => {
@@ -1384,92 +1600,93 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::LOADVARARGS)
                 }
                 (inst::LT, inst::MODE_I64) => {
-                    binop_cmp!(<, i64);
+                    binop_cmp!(i64, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_I32) => {
-                    binop_cmp!(<, i32);
+                    binop_cmp!(i32, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_I16) => {
-                    binop_cmp!(<, i16);
+                    binop_cmp!(i16, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_I8) => {
-                    binop_cmp!(<, i8);
+                    binop_cmp!(i8, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_U64) => {
-                    binop_cmp!(<, u64);
+                    binop_cmp!(u64, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_U32) => {
-                    binop_cmp!(<, u32);
+                    binop_cmp!(u32, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_U16) => {
-                    binop_cmp!(<, u16);
+                    binop_cmp!(u16, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_U8) => {
-                    binop_cmp!(<, u8);
+                    binop_cmp!(u8, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_F64) => {
-                    binop_cmp!(<, f64);
+                    binop_cmp!(f64, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_F32) => {
-                    binop_cmp!(<, f32);
+                    binop_cmp!(f32, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_LUA) => {
-                    binop_cmp!(is_lt, lua);
+                    binop_cmp!(lua, is_lt, "__lt");
                     inst::size(inst::LT)
                 }
                 (inst::MOD, inst::MODE_I64) => {
-                    binop_num!(wrapping_rem, i64);
+                    binop_num!(i64, wrapping_rem);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_I32) => {
-                    binop_num!(wrapping_rem, i32);
+                    binop_num!(i32, wrapping_rem);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_I16) => {
-                    binop_num!(wrapping_rem, i16);
+                    binop_num!(i16, wrapping_rem);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_I8) => {
-                    binop_num!(wrapping_rem, i8);
+                    binop_num!(i8, wrapping_rem);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_U64) => {
-                    binop_num!(wrapping_rem, u64);
+                    binop_num!(u64, wrapping_rem);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_U32) => {
-                    binop_num!(wrapping_rem, u32);
+                    binop_num!(u32, wrapping_rem);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_U16) => {
-                    binop_num!(wrapping_rem, u16);
+                    binop_num!(u16, wrapping_rem);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_U8) => {
-                    binop_num!(wrapping_rem, u8);
+                    binop_num!(u8, wrapping_rem);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_F64) => {
-                    binop_num!(%, f64);
+                    binop_num!(f64, %);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_F32) => {
-                    binop_num!(%, f32);
+                    binop_num!(f32, %);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_LUA) => {
                     let r = NanBox(pop!());
                     let l = NanBox(pop!());
+                    lua_try_meta_binop!(l, r, "__mod");
                     let v = if let (Ok(li), Ok(ri)) = (l.as_i64(), r.as_i64()) {
                         if ri == 0 {
                             unwind_errorf!("attempt to perform n%0");
@@ -1489,47 +1706,47 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::MOD)
                 }
                 (inst::MUL, inst::MODE_I64) => {
-                    binop_num!(wrapping_mul, i64);
+                    binop_num!(i64, wrapping_mul);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_I32) => {
-                    binop_num!(wrapping_mul, i32);
+                    binop_num!(i32, wrapping_mul);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_I16) => {
-                    binop_num!(wrapping_mul, i16);
+                    binop_num!(i16, wrapping_mul);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_I8) => {
-                    binop_num!(wrapping_mul, i8);
+                    binop_num!(i8, wrapping_mul);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_U64) => {
-                    binop_num!(wrapping_mul, u64);
+                    binop_num!(u64, wrapping_mul);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_U32) => {
-                    binop_num!(wrapping_mul, u32);
+                    binop_num!(u32, wrapping_mul);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_U16) => {
-                    binop_num!(wrapping_mul, u16);
+                    binop_num!(u16, wrapping_mul);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_U8) => {
-                    binop_num!(wrapping_mul, u8);
+                    binop_num!(u8, wrapping_mul);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_F64) => {
-                    binop_num!(*, f64);
+                    binop_num!(f64, *);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_F32) => {
-                    binop_num!(*, f32);
+                    binop_num!(f32, *);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_LUA) => {
-                    binop_num!(*, checked_mul, lua);
+                    binop_num!(lua, *, checked_mul, "__mul");
                     inst::size(inst::MUL)
                 }
                 (inst::NANBOX, inst::MODE_I64) | (inst::NANBOX, inst::MODE_U64) => {
@@ -1595,47 +1812,43 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::NANBOX)
                 }
                 (inst::NE, inst::MODE_I64) => {
-                    binop_eq!(!=, i64);
+                    binop_eq!(i64, !=);
                     inst::size(inst::NE)
                 }
                 (inst::NE, inst::MODE_F64) => {
-                    binop_eq!(!=, f64);
+                    binop_eq!(f64, !=);
                     inst::size(inst::NE)
                 }
                 (inst::NE, inst::MODE_F32) => {
-                    binop_eq!(!=, f32);
-                    inst::size(inst::NE)
-                }
-                (inst::NE, inst::MODE_LUA) => {
-                    binop_eq!(!=, lua);
+                    binop_eq!(f32, !=);
                     inst::size(inst::NE)
                 }
                 (inst::NEG, inst::MODE_I64) => {
-                    unop_num!(-, i64);
+                    unop_num!(i64, -);
                     inst::size(inst::NEG)
                 }
                 (inst::NEG, inst::MODE_I32) => {
-                    unop_num!(-, i32);
+                    unop_num!(i32, -);
                     inst::size(inst::NEG)
                 }
                 (inst::NEG, inst::MODE_I16) => {
-                    unop_num!(-, i16);
+                    unop_num!(i16, -);
                     inst::size(inst::NEG)
                 }
                 (inst::NEG, inst::MODE_I8) => {
-                    unop_num!(-, i8);
+                    unop_num!(i8, -);
                     inst::size(inst::NEG)
                 }
                 (inst::NEG, inst::MODE_F64) => {
-                    unop_num!(-, f64);
+                    unop_num!(f64, -);
                     inst::size(inst::NEG)
                 }
                 (inst::NEG, inst::MODE_F32) => {
-                    unop_num!(-, f32);
+                    unop_num!(f32, -);
                     inst::size(inst::NEG)
                 }
                 (inst::NEG, inst::MODE_LUA) => {
-                    unop_num!(-, lua);
+                    unop_num!(lua, -, "__unm");
                     inst::size(inst::NEG)
                 }
                 (inst::NEWCLOSURE, inst::MODE_I64) => {
@@ -1700,30 +1913,31 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::NOT)
                 }
                 (inst::NOTB, inst::MODE_I64) => {
-                    unop_num!(!, i64);
+                    unop_num!(i64, !);
                     inst::size(inst::NOTB)
                 }
                 (inst::NOTB, inst::MODE_I32) => {
-                    unop_num!(!, i32);
+                    unop_num!(i32, !);
                     inst::size(inst::NOTB)
                 }
                 (inst::NOTB, inst::MODE_I16) => {
-                    unop_num!(!, i16);
+                    unop_num!(i16, !);
                     inst::size(inst::NOTB)
                 }
                 (inst::NOTB, inst::MODE_I8) => {
-                    unop_num!(!, i8);
+                    unop_num!(i8, !);
                     inst::size(inst::NOTB)
                 }
                 (inst::NOTB, inst::MODE_LUA) => {
                     let v = NanBox(pop!());
+                    lua_try_meta_unop!(v, "__bnot");
                     let vi = lua_value_as_int!(v);
                     let b = !vi;
                     push!(maybe_box_int!(b).0);
                     inst::size(inst::NOTB)
                 }
                 (inst::OR, inst::MODE_LUA) => {
-                    lua_binop_bit!(|);
+                    lua_binop_bit!(|, "__bor");
                     inst::size(inst::OR)
                 }
                 (inst::PANIC, inst::MODE_STRING) => {
@@ -1808,6 +2022,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 (inst::SHL, inst::MODE_LUA) => {
                     let r = NanBox(pop!());
                     let l = NanBox(pop!());
+                    lua_try_meta_binop!(l, r, "__shl");
                     let li = lua_value_as_int!(l) as u64;
                     let ri = lua_value_as_int!(r);
                     let vi = if ri >= 64 {
@@ -1825,6 +2040,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 (inst::SHR, inst::MODE_LUA) => {
                     let r = NanBox(pop!());
                     let l = NanBox(pop!());
+                    lua_try_meta_binop!(l, r, "__shr");
                     let li = lua_value_as_int!(l) as u64;
                     let ri = lua_value_as_int!(r);
                     let vi = if ri >= 64 {
@@ -1908,18 +2124,14 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::STOREIMPORTGLOBAL)
                 }
                 (inst::STOREINDEXPROP, inst::MODE_LUA) => {
-                    let v = NanBox(pop!());
-                    let i = NanBox(pop!());
-                    let raw_receiver = NanBox(pop!());
-                    let receiver: &mut Object = match raw_receiver.try_into() {
-                        Ok(o) => o,
-                        _ => unwind_errorf!("value is not an object: {:?}", raw_receiver),
+                    let value = NanBox(pop!());
+                    let index = NanBox(pop!());
+                    let receiver = NanBox(pop!());
+                    let key: NanBoxKey = match index.try_into() {
+                        Ok(k) => k,
+                        _ => unwind_errorf!("cannot use NaN as table key"),
                     };
-                    let key = match i.try_into() {
-                        Ok(key) => key,
-                        Err(_) => unwind_errorf!("cannot use NaN as table key"),
-                    };
-                    receiver.set_property(key, PropertyKind::Field, v);
+                    lua_meta_newindex!(receiver, key, value, 'mainloop);
                     inst::size(inst::STOREINDEXPROP)
                 }
                 (inst::STORELOCAL, inst::MODE_I64) => {
@@ -1944,17 +2156,26 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     receiver.set_own_property(key, PropertyKind::Method, raw_method);
                     inst::size(inst::STOREMETHOD)
                 }
-                (inst::STORENAMEDPROP, inst::MODE_LUA) => {
+                (inst::STORENAMEDPROP, inst::MODE_BOX) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
                     let key = NanBox::from(name).try_into().unwrap();
-                    let v = NanBox(pop!());
+                    let value = NanBox(pop!());
                     let raw_receiver = NanBox(pop!());
                     let receiver: &mut Object = match raw_receiver.try_into() {
                         Ok(o) => o,
                         _ => unwind_errorf!("value is not an object: {:?}", raw_receiver),
                     };
-                    receiver.set_property(key, PropertyKind::Field, v);
+                    receiver.set_property(key, PropertyKind::Field, value);
+                    inst::size(inst::STORENAMEDPROP)
+                }
+                (inst::STORENAMEDPROP, inst::MODE_LUA) => {
+                    let name_index = read_imm!(u32, 1) as usize;
+                    let name = &pp.strings[name_index];
+                    let key: NanBoxKey = NanBox::from(name).try_into().unwrap();
+                    let value = NanBox(pop!());
+                    let receiver = NanBox(pop!());
+                    lua_meta_newindex!(receiver, key, value, 'mainloop);
                     inst::size(inst::STORENAMEDPROP)
                 }
                 (inst::STOREPROTOTYPE, inst::MODE_I64) => {
@@ -1991,6 +2212,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                 (inst::STRCAT, inst::MODE_LUA) => {
                     let r = NanBox(pop!());
                     let l = NanBox(pop!());
+                    lua_try_meta_binop!(l, r, "__concat");
                     let ls = lua_concat_op_as_string!(l);
                     let rs = lua_concat_op_as_string!(r);
                     let cs = ls + rs;
@@ -2004,47 +2226,47 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::STRING)
                 }
                 (inst::SUB, inst::MODE_I64) => {
-                    binop_num!(wrapping_sub, i64);
+                    binop_num!(i64, wrapping_sub);
                     inst::size(inst::SUB)
                 }
                 (inst::SUB, inst::MODE_I32) => {
-                    binop_num!(wrapping_sub, i32);
+                    binop_num!(i32, wrapping_sub);
                     inst::size(inst::SUB)
                 }
                 (inst::SUB, inst::MODE_I16) => {
-                    binop_num!(wrapping_sub, i16);
+                    binop_num!(i16, wrapping_sub);
                     inst::size(inst::SUB)
                 }
                 (inst::SUB, inst::MODE_I8) => {
-                    binop_num!(wrapping_sub, i8);
+                    binop_num!(i8, wrapping_sub);
                     inst::size(inst::SUB)
                 }
                 (inst::SUB, inst::MODE_U64) => {
-                    binop_num!(wrapping_sub, u64);
+                    binop_num!(u64, wrapping_sub);
                     inst::size(inst::SUB)
                 }
                 (inst::SUB, inst::MODE_U32) => {
-                    binop_num!(wrapping_sub, u32);
+                    binop_num!(u32, wrapping_sub);
                     inst::size(inst::SUB)
                 }
                 (inst::SUB, inst::MODE_U16) => {
-                    binop_num!(wrapping_sub, u16);
+                    binop_num!(u16, wrapping_sub);
                     inst::size(inst::SUB)
                 }
                 (inst::SUB, inst::MODE_U8) => {
-                    binop_num!(wrapping_sub, u8);
+                    binop_num!(u8, wrapping_sub);
                     inst::size(inst::SUB)
                 }
                 (inst::SUB, inst::MODE_F64) => {
-                    binop_num!(-, f64);
+                    binop_num!(f64, -);
                     inst::size(inst::SUB)
                 }
                 (inst::SUB, inst::MODE_F32) => {
-                    binop_num!(-, f32);
+                    binop_num!(f32, -);
                     inst::size(inst::SUB)
                 }
                 (inst::SUB, inst::MODE_LUA) => {
-                    binop_num!(-, checked_sub, lua);
+                    binop_num!(lua, -, checked_sub, "__sub");
                     inst::size(inst::SUB)
                 }
                 (inst::SWAP, inst::MODE_I64) => {
@@ -2117,7 +2339,7 @@ impl<'env, 'r, 'w, 'pl> Interpreter<'env, 'r, 'w, 'pl> {
                     inst::size(inst::UNBOX)
                 }
                 (inst::XOR, inst::MODE_LUA) => {
-                    lua_binop_bit!(^);
+                    lua_binop_bit!(^, "__bxor");
                     inst::size(inst::XOR)
                 }
                 (_, inst::MODE_I64) => {
