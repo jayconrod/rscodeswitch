@@ -99,6 +99,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "codeswitch_lox"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "codeswitch",
+ "lazy-regex",
+ "lazy_static",
+ "regex",
+]
+
+[[package]]
+name = "codeswitch_lua"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "codeswitch",
+ "lazy-regex",
+ "lazy_static",
+ "regex",
+ "rustyline",
+]
+
+[[package]]
 name = "dirs-next"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
