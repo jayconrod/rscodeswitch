@@ -161,14 +161,6 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
         *((sp + FRAME_FP_OFFSET) as *mut usize) = self.fp;
         fp = sp;
 
-        let lua_load_meta_value = |v: NanBox, name: &str| -> Option<NanBox> {
-            <NanBox as TryInto<&Object>>::try_into(v)
-                .ok()
-                .and_then(|o| o.prototype.as_ref())
-                .and_then(|p| p.own_named_property(name.as_bytes()))
-                .filter(|m| !m.is_nil())
-        };
-
         // save_regs writes the local values of ip and other registers into the
         // Interpreter object.
         macro_rules! save_regs {
@@ -325,23 +317,51 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
             }};
         }
 
+        // call_function pushes a stack frame and sets registers, beginning a
+        // call to the given function. The next instruction executed will be the
+        // first in the function. After the function returns, the next
+        // instruction will be the one after the current instruction.
+        macro_rules! call_function {
+            ($callee:expr, $arg_count:expr) => {{
+                let callee: *const Function = $callee;
+                let callee_func = callee.as_ref().unwrap();
+                let arg_count: usize = $arg_count;
+                if callee_func.var_param_type.is_some() {
+                    push!(arg_count as u64);
+                    vc = arg_count - callee_func.param_types.len();
+                } else {
+                    debug_assert_eq!(callee_func.param_types.len(), arg_count);
+                    vc = 0;
+                }
+                sp -= FRAME_SIZE;
+                *((sp + FRAME_FUNC_OFFSET) as *mut u64) = func as *const Function as u64;
+                func = callee_func;
+                *((sp + FRAME_CP_OFFSET) as *mut u64) = cp as u64;
+                cp = 0 as *const Closure;
+                *((sp + FRAME_IP_OFFSET) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
+                ip = &callee_func.insts[0] as *const u8;
+                *((sp + FRAME_FP_OFFSET) as *mut u64) = fp as u64;
+                fp = sp;
+                pp = func.package.as_mut().unwrap();
+            }};
+        }
+
         // lua_try_meta_unop! checks if the operand is a table with the named
         // metamethod. If so, the method is called. It's an error if the
         // metatable has a non-nil, non-callable property. If the operand does
         // not have the metamethod, control falls through.
-        //
-        // TODO: BUG: if the metamethod returns multiple values, there's no
-        // code here to adjust down to one.
         macro_rules! lua_try_meta_unop {
             ($i:expr, $name:literal) => {{
                 let i = $i;
-                if let Some(mm) = lua_load_meta_value(i, $name) {
-                    let c = match mm.try_into() {
+                if let Some(mm) = Interpreter::lua_load_meta_value(i, $name) {
+                    let c: &Closure = match mm.try_into() {
                         Ok(c) => c,
                         _ => unwind_errorf!("metamethod '{}' is not a function", $name),
                     };
+                    push!(NanBox::from(c).0);
                     push!(i.0);
-                    lua_call_closure!(c, 1);
+                    let adjust1 = self.lua_load_std_function("_adjust1").unwrap();
+                    call_function!(adjust1, 2);
                     continue;
                 }
             }};
@@ -352,33 +372,33 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
         // values has the metamethod, both values are pushed, and the method
         // is called. It's an error if a metatable has a non-nil, non-callable
         // property. If neither value has the metamethod, control falls through.
-        //
-        // TODO: BUG: if the metamethod returns multiple values, there's no
-        // code here to adjust down to one.
         macro_rules! lua_try_meta_binop {
             ($l:expr, $r:expr, $name:literal) => {{
                 let l = $l;
                 let r = $r;
+                let name = $name;
                 let mut mm: Option<&Closure> = None;
-                if let Some(lmm) = lua_load_meta_value(l, $name) {
+                if let Some(lmm) = Interpreter::lua_load_meta_value(l, name) {
                     match lmm.try_into() {
                         Ok(c) => {
                             mm = Some(c);
                         }
-                        _ => unwind_errorf!("metamethod '{}' is not a function", $name),
+                        _ => unwind_errorf!("metamethod '{}' is not a function", name),
                     };
-                } else if let Some(rmm) = lua_load_meta_value(r, $name) {
+                } else if let Some(rmm) = Interpreter::lua_load_meta_value(r, name) {
                     match rmm.try_into() {
                         Ok(c) => {
                             mm = Some(c);
                         }
-                        _ => unwind_errorf!("metamethod '{}' is not a function", $name),
+                        _ => unwind_errorf!("metamethod '{}' is not a function", name),
                     };
                 }
                 if let Some(c) = mm {
+                    push!(NanBox::from(c).0);
                     push!(l.0);
                     push!(r.0);
-                    lua_call_closure!(c, 2);
+                    let adjust1 = self.lua_load_std_function("_adjust1").unwrap();
+                    call_function!(adjust1, 3);
                     continue;
                 }
             }};
@@ -391,8 +411,6 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
         // non-nil __index metavalue, the index operation is retried with that
         // value as the receiver. If __index is nil or not present, control
         // falls through.
-        // TODO: BUG: if the metamethod returns multiple values, there's no
-        // code here to adjust down to one.
         macro_rules! lua_meta_index {
             ($receiver:expr, $key:expr, $mainloop:tt) => {{
                 let mut receiver: NanBox = $receiver;
@@ -415,9 +433,11 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                         None => {break;}
                     };
                     if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(meta_value) {
+                        push!(NanBox::from(c).0);
                         push!(NanBox::from(receiver).0);
                         push!(NanBox::from(key).0);
-                        lua_call_closure!(c, 2);
+                        let adjust1 = self.lua_load_std_function("_adjust1").unwrap();
+                        call_function!(adjust1, 3);
                         continue $mainloop;
                     }
                     receiver = meta_value;
@@ -433,8 +453,6 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
         // If the table has a non-nil __newindex metavalue, the operation is
         // retried with that value as the receiver. If __newindex is nil or
         // not present, a new property is added to the receiver.
-        // TODO: BUG: if the metamethod returns values, there's no code here
-        // to pop them.
         macro_rules! lua_meta_newindex {
             ($receiver:expr, $key:expr, $value:expr, $mainloop:tt) => {{
                 let mut receiver: NanBox = $receiver;
@@ -460,10 +478,12 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                         }
                     };
                     if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(meta_value) {
+                        push!(NanBox::from(c).0);
                         push!(receiver.0);
                         push!(NanBox::from(key).0);
                         push!(value.0);
-                        lua_call_closure!(c, 3);
+                        let adjust0 = self.lua_load_std_function("_adjust0").unwrap();
+                        call_function!(adjust0, 4);
                         continue $mainloop;
                     }
                     receiver = meta_value;
@@ -2755,6 +2775,22 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
         let raw_rets = self.interpret_closure_rec(closure, &raw_args)?;
         let rets = raw_rets.iter().map(|&n| NanBox(n)).collect();
         Ok(rets)
+    }
+
+    unsafe fn lua_load_meta_value(v: NanBox, name: &str) -> Option<NanBox> {
+        <NanBox as TryInto<&Object>>::try_into(v)
+            .ok()
+            .and_then(|o| o.prototype.as_ref())
+            .and_then(|p| p.own_named_property(name.as_bytes()))
+            .filter(|m| !m.is_nil())
+    }
+
+    fn lua_load_std_function(&mut self, name: &str) -> Option<*const Function> {
+        self.loader
+            .borrow_mut()
+            .package_by_name("luastd")
+            .and_then(|p| p.function_by_name(name))
+            .map(|f| f as *const Function)
     }
 
     unsafe fn unwind_with_error(&mut self, error: Error) -> Result<(), Error> {

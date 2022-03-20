@@ -1,14 +1,12 @@
-use codeswitch::inst::{self, Assembler, Label};
+use codeswitch::inst::{self, Label};
 use codeswitch::nanbox;
-use codeswitch::package::{Function, Global, Package, Type};
-use codeswitch::pos::PackageLineMap;
+use codeswitch::package::{Builder, Package};
 use codeswitch::runtime::Object;
 
-use std::collections::HashMap;
 use std::mem;
 
 pub fn build_std_package() -> Package {
-    let mut b = Builder::new();
+    let mut b = Builder::new(String::from("luastd"));
     let env_index = b.add_global("_ENV");
     let g_index = b.add_global("_G");
     let ipairs_iter_index = b.add_global("ipairs_iter");
@@ -157,7 +155,7 @@ pub fn build_std_package() -> Package {
         b.asm.setvi(1);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
-        ipairs_iter_func_index = b.finish_function("ipairs_iter", 2, false);
+        ipairs_iter_func_index = b.finish_function("_ipairs_iter", 2, false);
 
         // ipairs(table): returns ipairs_iter, table, 0, nil
         b.asm.loadglobal(ipairs_iter_index);
@@ -619,12 +617,41 @@ pub fn build_std_package() -> Package {
 
     // TODO: debug
 
+    // _adjust0(f, ...): calls function f with arguments. Returns nothing.
+    {
+        b.asm.loadarg(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadvarargs();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.callvaluev();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.adjustv(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("_adjust0", 1, true);
+    }
+
+    // _adjust1(f, ...): calls functionf with arguments. Returns the first
+    // value returned by f or nil if f returned nothing.
+    {
+        b.asm.loadarg(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.loadvarargs();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.callvaluev();
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.adjustv(1);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("_adjust1", 1, true);
+    }
+
     // init - allocates and populates the _ENV table.
     b.asm.alloc(mem::size_of::<Object>() as u32);
     b.asm.mode(inst::MODE_OBJECT);
     b.asm.nanbox();
     for i in 0..b.package.functions.len() {
-        if b.package.functions[i].name == "ipairs_iter" {
+        if b.package.functions[i].name.starts_with("_") {
             continue;
         }
         b.asm.dup();
@@ -660,86 +687,4 @@ pub fn build_std_package() -> Package {
     b.finish_function("", 0, false);
 
     b.build()
-}
-
-struct Builder {
-    string_index: HashMap<&'static str, u32>,
-    asm: Assembler,
-    package: Package,
-    function_name_index: Vec<u32>,
-}
-
-impl Builder {
-    fn new() -> Builder {
-        Builder {
-            string_index: HashMap::new(),
-            asm: Assembler::new(),
-            package: Package {
-                name: String::from("luastd"),
-                globals: Vec::new(),
-                functions: Vec::new(),
-                init_index: None,
-                strings: Vec::new(),
-                line_map: PackageLineMap { files: Vec::new() },
-                imports: Vec::new(),
-            },
-            function_name_index: Vec::new(),
-        }
-    }
-
-    fn build(mut self) -> Package {
-        let init_index = (self.package.functions.len() - 1) as u32;
-        self.package.init_index = Some(init_index);
-        self.package
-    }
-
-    fn finish_function(
-        &mut self,
-        name: &'static str,
-        param_count: usize,
-        is_variadic: bool,
-    ) -> u32 {
-        let mut asm = Assembler::new();
-        mem::swap(&mut self.asm, &mut asm);
-        let (insts, flmap) = asm.finish().unwrap();
-        let var_param_type = if is_variadic {
-            Some(Type::NanBox)
-        } else {
-            None
-        };
-        let fi: u32 = self.package.functions.len().try_into().unwrap();
-        self.package.functions.push(Function {
-            name: String::from(name),
-            insts,
-            param_types: vec![Type::NanBox; param_count],
-            var_param_type,
-            return_types: Vec::new(),
-            var_return_type: Some(Type::NanBox),
-            cell_types: Vec::new(),
-            line_map: flmap,
-        });
-        let si = self.ensure_string(name);
-        self.function_name_index.push(si);
-        fi
-    }
-
-    fn add_global(&mut self, s: &'static str) -> u32 {
-        let i = self.package.globals.len() as u32;
-        self.package.globals.push(Global {
-            name: String::from(s),
-        });
-        i
-    }
-
-    fn ensure_string(&mut self, s: &'static str) -> u32 {
-        match self.string_index.get(s) {
-            Some(&i) => i,
-            None => {
-                let i = self.package.strings.len().try_into().unwrap();
-                self.package.strings.push(Vec::from(s));
-                self.string_index.insert(s, i);
-                i
-            }
-        }
-    }
 }

@@ -1,7 +1,8 @@
-use crate::inst;
+use crate::inst::{self, Assembler};
 use crate::pos::{FunctionLineMap, PackageLineMap};
 use crate::runtime::Object;
 
+use std::collections::HashMap;
 use std::fmt::{self, Formatter};
 use std::mem;
 
@@ -182,6 +183,88 @@ impl fmt::Display for Type {
                     _ => unreachable!(),
                 };
                 f.write_str(s)
+            }
+        }
+    }
+}
+
+pub struct Builder {
+    pub string_index: HashMap<&'static str, u32>,
+    pub asm: Assembler,
+    pub package: Package,
+    pub function_name_index: Vec<u32>,
+}
+
+impl Builder {
+    pub fn new(name: String) -> Builder {
+        Builder {
+            string_index: HashMap::new(),
+            asm: Assembler::new(),
+            package: Package {
+                name,
+                globals: Vec::new(),
+                functions: Vec::new(),
+                init_index: None,
+                strings: Vec::new(),
+                line_map: PackageLineMap { files: Vec::new() },
+                imports: Vec::new(),
+            },
+            function_name_index: Vec::new(),
+        }
+    }
+
+    pub fn build(mut self) -> Package {
+        let init_index = (self.package.functions.len() - 1) as u32;
+        self.package.init_index = Some(init_index);
+        self.package
+    }
+
+    pub fn finish_function(
+        &mut self,
+        name: &'static str,
+        param_count: usize,
+        is_variadic: bool,
+    ) -> u32 {
+        let mut asm = Assembler::new();
+        mem::swap(&mut self.asm, &mut asm);
+        let (insts, flmap) = asm.finish().unwrap();
+        let var_param_type = if is_variadic {
+            Some(Type::NanBox)
+        } else {
+            None
+        };
+        let fi: u32 = self.package.functions.len().try_into().unwrap();
+        self.package.functions.push(Function {
+            name: String::from(name),
+            insts,
+            param_types: vec![Type::NanBox; param_count],
+            var_param_type,
+            return_types: Vec::new(),
+            var_return_type: Some(Type::NanBox),
+            cell_types: Vec::new(),
+            line_map: flmap,
+        });
+        let si = self.ensure_string(name);
+        self.function_name_index.push(si);
+        fi
+    }
+
+    pub fn add_global(&mut self, s: &'static str) -> u32 {
+        let i = self.package.globals.len() as u32;
+        self.package.globals.push(Global {
+            name: String::from(s),
+        });
+        i
+    }
+
+    pub fn ensure_string(&mut self, s: &'static str) -> u32 {
+        match self.string_index.get(s) {
+            Some(&i) => i,
+            None => {
+                let i = self.package.strings.len().try_into().unwrap();
+                self.package.strings.push(Vec::from(s));
+                self.string_index.insert(s, i);
+                i
             }
         }
     }
