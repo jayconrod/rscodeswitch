@@ -1169,6 +1169,10 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 }
                 self.asm.mode(inst::MODE_LUA);
                 self.asm.loadvarargs();
+                if static_expr_count > 1 {
+                    self.asm.mode(inst::MODE_LUA);
+                    self.asm.appendv(static_expr_count - 1);
+                }
                 ExprListLen::Dynamic
             }
             Some(expr) => {

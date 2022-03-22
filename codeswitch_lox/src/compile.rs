@@ -196,7 +196,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.asm().loadarg(i);
                     }
                     let si = self.ensure_string(b"init", *pos);
-                    self.asm().mode(inst::MODE_LUA);
+                    self.asm().mode(inst::MODE_BOX);
                     self.asm().callnamedprop(si, arg_count);
                     self.asm().pop();
                 }
@@ -591,7 +591,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                             self.compile_expr(arg);
                         }
                         let si = self.ensure_string(name.text.as_bytes(), name.pos);
-                        self.asm().mode(inst::MODE_LUA);
+                        self.asm().mode(inst::MODE_BOX);
                         self.asm().callnamedprop(si, arg_count);
                     }
                     Expr::Super { name, var_use, .. } => {
@@ -613,7 +613,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         for arg in arguments {
                             self.compile_expr(arg);
                         }
-                        self.asm().mode(inst::MODE_LUA);
+                        self.asm().mode(inst::MODE_BOX);
                         self.asm().callvalue(arg_count);
                     }
                 }

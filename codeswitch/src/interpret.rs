@@ -346,6 +346,73 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
             }};
         }
 
+        macro_rules! call_closure {
+            ($callee:expr, $arg_count:expr) => {{
+                let callee: &Closure = $callee;
+                let arg_count: usize = $arg_count;
+                let callee_func = callee.function.unwrap_ref();
+
+                // If the callee has bound arguments, insert them on the stack
+                // before the regular arguments.
+                if callee.bound_arg_count > 0 {
+                    let bound_arg_begin = sp + arg_count * 8 - 8;
+                    let delta = callee.bound_arg_count as usize * 8;
+                    let mut from = sp;
+                    sp -= delta;
+                    let mut to = sp;
+                    while from <= bound_arg_begin {
+                        *(to as *mut u64) = *(from as *mut u64);
+                        to += 8;
+                        from += 8;
+                    }
+                    for i in 0..callee.bound_arg_count {
+                        let to = (bound_arg_begin - i as usize * 8) as *mut u64;
+                        *to = callee.bound_arg(i);
+                    }
+                }
+
+                // If the callee is not variadic and the number of arguments
+                // differs from the number of parameters, or if the callee is
+                // variadic and there are too few arguments, raise an error.
+                // If the callee is variadic, push the number of arguments
+                // and set vc to the number of variadic arguments.
+                let total_arg_count = arg_count + callee.bound_arg_count as usize;
+                if total_arg_count > u16::MAX as usize {
+                    unwind_errorf!("too many arguments");
+                }
+                let param_count = callee_func.param_types.len();
+                if total_arg_count < param_count
+                    || (callee_func.var_param_type.is_none() && total_arg_count > param_count)
+                {
+                    unwind_errorf!(
+                        "wrong number of arguments: want {}, got {}",
+                        param_count,
+                        total_arg_count
+                    );
+                }
+                if callee_func.var_param_type.is_some() {
+                    push!(total_arg_count as u64);
+                    vc = total_arg_count - param_count;
+                } else {
+                    vc = 0;
+                }
+
+                // Constrct a stack frame for the callee and set the registers
+                // so the function's instructions, cells, and package will be
+                // used.
+                sp -= FRAME_SIZE;
+                *((sp + FRAME_FUNC_OFFSET) as *mut u64) = func as *const Function as u64;
+                func = callee_func;
+                *((sp + FRAME_CP_OFFSET) as *mut u64) = cp as u64;
+                cp = callee;
+                *((sp + FRAME_IP_OFFSET) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
+                ip = &callee_func.insts[0] as *const u8;
+                *((sp + FRAME_FP_OFFSET) as *mut u64) = fp as u64;
+                fp = sp;
+                pp = callee_func.package.as_mut().unwrap();
+            }};
+        }
+
         // lua_try_meta_unop! checks if the operand is a table with the named
         // metamethod. If so, the method is called. It's an error if the
         // metatable has a non-nil, non-callable property. If the operand does
@@ -778,16 +845,28 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
 
         macro_rules! lua_call_closure {
             ($callee:expr, $arg_count:expr) => {{
-                // TODO: support metatable calls
-                let callee: &Closure = $callee;
-                let arg_count = ($arg_count) as usize;
-                let callee_func = callee.function.unwrap_ref();
+                let callee: NanBox = $callee;
+                let arg_count: usize = $arg_count;
+
+                // If the callee is not a function, try the __call metamethod.
+                let callee_closure = if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(callee)
+                {
+                    c
+                } else if let Some(v) = Interpreter::lua_load_meta_value(callee, "__call") {
+                    match v.try_into() {
+                        Ok(c) => c,
+                        _ => unwind_errorf!("metamethod '__call' is not a function"),
+                    }
+                } else {
+                    unwind_errorf!("called value is not a function")
+                };
+                let callee_func = callee_closure.function.unwrap_ref();
 
                 // If the callee has bound arguments, insert them on the stack
                 // before the regular arguments.
-                if callee.bound_arg_count > 0 {
+                if callee_closure.bound_arg_count > 0 {
                     let bound_arg_begin = sp + arg_count * 8 - 8;
-                    let delta = callee.bound_arg_count as usize * 8;
+                    let delta = callee_closure.bound_arg_count as usize * 8;
                     let mut from = sp;
                     sp -= delta;
                     let mut to = sp;
@@ -796,9 +875,9 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                         to += 8;
                         from += 8;
                     }
-                    for i in 0..callee.bound_arg_count {
+                    for i in 0..callee_closure.bound_arg_count {
                         let to = (bound_arg_begin - i as usize * 8) as *mut u64;
-                        *to = callee.bound_arg(i);
+                        *to = callee_closure.bound_arg(i);
                     }
                 }
 
@@ -807,7 +886,7 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                 // including pushed nils. If the callee is not variadic and
                 // there are more arguments than parameters, pop the extra
                 // arguments.
-                let mut total_arg_count = arg_count + callee.bound_arg_count as usize;
+                let mut total_arg_count = arg_count + callee_closure.bound_arg_count as usize;
                 if total_arg_count > u16::MAX as usize {
                     unwind_errorf!("too many arguments");
                 }
@@ -833,7 +912,7 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                 *((sp as usize + 24) as *mut u64) = func as *const Function as u64;
                 func = callee_func;
                 *((sp as usize + 16) as *mut u64) = cp as u64;
-                cp = callee;
+                cp = callee_closure;
                 *((sp as usize + 8) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
                 ip = &func.insts[0] as *const u8;
                 *(sp as *mut u64) = fp as u64;
@@ -985,18 +1064,18 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     debug_assert!(hp < fp);
                     continue;
                 }
-                (inst::CALLNAMEDPROP, inst::MODE_LUA) => {
+                (inst::CALLNAMEDPROP, inst::MODE_BOX) => {
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
                     let key = NanBox::from(name).try_into().unwrap();
                     let arg_count = read_imm!(u16, 5) as usize;
                     let receiver_addr = sp + arg_count * 8;
-                    let raw_receiver = NanBox(*(receiver_addr as *const u64));
-                    let receiver: &Object = match raw_receiver.try_into() {
+                    let receiver = NanBox(*(receiver_addr as *const u64));
+                    let receiver_obj: &Object = match receiver.try_into() {
                         Ok(o) => o,
-                        _ => unwind_errorf!("receiver is not an object: {:?}", raw_receiver),
+                        _ => unwind_errorf!("receiver is not an object: {:?}", receiver),
                     };
-                    let prop = match receiver.lookup_property(key) {
+                    let prop = match receiver_obj.lookup_property(key) {
                         Some(p) => p,
                         _ => unwind_errorf!("property {} is not defined", name),
                     };
@@ -1018,7 +1097,39 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     } else {
                         arg_count + 1
                     };
-                    lua_call_closure!(callee, arg_count_including_receiver);
+                    call_closure!(callee, arg_count_including_receiver);
+                    continue;
+                }
+                (inst::CALLNAMEDPROP, inst::MODE_LUA) => {
+                    let name_index = read_imm!(u32, 1) as usize;
+                    let name = &pp.strings[name_index];
+                    let key = NanBox::from(name).try_into().unwrap();
+                    let arg_count = read_imm!(u16, 5) as usize;
+                    let receiver_addr = sp + arg_count * 8;
+                    let receiver = NanBox(*(receiver_addr as *const u64));
+                    let receiver_obj: &Object = match receiver.try_into() {
+                        Ok(o) => o,
+                        _ => unwind_errorf!("receiver is not an object: {:?}", receiver),
+                    };
+                    let prop = match receiver_obj.lookup_property(key) {
+                        Some(p) => p,
+                        _ => unwind_errorf!("property {} is not defined", name),
+                    };
+                    let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
+                        // If this is not a method but a regular field that
+                        // happens to contain a function, shift the
+                        // arguments back to remove the receiver from the
+                        // stack. A method will pop the receiver (and so it
+                        // remains on the stack in that case), but a
+                        // function won't.
+                        // TODO: this is horrendously inefficient. Come up
+                        // with something better.
+                        shift_args!(arg_count, 1);
+                        arg_count
+                    } else {
+                        arg_count + 1
+                    };
+                    lua_call_closure!(prop.value, arg_count_including_receiver);
                     continue;
                 }
                 (inst::CALLNAMEDPROPV, inst::MODE_LUA) => {
@@ -1035,10 +1146,6 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                         Some(p) => p,
                         _ => unwind_errorf!("property {} is not defined", name),
                     };
-                    let callee: &Closure = match prop.value.try_into() {
-                        Ok(c) => c,
-                        _ => unwind_errorf!("property {} is not a function", name),
-                    };
                     let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
                         // If this is not a method but a regular field that
                         // happens to contain a function, shift the
@@ -1053,7 +1160,7 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     } else {
                         vc + 1
                     };
-                    lua_call_closure!(callee, arg_count_including_receiver);
+                    lua_call_closure!(prop.value, arg_count_including_receiver);
                     continue;
                 }
                 (inst::CALLNAMEDPROPWITHPROTOTYPE, inst::MODE_BOX) => {
@@ -1086,17 +1193,29 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                         shift_args!(arg_count, 1);
                         arg_count + 1
                     };
-                    lua_call_closure!(callee, arg_count_including_receiver);
+                    call_closure!(callee, arg_count_including_receiver);
+                    continue;
+                }
+                (inst::CALLVALUE, inst::MODE_BOX) => {
+                    let arg_count = read_imm!(u16, 1) as usize;
+                    let callee_addr = sp + arg_count * 8;
+                    let callee = NanBox(*(callee_addr as *const u64));
+                    let callee_closure: &Closure = match callee.try_into() {
+                        Ok(c) => c,
+                        _ => unwind_errorf!("called value is not a function"),
+                    };
+                    // Remove the callee from the stack before the call.
+                    // CALLNAMEDPROP does this too when the called property
+                    // is a field instead of a method. See comment there.
+                    // TODO: this is a terrible, inefficient solution.
+                    shift_args!(arg_count, 1);
+                    call_closure!(callee_closure, arg_count);
                     continue;
                 }
                 (inst::CALLVALUE, inst::MODE_LUA) => {
                     let arg_count = read_imm!(u16, 1) as usize;
                     let callee_addr = sp + arg_count * 8;
-                    let raw_callee = NanBox(*(callee_addr as *const u64));
-                    let callee = match raw_callee.try_into() {
-                        Ok(c) => c,
-                        _ => unwind_errorf!("called value is not a function: {:?}", raw_callee),
-                    };
+                    let callee = NanBox(*(callee_addr as *const u64));
                     // Remove the callee from the stack before the call.
                     // CALLNAMEDPROP does this too when the called property
                     // is a field instead of a method. See comment there.
@@ -1106,12 +1225,13 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     continue;
                 }
                 (inst::CALLVALUEV, inst::MODE_LUA) => {
+                    // Calls a function or value with __call metamethod with
+                    // a variable number of arguments. Used for calls where the
+                    // last expression expands to a variable number of values
+                    // (like a call or '...'). vc must contain the total number
+                    // of arguments.
                     let callee_addr = sp + vc * 8;
-                    let raw_callee = NanBox(*(callee_addr as *const u64));
-                    let callee = match raw_callee.try_into() {
-                        Ok(c) => c,
-                        _ => unwind_errorf!("called value is not a function: {:?}", raw_callee),
-                    };
+                    let callee = NanBox(*(callee_addr as *const u64));
                     shift_args!(vc, 1);
                     lua_call_closure!(callee, vc);
                     continue;
@@ -1611,6 +1731,11 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     inst::size(inst::LOADPROTOTYPE)
                 }
                 (inst::LOADVARARGS, inst::MODE_LUA) => {
+                    // Copies the function's variadic arguments onto the stack
+                    // and sets vc to the number of variadic arguments. Used to
+                    // implement the "..." expression. The function must be
+                    // variadic. The number of variadic arguments should be
+                    // between the last argument and the frame.
                     debug_assert!(func.var_param_type.is_some());
                     let argc = *((fp + FRAME_SIZE) as *const u64) as usize;
                     vc = argc - func.param_types.len();
