@@ -15,9 +15,6 @@ use std::io::{Read, Write};
 use std::mem;
 use std::path::PathBuf;
 
-// TODO: replace "cannot use NaN as table key" messages with something that
-// includes nil.
-
 // Each stack frame consists of (with descending stack address):
 //
 //   - Caller: *const Function
@@ -2335,7 +2332,7 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     };
                     let key: NanBoxKey = match index.try_into() {
                         Ok(k) => k,
-                        _ => unwind_errorf!("cannot use NaN as table key"),
+                        _ => unwind_errorf!("cannot use NaN or nil as property key"),
                     };
                     receiver_obj.set_own_property(key, PropertyKind::Field, value);
                     inst::size(inst::STOREINDEXPROP)
@@ -2346,7 +2343,7 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     let receiver = NanBox(pop!());
                     let key: NanBoxKey = match index.try_into() {
                         Ok(k) => k,
-                        _ => unwind_errorf!("cannot use NaN as table key"),
+                        _ => unwind_errorf!("cannot use NaN or nil as property key"),
                     };
                     lua_meta_newindex!(receiver, key, value, 'mainloop);
                     inst::size(inst::STOREINDEXPROP)
