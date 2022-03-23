@@ -15,6 +15,9 @@ use std::io::{Read, Write};
 use std::mem;
 use std::path::PathBuf;
 
+// TODO: replace "cannot use NaN as table key" messages with something that
+// includes nil.
+
 // Each stack frame consists of (with descending stack address):
 //
 //   - Caller: *const Function
@@ -1325,6 +1328,10 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     binop_eq!(f32, ==);
                     inst::size(inst::EQ)
                 }
+                (inst::EQ, inst::MODE_BOX) => {
+                    binop_eq!(box, ==);
+                    inst::size(inst::EQ)
+                }
                 (inst::EQ, inst::MODE_LUA) => {
                     binop_eq!(lua, ==, "__eq");
                     inst::size(inst::EQ)
@@ -1510,6 +1517,37 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     binop_cmp!(lua, is_le, "__le");
                     inst::size(inst::LE)
                 }
+                (inst::LEN, inst::MODE_BOX) => {
+                    let o = NanBox(pop!());
+                    let v = if let Ok(s) = <NanBox as TryInto<&data::String>>::try_into(o) {
+                        s.len() as i64
+                    } else if let Ok(o) = <NanBox as TryInto<&Object>>::try_into(o) {
+                        // We want to return the index of the last non-nil
+                        // property with a positive integer key in the table.
+                        // Object::len is not quite that: it's one plus the
+                        // index of the property with the highest non-negative
+                        // integer key. If that property is nil, we walk back
+                        // until we find a non-nil value.
+                        // TODO: find a faster solution. The spec requires
+                        // O(log n) time, but this is O(n).
+                        let mut n = o.len;
+                        if n > 0 {
+                            n -= 1;
+                        }
+                        while n > 0 {
+                            match o.lookup_own_array_property(n) {
+                                Some(Property { value, .. }) if !value.is_nil() => break,
+                                _ => (),
+                            }
+                            n -= 1;
+                        }
+                        n
+                    } else {
+                        unwind_errorf!("value is not an object: {:?}", o);
+                    };
+                    push!(maybe_box_int!(v).0);
+                    inst::size(inst::LEN)
+                }
                 (inst::LEN, inst::MODE_LUA) => {
                     let o = NanBox(pop!());
                     lua_try_meta_unop!(o, "__len");
@@ -1606,6 +1644,21 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     let v = pp.imports[imp_index].globals[index].as_ref().unwrap().value;
                     push!(v);
                     inst::size(inst::LOADIMPORTGLOBAL)
+                }
+                (inst::LOADINDEXPROPORNIL, inst::MODE_BOX) => {
+                    let index = NanBox(pop!());
+                    let receiver = NanBox(pop!());
+                    let receiver_obj: &Object = match receiver.try_into() {
+                        Ok(o) => o,
+                        _ => unwind_errorf!("value is not an object: {:?}", receiver),
+                    };
+                    let key: NanBoxKey = match index.try_into() {
+                        Ok(k) => k,
+                        _ => NanBox::from_nil().try_into().unwrap(),
+                    };
+                    let result = receiver_obj.own_property_or_nil(key);
+                    push!(result.0);
+                    inst::size(inst::LOADINDEXPROPORNIL)
                 }
                 (inst::LOADINDEXPROPORNIL, inst::MODE_LUA) => {
                     let index = NanBox(pop!());
@@ -2271,6 +2324,21 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     let v = pop!();
                     pp.imports[imp_index].globals[index].as_mut().unwrap().value = v;
                     inst::size(inst::STOREIMPORTGLOBAL)
+                }
+                (inst::STOREINDEXPROP, inst::MODE_BOX) => {
+                    let value = NanBox(pop!());
+                    let index = NanBox(pop!());
+                    let receiver = NanBox(pop!());
+                    let receiver_obj: &mut Object = match receiver.try_into() {
+                        Ok(o) => o,
+                        _ => unwind_errorf!("value is not an object: {:?}", receiver),
+                    };
+                    let key: NanBoxKey = match index.try_into() {
+                        Ok(k) => k,
+                        _ => unwind_errorf!("cannot use NaN as table key"),
+                    };
+                    receiver_obj.set_own_property(key, PropertyKind::Field, value);
+                    inst::size(inst::STOREINDEXPROP)
                 }
                 (inst::STOREINDEXPROP, inst::MODE_LUA) => {
                     let value = NanBox(pop!());

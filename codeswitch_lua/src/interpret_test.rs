@@ -19,6 +19,7 @@ use std::str;
 
 use lazy_regex::regex;
 use regex::Regex;
+use unified_diff;
 
 // TODO: also need a convenient way to test for errors.
 
@@ -166,9 +167,15 @@ fn check_result(
             if got_text == want_text {
                 Ok(())
             } else {
+                let diff =
+                    unified_diff::diff(got_text.as_bytes(), "got", want_text.as_bytes(), "want", 3);
+                let diff_text = str::from_utf8(&diff).unwrap();
                 Err(ErrorList::new(
                     Position::from(path),
-                    &format!("got errors:\n{}\n\nwant errors:\n{}", got_text, want_text),
+                    &format!(
+                        "got errors:\n{}\n\nwant errors:\n{}\n\n{}",
+                        got_text, want_text, &diff_text
+                    ),
                 ))
             }
         }
@@ -179,9 +186,15 @@ fn check_result(
             if got_text == want_text {
                 Ok(())
             } else {
+                let diff =
+                    unified_diff::diff(got_text.as_bytes(), "got", want_text.as_bytes(), "want", 3);
+                let diff_text = str::from_utf8(&diff).unwrap();
                 Err(ErrorList::new(
                     Position::from(path),
-                    &format!("got output:\n{}\n\nwant:\n{}", got_text, want_text),
+                    &format!(
+                        "got output:\n{}\n\nwant:\n{}\n\n{}",
+                        got_text, want_text, &diff_text
+                    ),
                 ))
             }
         }

@@ -312,10 +312,50 @@ pub fn build_std_package() -> Package {
     b.asm.retv();
     b.finish_function("print", 0, true);
 
-    // TODO: rawequal
-    // TODO: rawget
-    // TODO: rawlen
-    // TODO: rawset
+    // rawequal
+    {
+        b.asm.loadarg(0);
+        b.asm.loadarg(1);
+        b.asm.mode(inst::MODE_BOX);
+        b.asm.eq();
+        b.asm.setvi(1);
+        b.asm.ret();
+        b.finish_function("rawequal", 2, false);
+    }
+
+    // rawget
+    {
+        b.asm.loadarg(0);
+        b.asm.loadarg(1);
+        b.asm.mode(inst::MODE_BOX);
+        b.asm.loadindexpropornil();
+        b.asm.setvi(1);
+        b.asm.ret();
+        b.finish_function("rawget", 2, false);
+    }
+
+    // rawlen
+    {
+        b.asm.loadarg(0);
+        b.asm.mode(inst::MODE_BOX);
+        b.asm.len();
+        b.asm.setvi(1);
+        b.asm.ret();
+        b.finish_function("rawlen", 1, false);
+    }
+
+    // rawset
+    {
+        b.asm.loadarg(0);
+        b.asm.loadarg(1);
+        b.asm.loadarg(2);
+        b.asm.mode(inst::MODE_BOX);
+        b.asm.storeindexprop();
+        b.asm.setvi(0);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.retv();
+        b.finish_function("rawset", 3, false);
+    }
 
     // select(index, ...)
     {

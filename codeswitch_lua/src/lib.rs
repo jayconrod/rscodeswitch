@@ -1,6 +1,8 @@
 extern crate codeswitch;
 extern crate lazy_static;
 extern crate regex;
+#[cfg(test)]
+extern crate unified_diff;
 
 pub mod compile;
 pub mod luastd;

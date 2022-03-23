@@ -886,31 +886,13 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
             write!(f, "L{}:\n", li)?;
             li += 1;
         }
-        let mode = if insts[p] < MODE_MIN {
-            ""
+        let (op, mode) = if insts[p] < MODE_MIN {
+            (mnemonic(insts[p]), "")
         } else {
-            let m = insts[p];
             p += 1;
-            match m {
-                MODE_I32 => ".i32",
-                MODE_I16 => ".i16",
-                MODE_I8 => ".i8",
-                MODE_U64 => ".u64",
-                MODE_U32 => ".u32",
-                MODE_U16 => ".u16",
-                MODE_U8 => ".u8",
-                MODE_F64 => ".f64",
-                MODE_F32 => ".f32",
-                MODE_BOOL => ".bool",
-                MODE_PTR => ".ptr",
-                MODE_STRING => ".string",
-                MODE_CLOSURE => ".closure",
-                MODE_OBJECT => ".object",
-                MODE_LUA => ".lua",
-                _ => return Err(fmt::Error),
-            }
+            (mnemonic(insts[p]), mode_mnemonic(insts[p - 1]))
         };
-        write!(f, "  {}{}", mnemonic(insts[p]), mode)?;
+        write!(f, "  {}{}", op, mode)?;
         match insts[p] {
             ADD
             | AND
