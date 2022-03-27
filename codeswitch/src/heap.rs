@@ -70,8 +70,10 @@ impl Heap {
         state.allocate(size)
     }
 
-    pub fn write_barrier(&self, _from: usize, _to: usize) {
-        // TODO: implement when there's something useful to do.
+    pub fn write_barrier(&self, from: usize, to: usize) {
+        // TODO: OPT: don't take a global lock for all write barriers.
+        let mut state = self.mu.lock().unwrap();
+        state.write_barrier(from, to);
     }
 
     pub fn write_barrier_nanbox(&self, _from: usize, _to: u64) {
@@ -180,7 +182,7 @@ impl State {
                 let addr = begin + i * PAGE_SIZE;
                 let arena = state.find_arena(addr).unwrap();
                 let page_index_within_arena = (addr - arena.begin) / PAGE_SIZE;
-                arena.pages[page_index_within_arena] = Some(Page {});
+                arena.pages[page_index_within_arena] = Some(Page::new());
             }
         }
 
@@ -269,6 +271,13 @@ impl State {
         begin
     }
 
+    fn write_barrier(&mut self, from: usize, _to: usize) {
+        if let Some(page) = self.find_page(from) {
+            let word_index = (from & (PAGE_SIZE - 1)) >> 3;
+            page.pointers.set(word_index, true);
+        }
+    }
+
     /// Returns the arena containing the given address if there is one,
     /// or None if the address is not on the heap.
     fn find_arena(&mut self, addr: usize) -> Option<&mut Arena> {
@@ -311,6 +320,13 @@ impl State {
             None
         }
     }
+
+    fn find_page(&mut self, addr: usize) -> Option<&mut Page> {
+        self.find_arena(addr).and_then(|arena| {
+            let page_index_within_arena = (addr >> PAGE_BITS) & (PAGES_PER_ARENA - 1);
+            arena.pages[page_index_within_arena].as_mut()
+        })
+    }
 }
 
 /// A chunk of memory allocated directly from the operating system. ARENA_SIZE
@@ -334,7 +350,24 @@ impl Arena {
     }
 }
 
-struct Page {}
+/// An aligned chunk of memory dedicated to some specific purpose. Exists within
+/// an arena, which consists of a constant number of pages. Each page is part
+/// of a span, which may cross arena boundaries.
+struct Page {
+    /// Tracks whether each word on the page contains a pointer. Bits are set
+    /// by the write barrier.
+    // TODO: OPT: don't allocate a bitmap if we know the page won't contain
+    // any pointers.
+    pointers: Bitmap,
+}
+
+impl Page {
+    fn new() -> Page {
+        Page {
+            pointers: Bitmap::new(PAGE_SIZE / 8),
+        }
+    }
+}
 
 /// A contiguous range of pages containing blocks of the same size. The span may
 /// cross multiple arenas.
