@@ -94,6 +94,7 @@ dependencies = [
  "clap",
  "lazy-regex",
  "lazy_static",
+ "nix",
  "regex",
  "rustyline",
 ]
