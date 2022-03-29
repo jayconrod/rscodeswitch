@@ -18,6 +18,7 @@ pub struct Package {
     function_index: HashMap<String, usize>,
     pub init_index: Option<u32>,
     pub strings: Handle<Slice<data::String>>,
+    pub types: Vec<Type>,
     pub line_map: PackageLineMap,
     pub imports: Vec<PackageImport>,
 }
@@ -264,6 +265,7 @@ impl PackageLoader {
             function_index,
             init_index: package.init_index,
             strings,
+            types: package.types,
             line_map: package.line_map,
             imports,
         });

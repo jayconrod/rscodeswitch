@@ -1016,7 +1016,8 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     inst::size(inst::ADJUSTV)
                 }
                 (inst::ALLOC, inst::MODE_I64) => {
-                    let size = read_imm!(u32, 1) as usize;
+                    let ti = read_imm!(u32, 1) as usize;
+                    let size = pp.types[ti].size();
                     push!(HEAP.allocate(size) as u64);
                     inst::size(inst::ALLOC)
                 }
@@ -1243,7 +1244,7 @@ impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
                     push!(cell);
                     inst::size(inst::CAPTURE)
                 }
-                (inst::CONST, _) => {
+                (inst::CONST, inst::MODE_I64) => {
                     let v = read_imm!(u64, 1);
                     push!(v);
                     inst::size(inst::CONST)

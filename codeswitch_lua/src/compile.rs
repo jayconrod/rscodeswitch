@@ -7,7 +7,6 @@ use codeswitch::inst::{self, Assembler, Label};
 use codeswitch::nanbox;
 use codeswitch::package::{Function, Global, GlobalImport, Package, PackageImport, Type};
 use codeswitch::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
-use codeswitch::runtime::Object;
 
 use std::collections::HashMap;
 use std::fs;
@@ -62,6 +61,8 @@ struct Compiler<'src, 'ss, 'lm, 'err> {
     functions: Vec<Function>,
     strings: Vec<Vec<u8>>,
     string_index: HashMap<Vec<u8>, u32>,
+    types: Vec<Type>,
+    type_index: HashMap<Type, u32>,
     named_labels: Vec<inst::Label>,
     asm: Assembler,
     param_count: u16,
@@ -92,6 +93,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             functions: Vec::new(),
             strings: Vec::new(),
             string_index: HashMap::new(),
+            types: Vec::new(),
+            type_index: HashMap::new(),
             named_labels: Vec::new(),
             asm: Assembler::new(),
             param_count: 0,
@@ -152,6 +155,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             functions: self.functions,
             init_index: Some(init_index),
             strings: self.strings,
+            types: self.types,
             line_map: PackageLineMap::from(self.lmap),
             imports,
         };
@@ -1072,7 +1076,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm.adjustv(1);
             }
             Expr::Table { fields, .. } => {
-                self.asm.alloc(mem::size_of::<Object>() as u32);
+                let ti = self.ensure_type(Type::Object);
+                self.asm.alloc(ti);
                 self.asm.mode(inst::MODE_OBJECT);
                 self.asm.nanbox();
                 let mut count: i64 = 1;
@@ -1256,7 +1261,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         let mut move_captured_param = |vid: VarID| {
             let var = &self.scope_set.vars[vid.0];
             if var.kind == VarKind::Capture {
-                self.asm.alloc(mem::size_of::<usize>() as u32); // pointer to nanbox
+                let ti = self.ensure_type(Type::NanBox);
+                self.asm.alloc(ti);
                 self.asm.dup();
                 let param_slot = match var.slot.try_into() {
                     Ok(n) => n,
@@ -1412,7 +1418,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     /// on the left or right.
     fn compile_define_prepare(&mut self, var: &Var) {
         if var.kind == VarKind::Capture {
-            self.asm.alloc(mem::size_of::<usize>() as u32);
+            let ti = self.ensure_type(Type::NanBox);
+            self.asm.alloc(ti);
             self.asm.dup();
         }
     }
@@ -1453,7 +1460,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 // go. Allocate a cell, store the value, and put
                 // the cell in that slot.
                 assert_eq!(var.slot, var.cell_slot);
-                self.asm.alloc(mem::size_of::<usize>() as u32);
+                let ti = self.ensure_type(Type::NanBox);
+                self.asm.alloc(ti);
                 self.asm.dup();
                 self.asm.loadlocal(var.slot as u16);
                 self.asm.mode(inst::MODE_LUA);
@@ -1616,6 +1624,27 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 };
                 self.strings.push(Vec::from(s));
                 self.string_index.insert(Vec::from(s), i);
+                i
+            }
+        }
+    }
+
+    fn ensure_type(&mut self, t: Type) -> u32 {
+        if !self.enabled() {
+            return !0;
+        }
+        match self.type_index.get(&t) {
+            Some(&i) => i,
+            None => {
+                let i: u32 = match self.types.len().try_into() {
+                    Ok(i) => i,
+                    _ => {
+                        self.error(Pos::default(), String::from("too many types"));
+                        !0
+                    }
+                };
+                self.type_index.insert(t.clone(), i);
+                self.types.push(t);
                 i
             }
         }

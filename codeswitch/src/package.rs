@@ -12,6 +12,7 @@ pub struct Package {
     pub functions: Vec<Function>,
     pub init_index: Option<u32>,
     pub strings: Vec<Vec<u8>>,
+    pub types: Vec<Type>,
     pub line_map: PackageLineMap,
     pub imports: Vec<PackageImport>,
 }
@@ -31,6 +32,11 @@ impl fmt::Display for Package {
         for (i, s) in self.strings.iter().enumerate() {
             let ss = String::from_utf8_lossy(s);
             write!(f, "{}string {} \"{}\"", sep, i, ss)?;
+            sep = "\n";
+        }
+        sep = "\n\n";
+        for (i, t) in self.types.iter().enumerate() {
+            write!(f, "{}type {} {}", sep, i, t)?;
             sep = "\n";
         }
         Ok(())
@@ -190,6 +196,7 @@ impl fmt::Display for Type {
 
 pub struct Builder {
     pub string_index: HashMap<&'static str, u32>,
+    pub type_index: HashMap<Type, u32>,
     pub asm: Assembler,
     pub package: Package,
     pub function_name_index: Vec<u32>,
@@ -199,6 +206,7 @@ impl Builder {
     pub fn new(name: String) -> Builder {
         Builder {
             string_index: HashMap::new(),
+            type_index: HashMap::new(),
             asm: Assembler::new(),
             package: Package {
                 name,
@@ -206,6 +214,7 @@ impl Builder {
                 functions: Vec::new(),
                 init_index: None,
                 strings: Vec::new(),
+                types: Vec::new(),
                 line_map: PackageLineMap { files: Vec::new() },
                 imports: Vec::new(),
             },
@@ -233,11 +242,12 @@ impl Builder {
         } else {
             None
         };
+        let param_types = vec![Type::NanBox; param_count];
         let fi: u32 = self.package.functions.len().try_into().unwrap();
         self.package.functions.push(Function {
             name: String::from(name),
             insts,
-            param_types: vec![Type::NanBox; param_count],
+            param_types,
             var_param_type,
             return_types: Vec::new(),
             var_return_type: Some(Type::NanBox),
@@ -264,6 +274,18 @@ impl Builder {
                 let i = self.package.strings.len().try_into().unwrap();
                 self.package.strings.push(Vec::from(s));
                 self.string_index.insert(s, i);
+                i
+            }
+        }
+    }
+
+    pub fn ensure_type(&mut self, t: Type) -> u32 {
+        match self.type_index.get(&t) {
+            Some(&i) => i,
+            None => {
+                let i = self.package.types.len().try_into().unwrap();
+                self.type_index.insert(t.clone(), i);
+                self.package.types.push(t);
                 i
             }
         }

@@ -4,10 +4,8 @@ use crate::token::{self, Kind, Token};
 use codeswitch::inst::{self, Assembler, Label};
 use codeswitch::package::{Function, Global, Package, Type};
 use codeswitch::pos::{Error, ErrorList, LineMap, PackageLineMap, Pos, Position};
-use codeswitch::runtime::Object;
 use std::collections::HashMap;
 use std::fs;
-use std::mem;
 use std::path::Path;
 
 pub fn compile_file<'a>(path: &Path) -> Result<Package, ErrorList> {
@@ -42,6 +40,8 @@ struct Compiler<'a, 'b> {
     functions: Vec<Function>,
     strings: Vec<Vec<u8>>,
     string_index: HashMap<Vec<u8>, u32>,
+    types: Vec<Type>,
+    type_index: HashMap<Type, u32>,
     asm_stack: Vec<Assembler>,
     errors: Vec<Error>,
 }
@@ -55,6 +55,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
             functions: Vec::new(),
             strings: Vec::new(),
             string_index: HashMap::new(),
+            types: Vec::new(),
+            type_index: HashMap::new(),
             asm_stack: vec![Assembler::new()],
             errors: Vec::new(),
         }
@@ -104,6 +106,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             functions: self.functions,
             init_index: Some(init_index),
             strings: self.strings,
+            types: self.types,
             line_map: PackageLineMap::from(self.lmap),
             imports: Vec::new(),
         };
@@ -183,8 +186,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 });
                 self.asm_stack.push(Assembler::new());
                 self.line(*pos);
-                let object_size = mem::size_of::<Object>() as u32;
-                self.asm().alloc(object_size);
+                let ti = self.ensure_type(Type::Object);
+                self.asm().alloc(ti);
                 self.asm().dup();
                 self.asm().prototype();
                 self.asm().storeprototype();
@@ -209,10 +212,11 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         return;
                     }
                 };
+                let param_types = vec![Type::NanBox; init_param_count.unwrap_or(0) as usize];
                 let ctor = Function {
                     name: format!("·{}·constructor", name.text),
                     insts: ctor_insts,
-                    param_types: vec![Type::NanBox; init_param_count.unwrap_or(0) as usize],
+                    param_types,
                     var_param_type: None,
                     return_types: vec![Type::NanBox],
                     var_return_type: None,
@@ -231,8 +235,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.asm().dup();
 
                 // Create a prototype object. Don't box it yet.
-                let object_size = mem::size_of::<Object>() as u32;
-                self.asm().alloc(object_size);
+                let ti = self.ensure_type(Type::Object);
+                self.asm().alloc(ti);
 
                 // If there's a base class, load its prototype, and use it as
                 // our prototype's prototype.
@@ -322,7 +326,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
         let mut cell_slot = 0;
         for param in params {
             if self.scopes.vars[param.var].kind == VarKind::Capture {
-                self.asm().alloc(mem::size_of::<usize>() as u32); // pointer to nanbox
+                let ti = self.ensure_type(Type::NanBox);
+                self.asm().alloc(ti);
                 self.asm().dup();
                 let arg_slot = self.scopes.vars[param.var].slot as u16;
                 self.asm().loadarg(arg_slot);
@@ -739,7 +744,8 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             VarKind::Local => {}
             VarKind::Capture => {
-                self.asm().alloc(mem::size_of::<usize>() as u32);
+                let ti = self.ensure_type(Type::NanBox);
+                self.asm().alloc(ti);
                 self.asm().dup();
             }
             VarKind::Argument => unreachable!(),
@@ -847,6 +853,24 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 };
                 self.strings.push(Vec::from(s));
                 self.string_index.insert(Vec::from(s), i);
+                i
+            }
+        }
+    }
+
+    fn ensure_type(&mut self, t: Type) -> u32 {
+        match self.type_index.get(&t) {
+            Some(&i) => i,
+            None => {
+                let i: u32 = match self.types.len().try_into() {
+                    Ok(i) => i,
+                    _ => {
+                        self.error(Pos::default(), String::from("too many types"));
+                        !0
+                    }
+                };
+                self.type_index.insert(t.clone(), i);
+                self.types.push(t);
                 i
             }
         }

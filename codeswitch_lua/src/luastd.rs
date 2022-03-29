@@ -1,9 +1,6 @@
 use codeswitch::inst::{self, Label};
 use codeswitch::nanbox;
-use codeswitch::package::{Builder, Package};
-use codeswitch::runtime::Object;
-
-use std::mem;
+use codeswitch::package::{Builder, Package, Type};
 
 pub fn build_std_package() -> Package {
     let mut b = Builder::new(String::from("luastd"));
@@ -687,7 +684,8 @@ pub fn build_std_package() -> Package {
     }
 
     // init - allocates and populates the _ENV table.
-    b.asm.alloc(mem::size_of::<Object>() as u32);
+    let ti = b.ensure_type(Type::Object);
+    b.asm.alloc(ti);
     b.asm.mode(inst::MODE_OBJECT);
     b.asm.nanbox();
     for i in 0..b.package.functions.len() {
