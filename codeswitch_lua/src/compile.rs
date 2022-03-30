@@ -69,6 +69,7 @@ struct Compiler<'src, 'ss, 'lm, 'err> {
     is_variadic: bool,
     block_stack: Vec<Block>,
     func_stack: Vec<FuncState>,
+    in_handler: bool,
     errors: &'err mut Vec<Error>,
 }
 
@@ -101,6 +102,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
             is_variadic: false,
             block_stack: Vec::new(),
             func_stack: Vec::new(),
+            in_handler: false,
             errors,
         }
     }
@@ -1511,6 +1513,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     }
 
     fn compile_store_var(&mut self, var: &Var, var_use_cell: Option<usize>) {
+        debug_assert!(!self.in_handler); // Close handlers don't store variables.
         match var.kind {
             VarKind::Global => {
                 if var.slot == 0 {
@@ -1556,11 +1559,19 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
     fn compile_load_var(&mut self, var: &Var, var_use_cell: Option<usize>) {
         match var.kind {
             VarKind::Global => self.asm.loadimportglobal(0, var.slot.try_into().unwrap()),
+            VarKind::Parameter if self.in_handler => {
+                self.asm.loadargparent(var.slot.try_into().unwrap())
+            }
             VarKind::Parameter => self.asm.loadarg(var.slot.try_into().unwrap()),
+            VarKind::Local if self.in_handler => {
+                self.asm.loadlocalparent(var.slot.try_into().unwrap())
+            }
             VarKind::Local => self.asm.loadlocal(var.slot.try_into().unwrap()),
             VarKind::Capture => {
                 if let Some(cell) = var_use_cell {
                     self.asm.capture(cell.try_into().unwrap());
+                } else if self.in_handler {
+                    self.asm.loadlocalparent(var.cell_slot.try_into().unwrap());
                 } else {
                     self.asm.loadlocal(var.cell_slot.try_into().unwrap());
                 }
@@ -1695,6 +1706,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         if !block.closes.is_empty() {
             let mut after_handlers_label = Label::new();
             self.asm.b(&mut after_handlers_label);
+            self.in_handler = true;
             let was_enabled = self.enabled();
             if block.enabled {
                 // If the block contains closes and is reachable but contains a
@@ -1730,6 +1742,7 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
                 self.asm.nexthandler();
             }
             self.set_enabled(was_enabled);
+            self.in_handler = false;
             self.asm.bind(&mut after_handlers_label);
         }
     }

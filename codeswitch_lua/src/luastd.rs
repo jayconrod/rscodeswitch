@@ -267,31 +267,45 @@ pub fn build_std_package() -> Package {
 
     // pcall(f, ...)
     {
+        // Reserve two stack slots to be written by the error handler.
+        b.asm.constzero();
+        b.asm.mode(inst::MODE_BOOL);
+        b.asm.nanbox();
+        b.asm.dup();
+
+        // Push the error handler. This uses 2 more slots.
         let mut handler_label = Label::new();
         b.asm.pushhandler(&mut handler_label);
+
+        // Call the function.
         b.asm.loadarg(0);
         b.asm.mode(inst::MODE_LUA);
         b.asm.loadvarargs();
         b.asm.mode(inst::MODE_LUA);
         b.asm.callvaluev();
+
+        // Function returned normally. Pop the handler. This does not release
+        // those stack slots. We'll overwrite slot 3 with true and return that
+        // with the other returned values.
         b.asm.pophandler();
         b.asm.const_(1);
         b.asm.mode(inst::MODE_BOOL);
         b.asm.nanbox();
-        b.asm.storelocal(1);
-        b.asm.getv();
-        b.asm.const_(1);
-        b.asm.mode(inst::MODE_U16);
-        b.asm.add();
-        b.asm.setv();
+        b.asm.storelocal(3);
+        b.asm.mode(inst::MODE_LUA);
+        b.asm.appendv(1);
         b.asm.mode(inst::MODE_LUA);
         b.asm.retv();
+
+        // An error was raised, and we've reached the error handler in a new
+        // frame immediately below pcall. Store the error in pcall's frame.
         b.asm.bind(&mut handler_label);
-        b.asm.constzero();
-        b.asm.mode(inst::MODE_BOOL);
-        b.asm.nanbox();
         b.asm.mode(inst::MODE_LUA);
         b.asm.geterror();
+        b.asm.storelocalparent(1);
+
+        // Return from the error handler. sp will be the same as before
+        // pushhandler. The local slots contain (false, error).
         b.asm.stoperror();
         b.asm.setvi(2);
         b.asm.mode(inst::MODE_LUA);

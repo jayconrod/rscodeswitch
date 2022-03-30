@@ -4,7 +4,7 @@ use std::fmt;
 
 // List of instructions.
 // Keep sorted by name.
-// Next opcode: 91.
+// Next opcode: 94.
 pub const ADD: u8 = 20;
 pub const ADJUSTV: u8 = 68;
 pub const ALLOC: u8 = 35;
@@ -38,11 +38,13 @@ pub const LE: u8 = 16;
 pub const LEN: u8 = 73;
 pub const LOAD: u8 = 36;
 pub const LOADARG: u8 = 29;
+pub const LOADARGPARENT: u8 = 91;
 pub const LOADERROR: u8 = 82;
 pub const LOADGLOBAL: u8 = 9;
 pub const LOADIMPORTGLOBAL: u8 = 76;
 pub const LOADINDEXPROPORNIL: u8 = 72;
 pub const LOADLOCAL: u8 = 11;
+pub const LOADLOCALPARENT: u8 = 92;
 pub const LOADNAMEDPROP: u8 = 42;
 pub const LOADNAMEDPROPORNIL: u8 = 50;
 pub const LOADNEXTINDEXPROPORNIL: u8 = 79;
@@ -80,6 +82,7 @@ pub const STOREARG: u8 = 30;
 pub const STOREGLOBAL: u8 = 10;
 pub const STOREIMPORTGLOBAL: u8 = 78;
 pub const STORELOCAL: u8 = 12;
+pub const STORELOCALPARENT: u8 = 93;
 pub const STOREMETHOD: u8 = 46;
 pub const STORENAMEDPROP: u8 = 43;
 pub const STOREPROTOTYPE: u8 = 41;
@@ -190,8 +193,8 @@ pub const fn size(op: u8) -> usize {
         | UNBOX
         | XOR => 1,
         PANIC | SWAPN | SYS => 2,
-        ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETVI | STOREARG
-        | STORELOCAL => 3,
+        ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADARGPARENT | LOADLOCAL
+        | LOADLOCALPARENT | SETVI | STOREARG | STORELOCAL | STORELOCALPARENT => 3,
         ALLOC | B | BIF | CALLNAMEDPROPV | FUNCTION | LOADGLOBAL | LOADNAMEDPROP
         | LOADNAMEDPROPORNIL | PUSHHANDLER | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP
         | STRING => 5,
@@ -233,11 +236,13 @@ pub fn mnemonic(op: u8) -> &'static str {
         LEN => "len",
         LOAD => "load",
         LOADARG => "loadarg",
+        LOADARGPARENT => "loadargparent",
         LOADERROR => "loaderror",
         LOADGLOBAL => "loadglobal",
         LOADIMPORTGLOBAL => "loadimportglobal",
         LOADINDEXPROPORNIL => "loadindexpropornil",
         LOADLOCAL => "loadlocal",
+        LOADLOCALPARENT => "loadlocalparent",
         LOADNAMEDPROP => "loadnamedprop",
         LOADNAMEDPROPORNIL => "loadnamedpropornil",
         LOADNEXTINDEXPROPORNIL => "loadnextindexpropornil",
@@ -274,6 +279,7 @@ pub fn mnemonic(op: u8) -> &'static str {
         STOREGLOBAL => "storeglobal",
         STOREIMPORTGLOBAL => "storeimportglobal",
         STORELOCAL => "storelocal",
+        STORELOCALPARENT => "storelocalparent",
         STOREMETHOD => "storemethod",
         STORENAMEDPROP => "storenamedprop",
         STOREPROTOTYPE => "storeprototype",
@@ -543,6 +549,11 @@ impl Assembler {
         self.write_u16(index);
     }
 
+    pub fn loadargparent(&mut self, index: u16) {
+        self.write_u8(LOADARGPARENT);
+        self.write_u16(index);
+    }
+
     pub fn loaderror(&mut self) {
         self.write_u8(LOADERROR);
     }
@@ -564,6 +575,11 @@ impl Assembler {
 
     pub fn loadlocal(&mut self, index: u16) {
         self.write_u8(LOADLOCAL);
+        self.write_u16(index);
+    }
+
+    pub fn loadlocalparent(&mut self, index: u16) {
+        self.write_u8(LOADLOCALPARENT);
         self.write_u16(index);
     }
 
@@ -721,6 +737,11 @@ impl Assembler {
 
     pub fn storelocal(&mut self, index: u16) {
         self.write_u8(STORELOCAL);
+        self.write_u16(index);
+    }
+
+    pub fn storelocalparent(&mut self, index: u16) {
+        self.write_u8(STORELOCALPARENT);
         self.write_u16(index);
     }
 
@@ -972,8 +993,8 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                 let arg_count = u16::from_le_bytes(insts[p + 5..p + 7].try_into().unwrap());
                 write!(f, " {} {}\n", name_index, arg_count)?;
             }
-            ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADLOCAL | SETVI | STOREARG
-            | STORELOCAL => {
+            ADJUSTV | APPENDV | CALLVALUE | CAPTURE | LOADARG | LOADARGPARENT | LOADLOCAL
+            | LOADLOCALPARENT | SETVI | STOREARG | STORELOCAL | STORELOCALPARENT => {
                 if p + 3 > insts.len() {
                     return Err(fmt::Error);
                 }

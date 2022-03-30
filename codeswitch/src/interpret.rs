@@ -210,7 +210,7 @@ impl<'a> Interpreter<'a> {
                         continue;
                     },
                     Err(err) => return Err(err),
-                };
+                }
             }};
         }
 
@@ -755,7 +755,11 @@ impl<'a> Interpreter<'a> {
         // arg_addr returns the stack address of an argument to the current
         // function.
         macro_rules! arg_addr {
-            ($index:expr) => {{
+            ($index:expr) => {
+                arg_addr!($index, fp)
+            };
+            ($index:expr, $fp:expr) => {{
+                let fp = $fp;
                 let index = $index;
                 if func.var_param_type.is_some() {
                     let argc = *((fp + FRAME_SIZE) as *const u64) as usize;
@@ -1059,11 +1063,15 @@ impl<'a> Interpreter<'a> {
                     // normal execution afterward. Used in the non-error case
                     // for constructs like "finally" where code must be run
                     // whether there's an error or not.
-                    push!(ip as u64 + inst::size(inst::CALLHANDLER) as u64);
-                    push!(vc as u64);
+                    sp -= FRAME_SIZE;
+                    *((sp + FRAME_FUNC_OFFSET) as *mut *const Function) = func;
+                    *((sp + FRAME_CP_OFFSET) as *mut *const Closure) = cp;
+                    *((sp + FRAME_IP_OFFSET) as *mut usize) =
+                        (ip as usize) + inst::size(inst::CALLHANDLER);
+                    *((sp + FRAME_FP_OFFSET) as *mut usize) = fp;
+                    fp = sp;
                     ip = *((hp + HANDLER_IP_OFFSET) as *const *const u8);
                     hp = *((hp + HANDLER_HP_OFFSET) as *const usize);
-                    debug_assert!(hp < fp);
                     continue;
                 }
                 (inst::CALLNAMEDPROP, inst::MODE_BOX) => {
@@ -1618,6 +1626,17 @@ impl<'a> Interpreter<'a> {
                     push!(v);
                     inst::size(inst::LOADARG)
                 }
+                (inst::LOADARGPARENT, inst::MODE_I64) => {
+                    // Like LOADARG, but loads from the caller's frame instead
+                    // of the current frame. The caller must be an instance of
+                    // the same function. Used by error handlers.
+                    let i = read_imm!(u16, 1) as usize;
+                    let caller_fp = *((fp + FRAME_FP_OFFSET) as *const usize);
+                    let slot = arg_addr!(i, caller_fp);
+                    let v = *(slot as *const u64);
+                    push!(v);
+                    inst::size(inst::LOADARGPARENT)
+                }
                 (inst::LOADERROR, inst::MODE_LUA) => {
                     // Box and push the current error value. Push nil if there
                     // is no error.
@@ -1673,9 +1692,21 @@ impl<'a> Interpreter<'a> {
                 }
                 (inst::LOADLOCAL, inst::MODE_I64) => {
                     let i = read_imm!(u16, 1) as usize;
-                    let v = *((fp as usize - (i + 1) * 8) as *const u64);
+                    let addr = fp - (i + 1) * 8;
+                    let v = *(addr as *const u64);
                     push!(v);
                     inst::size(inst::LOADLOCAL)
+                }
+                (inst::LOADLOCALPARENT, inst::MODE_I64) => {
+                    // Like LOADLOCAL, but loads from the caller's frame instead
+                    // of the current frame. The caller must be an instance of
+                    // the same function. Used by error handlers.
+                    let i = read_imm!(u16, 1) as usize;
+                    let caller_fp = *((fp + FRAME_FP_OFFSET) as *const usize);
+                    let addr = caller_fp - (i + 1) * 8;
+                    let v = *(addr as *const u64);
+                    push!(v);
+                    inst::size(inst::LOADLOCALPARENT)
                 }
                 (inst::LOADNAMEDPROP, inst::MODE_BOX) => {
                     let name_index = read_imm!(u32, 1) as usize;
@@ -2082,8 +2113,9 @@ impl<'a> Interpreter<'a> {
                     // If there is an error, continue unwinding by popping and
                     // executing the next handler, or returning the error if
                     // there is no handler.
-                    // If there is no handler (likely, the handler was started
-                    // with CALLHANDLER), pop vc and ip from the stack.
+                    // If there is no error, either because the handler was
+                    // started with CALLHANDLER or because STOPERROR was called,
+                    // pop vc and ip from the stack.
                     save_regs!();
                     if self.error.is_some() {
                         match self.unwind() {
@@ -2094,9 +2126,7 @@ impl<'a> Interpreter<'a> {
                             Err(err) => return Err(err),
                         }
                     } else {
-                        vc = pop!() as usize;
-                        ip = pop!() as *const u8;
-                        continue;
+                        return_ok!(0);
                     }
                 }
                 (inst::NOP, inst::MODE_I64) => inst::size(inst::NOP),
@@ -2200,6 +2230,10 @@ impl<'a> Interpreter<'a> {
                     inst::size(inst::POPHANDLER)
                 }
                 (inst::PUSHHANDLER, inst::MODE_I64) => {
+                    // Adds an error handler by pushing the entry address
+                    // in the current function and the current value of hp,
+                    // then setting hp to the new sp. Effectively, handlers
+                    // are a singly linked list threaded through stack frames.
                     let delta = read_imm!(i32, 1) as usize;
                     let eip = ((ip as isize) + (delta as isize) + 1) as u64;
                     push!(eip);
@@ -2265,7 +2299,14 @@ impl<'a> Interpreter<'a> {
                     inst::size(inst::SETVI)
                 }
                 (inst::STOPERROR, inst::MODE_I64) => {
+                    // Recovers from the current error by clearing the error
+                    // state and popping the error handler's stack frame.
+                    // May only be used within an error handler that was not
+                    // invoked with CALLHANDLER. Execution resumes at the next
+                    // instruction; the frame's return address is ignored.
                     self.error = None;
+                    sp = fp + FRAME_SIZE;
+                    fp = *((fp + FRAME_FP_OFFSET) as *const usize);
                     inst::size(inst::STOPERROR)
                 }
                 (inst::STORE, inst::MODE_I64) => {
@@ -2353,8 +2394,20 @@ impl<'a> Interpreter<'a> {
                 (inst::STORELOCAL, inst::MODE_I64) => {
                     let i = read_imm!(u16, 1) as usize;
                     let v = pop!();
-                    *((fp as usize - (i + 1) * 8) as *mut u64) = v;
+                    let addr = fp - (i + 1) * 8;
+                    *(addr as *mut u64) = v;
                     inst::size(inst::STORELOCAL)
+                }
+                (inst::STORELOCALPARENT, inst::MODE_I64) => {
+                    // Like STORELOCAL, but writes to the caller's frame instead
+                    // of the current frame. The caller must be an instance of
+                    // the same function. Used by error handlers.
+                    let i = read_imm!(u16, 1) as usize;
+                    let caller_fp = *((fp + FRAME_FP_OFFSET) as *const usize);
+                    let addr = caller_fp - (i + 1) * 8;
+                    let v = pop!();
+                    *(addr as *mut u64) = v;
+                    inst::size(inst::STORELOCALPARENT)
                 }
                 (inst::STOREMETHOD, inst::MODE_LUA) => {
                     let name_index = read_imm!(u32, 1) as usize;
@@ -2989,6 +3042,15 @@ impl<'a> Interpreter<'a> {
         self.unwind()
     }
 
+    /// Pop frames from the stack until reaching the function containing the
+    /// next error handler, then prepares the interpreter to execute that
+    /// handler.
+    ///
+    /// If there is no handler, clear all state and return the current error.
+    ///
+    /// Otherwise, after popping frames, push a new frame for the same function
+    /// containing the error handler, but instead of starting at instruction 0,
+    /// set ip to the handler address.
     unsafe fn unwind(&mut self) -> Result<(), Error> {
         if self.hp == 0 {
             // No error handler. Clear all state, and return the error result.
@@ -3002,23 +3064,27 @@ impl<'a> Interpreter<'a> {
             mem::swap(&mut self.error, &mut error);
             Err(error.unwrap())
         } else {
-            // Prepare the interpreter to execute the error handler.
-            // - set error state.
-            // - pop frames until we're in the containing function.
-            // - set sp to where the handler was.
-            // - pop the handler itself from the hp linked list.
-            // - set sp to where the handler was.
-            // - set ip to the handler's code.
-            // - clear vc.
+            // Pop stack frames until we reach the frame that pushed the
+            // handler. Also, pop the handler, and any words pushed after it.
             while self.fp < self.hp {
                 self.func = *((self.fp + FRAME_FUNC_OFFSET) as *const *const Function);
                 self.cp = *((self.fp + FRAME_CP_OFFSET) as *const *const Closure);
-                self.sp = self.hp + HANDLER_SIZE;
-                self.ip = *((self.hp + HANDLER_IP_OFFSET) as *const *const u8);
+                self.ip = *((self.fp + FRAME_IP_OFFSET) as *const *const u8);
                 self.fp = *(self.fp as *const usize);
             }
-            self.vc = 0;
+            self.sp = self.hp + HANDLER_SIZE;
+            let hip = *((self.hp + HANDLER_IP_OFFSET) as *const *const u8);
             self.hp = *((self.hp + HANDLER_HP_OFFSET) as *const usize);
+
+            // Push a stack frame for the handler.
+            self.sp -= FRAME_SIZE;
+            *((self.sp + FRAME_FUNC_OFFSET) as *mut *const Function) = self.func;
+            *((self.sp + FRAME_CP_OFFSET) as *mut *const Closure) = self.cp;
+            *((self.sp + FRAME_IP_OFFSET) as *mut *const u8) = self.ip;
+            self.ip = hip;
+            *((self.sp + FRAME_FP_OFFSET) as *mut usize) = self.fp;
+            self.fp = self.sp;
+
             Ok(())
         }
     }
