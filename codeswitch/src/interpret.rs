@@ -35,15 +35,15 @@ const HANDLER_SIZE: usize = 16;
 const HANDLER_HP_OFFSET: usize = 0;
 const HANDLER_IP_OFFSET: usize = 8;
 
-pub struct Env<'r, 'w> {
-    pub r: &'r mut dyn Read,
-    pub w: &'w mut dyn Write,
+pub struct Env<'a> {
+    pub r: &'a mut dyn Read,
+    pub w: &'a mut dyn Write,
 }
 
-pub struct Interpreter<'env, 'r, 'w, 'pl, 'lr> {
-    env: &'env RefCell<Env<'r, 'w>>,
-    loader: &'pl RefCell<PackageLoader>,
-    lua_runtime: &'lr dyn LuaRuntime,
+pub struct Interpreter<'a> {
+    env: &'a RefCell<Env<'a>>,
+    loader: &'a RefCell<PackageLoader>,
+    lua_runtime: &'a dyn LuaRuntime,
 
     /// Holds the memory for the interpreter's stack.
     // TODO: remove this annotation. Check stack limits.
@@ -87,12 +87,12 @@ pub struct Interpreter<'env, 'r, 'w, 'pl, 'lr> {
     error: Option<Error>,
 }
 
-impl<'env, 'r, 'w, 'pl, 'lr> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
+impl<'a> Interpreter<'a> {
     pub fn new(
-        env: &'env RefCell<Env<'r, 'w>>,
-        loader: &'pl RefCell<PackageLoader>,
-        lua_runtime: &'lr dyn LuaRuntime,
-    ) -> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
+        env: &'a RefCell<Env<'a>>,
+        loader: &'a RefCell<PackageLoader>,
+        lua_runtime: &'a dyn LuaRuntime,
+    ) -> Interpreter<'a> {
         let stack = Stack::new();
         let sp = stack.end() - FRAME_SIZE;
         let fp = sp;
@@ -3093,18 +3093,18 @@ impl Stack {
 }
 
 #[derive(Clone, Copy)]
-pub struct InterpreterFactory<'env, 'r, 'w, 'pl, 'lr> {
-    env: &'env RefCell<Env<'r, 'w>>,
-    loader_ref: &'pl RefCell<PackageLoader>,
-    lua_runtime: &'lr dyn LuaRuntime,
+pub struct InterpreterFactory<'a> {
+    env: &'a RefCell<Env<'a>>,
+    loader_ref: &'a RefCell<PackageLoader>,
+    lua_runtime: &'a dyn LuaRuntime,
 }
 
-impl<'env, 'r, 'w, 'pl, 'lr> InterpreterFactory<'env, 'r, 'w, 'pl, 'lr> {
+impl<'a> InterpreterFactory<'a> {
     pub fn new(
-        env: &'env RefCell<Env<'r, 'w>>,
-        loader_ref: &'pl RefCell<PackageLoader>,
-        lua_runtime: &'lr dyn LuaRuntime,
-    ) -> InterpreterFactory<'env, 'r, 'w, 'pl, 'lr> {
+        env: &'a RefCell<Env<'a>>,
+        loader_ref: &'a RefCell<PackageLoader>,
+        lua_runtime: &'a dyn LuaRuntime,
+    ) -> InterpreterFactory<'a> {
         InterpreterFactory {
             env,
             loader_ref,
@@ -3112,7 +3112,7 @@ impl<'env, 'r, 'w, 'pl, 'lr> InterpreterFactory<'env, 'r, 'w, 'pl, 'lr> {
         }
     }
 
-    pub fn get(&self) -> Interpreter<'env, 'r, 'w, 'pl, 'lr> {
+    pub fn get(&self) -> Interpreter<'a> {
         Interpreter::new(self.env, self.loader_ref, self.lua_runtime)
     }
 }
