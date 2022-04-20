@@ -9,39 +9,61 @@ use std::sync::Mutex;
 use lazy_static;
 use nix::sys::mman::{self, MapFlags, ProtFlags};
 
+/// Alignment of allocated blocks containing pointers. Pointers must be
+/// word-aligned in memory, so they are placed at word-aligned offsets in blocks
+/// allocated at word-aligned addresses.
 pub const ALLOC_ALIGNMENT: usize = 8;
 
-const PAGE_BITS: usize = 14;
-const PAGE_SIZE: usize = 1 << PAGE_BITS;
-const PAGES_PER_ARENA_BITS: usize = 10;
-const PAGES_PER_ARENA: usize = 1 << PAGES_PER_ARENA_BITS;
-const ARENA_SIZE: usize = PAGE_SIZE * PAGES_PER_ARENA;
-const ARENA_BASE_ADDR: usize = ARENA_SIZE;
-const ARENA_MAX_ADDR: usize = 1 << 48;
-const ARENA_BITS: usize = PAGE_BITS + PAGES_PER_ARENA_BITS;
-const ARENA_L1_BITS: usize = 12;
-const ARENA_L1_SIZE: usize = 1 << ARENA_L1_BITS;
-const ARENA_L2_BITS: usize = 12;
-const ARENA_L2_SIZE: usize = 1 << ARENA_L2_BITS;
-const MAX_SMALL_SIZE: usize = PAGE_SIZE;
-const SIZE_CLASS_COUNT: usize = 59;
-const SMALL_SPAN_SIZE: usize = PAGE_SIZE * 16;
+/// Modern processors high and low 48 bits for virtual addresses. We'll only
+/// attempt to use lower addresses. This determines the size of the page table,
+/// but it can otherwise be larger or smaller.
+const ADDR_BITS: usize = 48;
 
-/// List of sizes that small allocations are rounded up to.
+/// A page is the smallest unit allocated from the system. It may be larger
+/// than a virtual memory page. It should be small enough to limit fragmentation
+/// but large enough to limit overhead of calling mmap / mmunmap.
+const PAGE_BITS: usize = 13;
+const PAGE_SIZE: usize = 1 << PAGE_BITS; // 8 KB
+
+/// The page table is used to locate page metadata, given an address. It's
+/// split into multiple levels and is sparsely populated.
+const PAGE_TABLE_L1_BITS: usize = 18;
+const PAGE_TABLE_L1_SIZE: usize = 1 << PAGE_TABLE_L1_BITS;
+const PAGE_TABLE_L2_BITS: usize = ADDR_BITS - PAGE_TABLE_L1_BITS - PAGE_BITS;
+const PAGE_TABLE_L2_SIZE: usize = 1 << PAGE_TABLE_L2_BITS;
+const PAGE_BASE_ADDR: usize = PAGE_SIZE << PAGE_TABLE_L2_BITS;
+const PAGE_MAX_ADDR: usize = 1 << ADDR_BITS;
+const MIN_GC_THRESHOLD: usize = 1 << 20;
+
+/// List of sizes that small allocations are rounded up to. These are copied
+/// from Go and are chosen to limit waste from rounding up.
 ///
 /// When an allocation of at most MAX_SMALL_SIZE bytes is requested, the request
 /// is rounded up to the nearest class below, then allocated together with
 /// blocks of that size. This reduces fragmentation and allows allocation state
 /// to be tracked with a simple bitmap.
-///
-/// Based loosely on Go's heap. The actual sizes are copied from Go's heap
-/// up to 4096. Go chose these sizes to limit the maximum amount of waste.
-const SIZE_CLASSES: [usize; SIZE_CLASS_COUNT] = [
-    8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352,
-    384, 416, 448, 480, 512, 576, 640, 704, 768, 896, 1024, 1152, 1280, 1408, 1536, 1792, 2048,
-    2304, 2688, 3072, 3200, 3456, 4096, 4864, 5376, 6144, 6528, 6784, 6912, 8192, 9472, 9728,
-    10240, 10880, 12288, 13568, 14336, 16384,
+const SIZE_CLASS_SIZE: [usize; SIZE_CLASS_COUNT] = [
+    0, 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320,
+    352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 896, 1024, 1152, 1280, 1408, 1536, 1792,
+    2048, 2304, 2688, 3072, 3200, 3456, 4096, 4864, 5376, 6144, 6528, 6784, 6912, 8192, 9472, 9728,
+    10240, 10880, 12288, 13568, 14336, 16384, 18432, 19072, 20480, 21760, 24576, 27264, 28672,
+    32768,
 ];
+const MAX_SMALL_SIZE: usize = SIZE_CLASS_SIZE[SIZE_CLASS_COUNT - 1];
+
+/// List of page counts for spans of each size class. These are copied from Go
+/// and are chosen to limit waste at the end of each span.
+///
+/// When an allocation of at most MAX_SMALL_SIZE bytes is requested, it's
+/// allocated together with blocks of the same size class on a span comprised
+/// of contiguous pages.
+const SIZE_CLASS_PAGES: [usize; SIZE_CLASS_COUNT] = [
+    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 2, 1, 2, 1, 2, 1, 3, 2, 3, 1, 3, 2, 3, 4, 5, 6, 1, 7, 6, 5, 4, 3, 5, 7, 2, 9, 7, 5, 8,
+    3, 10, 7, 4,
+];
+
+const SIZE_CLASS_COUNT: usize = 68;
 
 lazy_static! {
     pub static ref HEAP: Heap = Heap {
@@ -82,37 +104,39 @@ impl Heap {
 }
 
 struct State {
-    /// Two-level table containing all arenas. This is structurally similar to
-    /// a page table. An arena can be found for a given address by dropping the
-    /// low ARENA_BITS bits, then splitting the remainder into the high
-    /// ARENA_L1_BITS and the low ARENA_L2_BITS to get the indices for each
-    /// layer.
-    arenas: [Option<Box<[Option<Box<Arena>>; ARENA_L1_SIZE]>>; ARENA_L2_SIZE],
+    /// List of all spans ever allocated.
+    spans: Vec<Span>,
 
-    /// Arena-aligned address above which no arenas have been allocated.
-    /// Only increases.
-    next_arena_addr: usize,
-
-    /// List of spans holding small blocks of the same size.
-    small_spans: Vec<SmallSpan>,
-
-    /// For each size class, holds the index in small_spans of a span with
-    /// at least one free block. None if there is no such span.
+    /// For each size class, holds the index a span with at least one free
+    /// block. None if there is no such span.
     size_class_to_span_index: [Option<usize>; SIZE_CLASS_COUNT],
+
+    page_table: PageTable,
+
+    /// Number of bytes currently allocated to blocks.
+    total_allocated_bytes: usize,
+
+    /// Maximum value for total_allocated_bytes before triggering
+    /// garbage collection.
+    gc_threshold_bytes: usize,
 }
 
 impl State {
     fn new() -> State {
-        const ARENA_L1_INIT: Option<Box<[Option<Box<Arena>>; ARENA_L2_SIZE]>> = None;
         State {
-            arenas: [ARENA_L1_INIT; ARENA_L1_SIZE],
-            next_arena_addr: ARENA_BASE_ADDR,
-            small_spans: Vec::new(),
+            spans: Vec::new(),
             size_class_to_span_index: [None; SIZE_CLASS_COUNT],
+            page_table: PageTable::new(),
+            total_allocated_bytes: 0,
+            gc_threshold_bytes: MIN_GC_THRESHOLD,
         }
     }
 
     fn allocate(&mut self, size: usize) -> *mut u8 {
+        self.total_allocated_bytes += size;
+        if self.total_allocated_bytes >= self.gc_threshold_bytes {
+            self.collect_garbage();
+        }
         if size < MAX_SMALL_SIZE {
             self.allocate_small(size)
         } else {
@@ -123,25 +147,30 @@ impl State {
     /// Handles allocations of small blocks. Small allocations are grouped
     /// together on spans that contain blocks of the same size (size class).
     fn allocate_small(&mut self, size: usize) -> *mut u8 {
+        if size == 0 {
+            return PAGE_BASE_ADDR as *mut u8;
+        }
+
         // Round the request up to the nearest size class.
-        let size_class = SIZE_CLASSES.iter().position(|&sc| size <= sc).unwrap();
-        let rounded_size = SIZE_CLASSES[size_class];
+        // OPT: use a lookup table for small sizes.
+        let size_class = SIZE_CLASS_SIZE.iter().position(|&sc| size <= sc).unwrap();
+        let rounded_size = SIZE_CLASS_SIZE[size_class];
 
         // Find a span of that size class with a free block.
         // Allocate a new span if needed.
-        let span = match self.size_class_to_span_index[size_class] {
-            Some(i) => &mut self.small_spans[i],
-            None => {
-                let i = self.allocate_small_span(size_class);
-                self.size_class_to_span_index[size_class] = Some(i);
-                &mut self.small_spans[i]
-            }
+        let span_index = match self.size_class_to_span_index[size_class] {
+            Some(i) => i,
+            None => self.allocate_small_span(size_class),
+        };
+        let span = match &mut self.spans[span_index] {
+            Span::Small(s) => s,
+            _ => unreachable!(),
         };
 
         // Scan the allocation bitmap to find a free block.
         // Mark it as allocated.
-        let block_index = span.block_alloc.find_first_clear().unwrap();
-        span.block_alloc.set(block_index, true);
+        let block_index = span.allocs.find_first_clear().unwrap();
+        span.allocs.set(block_index, true);
         span.free_block_count -= 1;
         if span.free_block_count == 0 {
             self.size_class_to_span_index[size_class] = None;
@@ -150,125 +179,86 @@ impl State {
         addr as *mut u8
     }
 
-    /// Handles allocation of large blocks. Each large block is allocated on its
-    /// own span.
-    fn allocate_large(&mut self, size: usize) -> *mut u8 {
-        self.allocate_span(math::align(size, PAGE_SIZE)) as *mut u8
-    }
-
     /// Allocates a span that will contain blocks of the same size class.
-    /// The argument is an index into SIZE_CLASSES. The index of the newly
-    /// allocated span in self.small_spans.
+    /// The argument is a size class, not a size in bytes. Returns the index
+    /// of the newly created span.
     fn allocate_small_span(&mut self, size_class: usize) -> usize {
-        let begin = self.allocate_span(SMALL_SPAN_SIZE);
-        let block_count = SMALL_SPAN_SIZE / SIZE_CLASSES[size_class];
-        let span = SmallSpan {
-            block_alloc: Bitmap::new(block_count),
-            free_block_count: block_count,
-            begin,
-        };
-        let span_index = self.small_spans.len();
-        self.small_spans.push(span);
+        let span_index = self.spans.len();
+        let begin = self.allocate_span_pages(span_index, SIZE_CLASS_PAGES[size_class]);
+        let size = SIZE_CLASS_PAGES[size_class] * PAGE_SIZE;
+        let block_count = size / SIZE_CLASS_SIZE[size_class];
+        self.spans
+            .push(Span::Small(SmallSpan::new(begin, size, block_count)));
         span_index
     }
 
-    /// Allocates a span of the given page-aligned size in bytes.
-    /// Returns the address of the first byte in the span.
-    fn allocate_span(&mut self, size: usize) -> usize {
-        debug_assert!(math::is_aligned(size, PAGE_SIZE));
+    /// Handles allocation of large blocks. Each large block is allocated on its
+    /// own span.
+    fn allocate_large(&mut self, size: usize) -> *mut u8 {
+        let span_index = self.spans.len();
+        let aligned_size = math::align(size, PAGE_SIZE);
+        let page_count = aligned_size / PAGE_SIZE;
+        let begin = self.allocate_span_pages(span_index, page_count);
+        self.spans
+            .push(Span::Large(LargeSpan::new(begin, aligned_size)));
+        begin as *mut u8
+    }
 
-        fn set_range_allocated(state: &mut State, begin: usize, page_count: usize) {
-            for i in 0..page_count {
-                let addr = begin + i * PAGE_SIZE;
-                let arena = state.find_arena(addr).unwrap();
-                let page_index_within_arena = (addr - arena.begin) / PAGE_SIZE;
-                arena.pages[page_index_within_arena] = Some(Page::new());
+    /// Allocates a contiguous range of pages to be managed by a span with
+    /// the given index, which may not exist yet.
+    fn allocate_span_pages(&mut self, span_index: usize, page_count: usize) -> usize {
+        let size = page_count * PAGE_SIZE;
+        let mut begin = PAGE_BASE_ADDR;
+        'rangeloop: while begin + size < PAGE_MAX_ADDR {
+            // Find an unallocated range of pages.
+            let mut p = begin;
+            while p < begin + size {
+                if self.page_table.find(p).is_some() {
+                    begin = p + PAGE_SIZE;
+                    continue 'rangeloop;
+                }
+                p += PAGE_SIZE;
             }
-        }
 
-        // Try to find a contiguous range of free pages within existing arenas.
-        // The range may cross contiguous arenas.
-        let page_count = size / PAGE_SIZE;
-        let mut begin_page_index = 0;
-        let mut end_page_index = 0;
-        let mut arena_opt = self.find_next_arena(ARENA_BASE_ADDR);
-        while let Some(arena) = arena_opt {
-            let arena_page_index = arena.begin / PAGE_SIZE;
-            if arena_page_index != end_page_index {
-                // Either this is the first arena, or the arena is not
-                // contiguous with the previous arena. Reset the range.
-                begin_page_index = arena_page_index;
-                end_page_index = arena_page_index;
-            }
-            for _ in 0..PAGES_PER_ARENA {
-                let page_index_within_arena = end_page_index - arena_page_index;
-                if arena.pages[page_index_within_arena].is_some() {
-                    // Page is allocated. Reset the range.
-                    begin_page_index = end_page_index + 1;
-                    end_page_index += 1;
-                } else {
-                    // Page is not allocated. Extend the range.
-                    end_page_index += 1;
-                    if end_page_index - begin_page_index == page_count {
-                        let begin = begin_page_index * PAGE_SIZE;
-                        set_range_allocated(self, begin, page_count);
-                        return begin;
+            // Attempt to map those pages.
+            unsafe {
+                let addr = begin as *mut c_void;
+                let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
+                let flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS;
+                let fd = -1;
+                let offset = 0;
+                let res = mman::mmap(addr, size, prot, flags, fd, offset);
+                match res {
+                    Ok(addr) if addr as usize == begin => break,
+                    Ok(addr) => {
+                        // The system gave us pages, but not at the address
+                        // we requested. Something else might be there.
+                        // Unmap and try again.
+                        mman::munmap(addr, size).unwrap();
+                        begin += size;
+                        continue;
+                    }
+                    _ => {
+                        begin = begin + size;
+                        continue;
                     }
                 }
             }
-            let next = arena.begin + ARENA_SIZE;
-            arena_opt = self.find_next_arena(next);
         }
-
-        // No range found. Allocate new arenas.
-        // TODO: OPT: if the highest arena has free pages at the end, try to use
-        // those pages in the span, and possibly allocate one less arena.
-        let arena_count = math::align(page_count, PAGES_PER_ARENA) / PAGES_PER_ARENA;
-        let begin = self.allocate_arenas(arena_count);
-        set_range_allocated(self, begin, page_count);
-        begin
-    }
-
-    /// Allocates memory from the OS to hold the given number of arenas.
-    /// The memory is allocated as one anonymous private mapped region
-    /// at an arena-aligned address.
-    fn allocate_arenas(&mut self, arena_count: usize) -> usize {
-        // Attempt to allocate memory for the arenas at the next address.
-        // The allocation may fail if something else is already mapped there,
-        // so keep incrementing the address until we succeed.
-        let mut begin: usize = 0;
-        while self.next_arena_addr < ARENA_MAX_ADDR {
-            unsafe {
-                let addr = self.next_arena_addr as *mut c_void;
-                self.next_arena_addr += ARENA_SIZE;
-                let length = arena_count * ARENA_SIZE;
-                let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
-                let flags = MapFlags::MAP_PRIVATE | MapFlags::MAP_ANONYMOUS | MapFlags::MAP_FIXED;
-                let fd = -1;
-                let offset = 0;
-                let res = mman::mmap(addr, length, prot, flags, fd, offset);
-                if let Ok(addr) = res {
-                    begin = addr as usize;
-                    break;
-                }
-            }
-        }
-        if begin == 0 {
+        if begin == PAGE_MAX_ADDR {
             panic!("failed to allocate new virtual address space for the heap")
         }
 
-        // Initialize arena metadata.
-        for i in 0..arena_count {
-            let addr = begin + i * ARENA_SIZE;
-            let l1_index = (addr >> (ARENA_BITS + ARENA_L2_BITS)) & ((1 << ARENA_L1_BITS) - 1);
-            if self.arenas[l1_index].is_none() {
-                const ARENA_L2_INIT: Option<Box<Arena>> = None;
-                self.arenas[l1_index] = Some(Box::new([ARENA_L2_INIT; ARENA_L2_SIZE]));
-            }
-            let l2_index = (addr >> ARENA_BITS) & ((1 << ARENA_L2_BITS) - 1);
-            self.arenas[l1_index].as_mut().unwrap()[l2_index] = Some(Box::new(Arena::new(addr)));
+        for i in 0..page_count {
+            let addr = begin + i * PAGE_SIZE;
+            self.page_table.set_allocated(addr, span_index);
         }
         begin
+    }
+
+    fn collect_garbage(&mut self) {
+        // TODO: implement.
+        self.gc_threshold_bytes = self.total_allocated_bytes * 2;
     }
 
     fn write_barrier(&mut self, from: usize, _to: usize) {
@@ -278,109 +268,147 @@ impl State {
         }
     }
 
-    /// Returns the arena containing the given address if there is one,
-    /// or None if the address is not on the heap.
-    fn find_arena(&mut self, addr: usize) -> Option<&mut Arena> {
-        if addr < ARENA_BASE_ADDR || addr >= ARENA_MAX_ADDR {
-            return None;
-        }
-        let l1_index = (addr >> (ARENA_BITS + ARENA_L2_BITS)) & ((1 << ARENA_L1_BITS) - 1);
-        let l2_index = (addr >> ARENA_BITS) & ((1 << ARENA_L2_BITS) - 1);
-        self.arenas[l1_index]
-            .as_mut()
-            .and_then(|l1| l1[l2_index].as_mut())
-            .map(|a| a.as_mut())
-    }
-
-    /// Returns the arena containing the given address or the next arena with a
-    /// higher address, if there is one. Used to iterate over arenas.
-    fn find_next_arena(&mut self, addr: usize) -> Option<&mut Arena> {
-        if addr < ARENA_BASE_ADDR || addr >= ARENA_MAX_ADDR {
-            return None;
-        }
-        let mut l1_index = (addr >> (ARENA_BITS + ARENA_L2_BITS)) & ((1 << ARENA_L1_BITS) - 1);
-        let mut l2_index = (addr >> ARENA_BITS) & ((1 << ARENA_L2_BITS) - 1);
-        'outer: while l1_index < ARENA_L1_SIZE {
-            if let Some(l1) = &self.arenas[l1_index] {
-                while l2_index < ARENA_L2_SIZE {
-                    if l1[l2_index].is_some() {
-                        break 'outer;
-                    }
-                    l2_index += 1;
-                }
-            }
-            l1_index += 1;
-            l2_index = 0;
-        }
-        if l1_index < ARENA_L1_SIZE {
-            let l1 = self.arenas[l1_index].as_mut().unwrap().as_mut();
-            let a = l1[l2_index].as_mut().unwrap().as_mut();
-            Some(a)
-        } else {
-            None
-        }
-    }
-
     fn find_page(&mut self, addr: usize) -> Option<&mut Page> {
-        self.find_arena(addr).and_then(|arena| {
-            let page_index_within_arena = (addr >> PAGE_BITS) & (PAGES_PER_ARENA - 1);
-            arena.pages[page_index_within_arena].as_mut()
-        })
+        self.page_table.find_mut(addr)
     }
 }
 
-/// A chunk of memory allocated directly from the operating system. ARENA_SIZE
-/// is both the size in bytes and alignment.
-struct Arena {
-    /// Address of the lowest byte in the arena. Aligned to ARENA_SIZE.
-    begin: usize,
-
-    /// List of pages within the arena. Some if allocated to a span,
-    /// None if not.
-    pages: [Option<Page>; PAGES_PER_ARENA],
+/// A contiguous range of pages containing allocatable blocks.
+enum Span {
+    Small(SmallSpan),
+    Large(LargeSpan),
 }
 
-impl Arena {
-    fn new(begin: usize) -> Arena {
-        const PAGES_INIT: Option<Page> = None;
-        Arena {
-            begin,
-            pages: [PAGES_INIT; PAGES_PER_ARENA],
-        }
-    }
-}
-
-/// An aligned chunk of memory dedicated to some specific purpose. Exists within
-/// an arena, which consists of a constant number of pages. Each page is part
-/// of a span, which may cross arena boundaries.
-struct Page {
-    /// Tracks whether each word on the page contains a pointer. Bits are set
-    /// by the write barrier.
-    // TODO: OPT: don't allocate a bitmap if we know the page won't contain
-    // any pointers.
-    pointers: Bitmap,
-}
-
-impl Page {
-    fn new() -> Page {
-        Page {
-            pointers: Bitmap::new(PAGE_SIZE / 8),
-        }
-    }
-}
-
-/// A contiguous range of pages containing blocks of the same size. The span may
-/// cross multiple arenas.
+/// A contiguous range of pages containing multiple allocatable blocks of the
+/// same size.
 struct SmallSpan {
     /// Allocation bitmap for blocks within the span. A block is allocated if
     /// the corresponding bit is set.
-    block_alloc: Bitmap,
+    allocs: Bitmap,
+
+    /// Marking bitmap for blocks within the span.
+    /// Used during garbage collection.
+    marks: Bitmap,
 
     /// Number of unallocated blocks within the span.
     free_block_count: usize,
 
     /// Address of the lowest byte in the span.
     begin: usize,
+
+    /// Size of the span in bytes.
+    size: usize,
+}
+
+impl SmallSpan {
+    fn new(begin: usize, size: usize, block_count: usize) -> SmallSpan {
+        SmallSpan {
+            allocs: Bitmap::new(block_count),
+            marks: Bitmap::new(block_count),
+            free_block_count: block_count,
+            begin,
+            size,
+        }
+    }
+}
+
+/// A contiguous range of pages containing a single large block.
+struct LargeSpan {
+    /// Address of the lowest byte in the span.
+    begin: usize,
+
+    /// Size of the span in bytes.
+    size: usize,
+}
+
+impl LargeSpan {
+    fn new(begin: usize, size: usize) -> LargeSpan {
+        LargeSpan { begin, size }
+    }
+}
+
+/// An aligned chunk of memory holding allocatable bytes. Managed as part of
+/// a span.
+struct Page {
+    /// Index of the span containing the page.
+    span_index: usize,
+
+    /// Bitmap with a bit for each word on the page. The write barrier sets
+    /// bits here when pointers are written to the page.
+    pointers: Bitmap,
+}
+
+impl Page {
+    fn new(span_index: usize) -> Page {
+        Page {
+            span_index,
+            pointers: Bitmap::new(PAGE_SIZE / 8),
+        }
+    }
+}
+
+/// Maps addresses to Pages.
+///
+/// PageTable is organized as a two-level table, much like the kernel data
+/// structure used to map virtual addresses to physical addresses. An address
+/// is divided into two parts: an index into the L1 table and an index into the
+/// L2 table contained within the L1 table. The low bits of the address
+/// (the offset within a page) are discarded.
+///
+/// OPT: use boxed arrays instead of Vec. I couldn't figure out how to allocate
+/// these without overflowing the stack.
+/// https://github.com/rust-lang/rust/issues/53827 has some potential
+/// work-arounds.
+struct PageTable(Vec<Option<Vec<Option<Box<Page>>>>>);
+
+impl PageTable {
+    fn new() -> PageTable {
+        let mut l1 = Vec::new();
+        l1.resize_with(PAGE_TABLE_L1_SIZE, || None);
+        PageTable(l1)
+    }
+
+    fn set_allocated(&mut self, addr: usize, span_index: usize) {
+        let (l1_index, l2_index) = Self::indices(addr);
+        if self.0[l1_index].is_none() {
+            let mut l2 = Vec::new();
+            l2.resize_with(PAGE_TABLE_L2_SIZE, || None);
+            self.0[l1_index] = Some(l2);
+        }
+        let l1 = self.0[l1_index].as_mut().unwrap();
+        debug_assert!(l1[l2_index].is_none());
+        l1[l2_index] = Some(Box::new(Page::new(span_index)));
+    }
+
+    fn find(&self, addr: usize) -> Option<&Page> {
+        if addr < PAGE_BASE_ADDR || PAGE_MAX_ADDR <= addr {
+            return None;
+        }
+        let (l1_index, l2_index) = Self::indices(addr);
+        self.0[l1_index]
+            .as_deref()
+            .and_then(|l2| l2[l2_index].as_deref())
+    }
+
+    fn find_mut(&mut self, addr: usize) -> Option<&mut Page> {
+        if addr < PAGE_BASE_ADDR || PAGE_MAX_ADDR <= addr {
+            return None;
+        }
+        let (l1_index, l2_index) = Self::indices(addr);
+        self.0[l1_index]
+            .as_deref_mut()
+            .and_then(|l2| l2[l2_index].as_deref_mut())
+    }
+
+    fn indices(addr: usize) -> (usize, usize) {
+        let l2_shift = PAGE_BITS;
+        let l2_mask = (1 << PAGE_TABLE_L2_BITS) - 1;
+        let l2_index = (addr >> l2_shift) & l2_mask;
+        let l1_shift = PAGE_BITS + PAGE_TABLE_L2_BITS;
+        let l1_mask = (1 << PAGE_TABLE_L1_BITS) - 1;
+        let l1_index = (addr >> l1_shift) & l1_mask;
+        (l1_index, l2_index)
+    }
 }
 
 pub trait Set {
