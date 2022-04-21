@@ -13,6 +13,7 @@ use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::path::PathBuf;
 use std::process;
+use std::sync::Arc;
 
 use clap::Parser;
 use rustyline::error::ReadlineError;
@@ -42,7 +43,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         return Err(Box::new(StringError("at least one argument is required")));
     }
 
-    let mut searcher = Box::new(ProvidedPackageSearcher::new());
+    let searcher = Box::new(ProvidedPackageSearcher::new());
     let std_package = luastd::build_std_package();
     if args.disassemble {
         print!(
@@ -52,7 +53,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     searcher.add(std_package);
 
-    let loader_cell = RefCell::new(PackageLoader::new(searcher));
+    let loader = Arc::new(PackageLoader::new(searcher));
     let mut input = io::stdin();
     let mut output = io::stdout();
     let env_cell = RefCell::new(Env {
@@ -60,7 +61,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         w: &mut output,
     });
     let lua_runtime = LuaRuntimeImpl {};
-    let interp_fac = InterpreterFactory::new(&env_cell, &loader_cell, &lua_runtime);
+    let interp_fac = InterpreterFactory::new(&env_cell, loader.clone(), &lua_runtime);
 
     for path_arg in &args.paths {
         let path = PathBuf::from(&path_arg);
@@ -71,7 +72,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 package.name, package
             );
         }
-        let res = unsafe { PackageLoader::load_given_package(&loader_cell, interp_fac, package) };
+        let res = unsafe { loader.load_given_package(&interp_fac, package) };
         if let Err(err) = res {
             return Err(Box::new(err));
         }
@@ -138,8 +139,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
             // Link and load the package. This will run its initializer, which
             // is the top-level code.
-            let res =
-                unsafe { PackageLoader::load_given_package(&loader_cell, interp_fac, package) };
+            let res = unsafe { loader.load_given_package(&interp_fac, package) };
             if let Err(err) = res {
                 eprintln!("{}", err);
             }

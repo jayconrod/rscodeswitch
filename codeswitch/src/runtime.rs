@@ -5,10 +5,10 @@ use crate::nanbox::{NanBox, NanBoxKey, NanBoxStringKey};
 use crate::package::{self, Type};
 use crate::pos::{Error, ErrorList, FunctionLineMap, PackageLineMap, Position};
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem;
 use std::path::Path;
+use std::sync::Mutex;
 
 pub struct Package {
     pub name: String,
@@ -71,53 +71,65 @@ pub struct FunctionImport {
 /// in imported packages, then calls the package's initializer if it has one
 /// using the provided interpreter.
 pub struct PackageLoader {
+    mu: Mutex<PackageLoaderState>,
+    searcher: Box<dyn PackageSearcher>,
+}
+
+struct PackageLoaderState {
     packages: HashMap<String, Box<Package>>,
     unnamed_packages: Vec<Box<Package>>,
-    searcher: Box<dyn PackageSearcher>,
 }
 
 impl PackageLoader {
     pub fn new(searcher: Box<dyn PackageSearcher>) -> PackageLoader {
         PackageLoader {
-            packages: HashMap::new(),
-            unnamed_packages: Vec::new(),
+            mu: Mutex::new(PackageLoaderState {
+                packages: HashMap::new(),
+                unnamed_packages: Vec::new(),
+            }),
             searcher,
         }
     }
 
-    pub fn package_by_name(&mut self, name: &str) -> Option<&mut Package> {
-        self.packages.get_mut(name).map(|p| &mut **p)
+    /// Returns a reference to the named package, if it exists.
+    ///
+    /// Package contains mutable data and may be shared across threads. It is
+    /// the caller's responsibility (really the underlying program's) to
+    /// synchronize access to that data. PackageLoader determines lifetimes
+    /// of packages, but it does not synchronize access to their content.
+    pub unsafe fn package_by_name(&self, name: &str) -> Option<&mut Package> {
+        let mut st = self.mu.lock().unwrap();
+        st.packages
+            .get_mut(name)
+            .map(|p| (p.as_mut() as *mut Package).as_mut().unwrap())
     }
 
-    pub fn unnamed_package_by_index(&mut self, index: usize) -> Option<&mut Package> {
-        self.unnamed_packages.get_mut(index).map(|p| &mut **p)
+    /// Returns a reference to the named package, if it exists.
+    ///
+    /// Package contains mutable data and may be shared across threads. It is
+    /// the caller's responsibility (really the underlying program's) to
+    /// synchronize access to that data. PackageLoader determines lifetimes
+    /// of packages, but it does not synchronize access to their content.
+    pub unsafe fn unnamed_package_by_index(&self, index: usize) -> Option<&mut Package> {
+        let mut st = self.mu.lock().unwrap();
+        st.unnamed_packages
+            .get_mut(index)
+            .map(|p| (p.as_mut() as *mut Package).as_mut().unwrap())
     }
 
     /// Finds, links, and initializes a package and its dependencies by name.
     /// Returns the returned values from the package's initializer. If the
     /// package was already loaded, or if it does not have an initializer,
     /// an empty list is returned.
-    ///
-    /// This is an associated function, not a method, due to a complicated
-    /// borrowing pattern. When running a package's initialization function,
-    /// the interpreter might need to dynamically load another package.
-    /// If this were a method that held a borrowed reference to the
-    /// PackageLoader, that would not be possible. So instead, this function
-    /// loads and links a subgraph of packages (rooted at the named package),
-    /// then initializes each one; while an initializer is running, the
-    /// PackageLoader is not borrowed.
     pub unsafe fn load_package(
-        loader_ref: &RefCell<PackageLoader>,
-        interp_fac: InterpreterFactory,
+        &self,
+        interp_fac: &InterpreterFactory,
         name: &str,
     ) -> Result<Vec<u64>, Error> {
         // TODO: detect and report dependency cycles, not only static cycles
         // expressed in package imports but also cycles introduced dynamically
         // by an initializer recursively calling this function.
-        let pending = {
-            let mut loader = loader_ref.borrow_mut();
-            loader.search_and_link_packages(name)?
-        };
+        let pending = { self.search_and_link_packages(&mut self.mu.lock().unwrap(), name)? };
         let mut result = Vec::new();
         for (i, package) in pending.into_iter().enumerate().rev() {
             let init_res = if let Some(ii) = package.init_index {
@@ -130,8 +142,11 @@ impl PackageLoader {
             if i == 0 {
                 result = init_res;
             }
-            let mut loader = loader_ref.borrow_mut();
-            loader.packages.insert(package.name.clone(), package);
+            self.mu
+                .lock()
+                .unwrap()
+                .packages
+                .insert(package.name.clone(), package);
         }
         Ok(result)
     }
@@ -143,17 +158,14 @@ impl PackageLoader {
     /// except the root package is provided by the caller and can't be
     /// referred to by name by other packages.
     pub unsafe fn load_given_package(
-        loader_ref: &RefCell<PackageLoader>,
-        interp_fac: InterpreterFactory,
+        &self,
+        interp_fac: &InterpreterFactory,
         package: package::Package,
     ) -> Result<(usize, Vec<u64>), Error> {
         for imp in &package.imports {
-            PackageLoader::load_package(loader_ref, interp_fac, &imp.name)?;
+            self.load_package(interp_fac, &imp.name)?;
         }
-        let linked_package = {
-            let mut loader = loader_ref.borrow_mut();
-            loader.link_package(package)
-        };
+        let linked_package = { self.link_package(&mut self.mu.lock().unwrap(), package) };
         let result = if let Some(ii) = linked_package.init_index {
             let init = &linked_package.functions[ii as usize];
             let mut interp = interp_fac.get();
@@ -161,9 +173,9 @@ impl PackageLoader {
         } else {
             Vec::new()
         };
-        let mut loader = loader_ref.borrow_mut();
-        let i = loader.unnamed_packages.len();
-        loader.unnamed_packages.push(linked_package);
+        let mut st = self.mu.lock().unwrap();
+        let i = st.unnamed_packages.len();
+        st.unnamed_packages.push(linked_package);
         Ok((i, result))
     }
 
@@ -179,13 +191,17 @@ impl PackageLoader {
     ///
     /// If the named package was already loaded, the result will be empty.
     /// Otherwise, the named package will be the last element of the result.
-    unsafe fn search_and_link_packages(&mut self, name: &str) -> Result<Vec<Box<Package>>, Error> {
+    unsafe fn search_and_link_packages(
+        &self,
+        st: &mut PackageLoaderState,
+        name: &str,
+    ) -> Result<Vec<Box<Package>>, Error> {
         let mut search_stack = vec![String::from(name)];
         let mut link_stack = Vec::new();
         let mut linked_packages = Vec::new();
 
         while let Some(name) = search_stack.pop() {
-            if self.packages.contains_key(&name) {
+            if st.packages.contains_key(&name) {
                 continue;
             }
             let package = self.searcher.search(&name)?;
@@ -196,13 +212,17 @@ impl PackageLoader {
         }
 
         while let Some(package) = link_stack.pop() {
-            let linked_package = self.link_package(package);
+            let linked_package = self.link_package(st, package);
             linked_packages.push(linked_package);
         }
         Ok(linked_packages)
     }
 
-    unsafe fn link_package(&mut self, package: package::Package) -> Box<Package> {
+    unsafe fn link_package(
+        &self,
+        st: &mut PackageLoaderState,
+        package: package::Package,
+    ) -> Box<Package> {
         let mut globals = Vec::new();
         globals.resize_with(package.globals.len(), || Global { value: 0 });
         let global_index = HashMap::from_iter(
@@ -243,7 +263,7 @@ impl PackageLoader {
             .imports
             .into_iter()
             .map(|pi| {
-                let p = &mut *self.packages.get_mut(&pi.name).unwrap();
+                let p = &mut *st.packages.get_mut(&pi.name).unwrap();
                 let globals = pi
                     .globals
                     .into_iter()
@@ -281,31 +301,42 @@ impl PackageLoader {
 /// language-specific. For example, a language might have a list of directories
 /// that could contain packages, specified with an environment variable.
 pub trait PackageSearcher {
-    fn search(&mut self, name: &str) -> Result<package::Package, Error>;
+    fn search(&self, name: &str) -> Result<package::Package, Error>;
 }
 
 /// ProvidedPackageSearcher is a trivial implementation of PackageSearcher;
 /// packages are added to it explicitly.
 pub struct ProvidedPackageSearcher {
+    mu: Mutex<ProvidedPackageSearcherState>,
+}
+
+struct ProvidedPackageSearcherState {
     packages: HashMap<String, package::Package>,
 }
 
 impl ProvidedPackageSearcher {
     pub fn new() -> ProvidedPackageSearcher {
         ProvidedPackageSearcher {
-            packages: HashMap::new(),
+            mu: Mutex::new(ProvidedPackageSearcherState {
+                packages: HashMap::new(),
+            }),
         }
     }
 
-    pub fn add(&mut self, package: package::Package) {
-        let old = self.packages.insert(package.name.clone(), package);
+    pub fn add(&self, package: package::Package) {
+        let old = self
+            .mu
+            .lock()
+            .unwrap()
+            .packages
+            .insert(package.name.clone(), package);
         assert!(old.is_none());
     }
 }
 
 impl PackageSearcher for ProvidedPackageSearcher {
-    fn search(&mut self, name: &str) -> Result<package::Package, Error> {
-        match self.packages.remove(name) {
+    fn search(&self, name: &str) -> Result<package::Package, Error> {
+        match self.mu.lock().unwrap().packages.remove(name) {
             Some(p) => Ok(p),
             None => Err(Error {
                 position: Position::default(),

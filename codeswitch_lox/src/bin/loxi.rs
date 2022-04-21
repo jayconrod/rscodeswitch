@@ -9,6 +9,7 @@ use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::path::PathBuf;
 use std::process;
+use std::sync::Arc;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -29,9 +30,9 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let path = PathBuf::from(&args[0]);
     let package = compile::compile_file(&path).map_err(err_to_string)?;
     eprintln!("{}", package);
-    let mut searcher = Box::new(ProvidedPackageSearcher::new());
+    let searcher = Box::new(ProvidedPackageSearcher::new());
     searcher.add(package);
-    let loader_cell = RefCell::new(PackageLoader::new(searcher));
+    let loader = Arc::new(PackageLoader::new(searcher));
     let mut input = io::stdin();
     let mut output = io::stdout();
     let env_cell = RefCell::new(Env {
@@ -39,8 +40,8 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         w: &mut output,
     });
     let lua_runtime = LuaRuntimeUnimplemented {};
-    let interp_fac = InterpreterFactory::new(&env_cell, &loader_cell, &lua_runtime);
-    let res = unsafe { PackageLoader::load_package(&loader_cell, interp_fac, "main") };
+    let interp_fac = InterpreterFactory::new(&env_cell, loader.clone(), &lua_runtime);
+    let res = unsafe { loader.load_package(&interp_fac, "main") };
     match res {
         Ok(_) => Ok(()),
         Err(err) => Err(Box::new(err)),

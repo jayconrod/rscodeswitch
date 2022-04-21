@@ -10,6 +10,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::str;
+use std::sync::Arc;
 
 use lazy_regex::regex;
 use regex::Regex;
@@ -55,9 +56,9 @@ fn interpret_test() {
 
 fn try_compile_and_interpret(path: &Path) -> Result<Vec<u8>, ErrorList> {
     let package = compile::compile_file(path)?;
-    let mut searcher = Box::new(ProvidedPackageSearcher::new());
+    let searcher = Box::new(ProvidedPackageSearcher::new());
     searcher.add(package);
-    let loader_cell = RefCell::new(PackageLoader::new(searcher));
+    let loader = Arc::new(PackageLoader::new(searcher));
     let mut input = io::empty();
     let mut output = Vec::new();
     let env_cell = RefCell::new(Env {
@@ -65,8 +66,8 @@ fn try_compile_and_interpret(path: &Path) -> Result<Vec<u8>, ErrorList> {
         w: &mut output,
     });
     let lua_runtime = LuaRuntimeUnimplemented {};
-    let interp_fac = InterpreterFactory::new(&env_cell, &loader_cell, &lua_runtime);
-    let res = unsafe { PackageLoader::load_package(&loader_cell, interp_fac, "main") };
+    let interp_fac = InterpreterFactory::new(&env_cell, loader.clone(), &lua_runtime);
+    let res = unsafe { loader.load_package(&interp_fac, "main") };
     match res {
         Ok(_) => Ok(output),
         Err(err) => Err(ErrorList::from(err)),

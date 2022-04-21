@@ -16,6 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str;
+use std::sync::Arc;
 
 use lazy_regex::regex;
 use regex::Regex;
@@ -59,7 +60,7 @@ fn interpret_test() {
 }
 
 fn try_compile_and_interpret(path: &Path) -> Result<(), ErrorList> {
-    let mut searcher = Box::new(ProvidedPackageSearcher::new());
+    let searcher = Box::new(ProvidedPackageSearcher::new());
     let std_package = luastd::build_std_package();
     searcher.add(std_package);
 
@@ -120,7 +121,7 @@ fn try_compile_and_interpret(path: &Path) -> Result<(), ErrorList> {
         i += 1;
     }
 
-    let loader_cell = RefCell::new(PackageLoader::new(searcher));
+    let loader = Arc::new(PackageLoader::new(searcher));
     for chunk in chunks {
         let mut input = io::empty();
         let mut output = Vec::new();
@@ -129,9 +130,8 @@ fn try_compile_and_interpret(path: &Path) -> Result<(), ErrorList> {
             w: &mut output,
         });
         let lua_runtime = LuaRuntimeImpl {};
-        let interp_fac = InterpreterFactory::new(&env_cell, &loader_cell, &lua_runtime);
-        let load_res =
-            unsafe { PackageLoader::load_given_package(&loader_cell, interp_fac, chunk.package) };
+        let interp_fac = InterpreterFactory::new(&env_cell, loader.clone(), &lua_runtime);
+        let load_res = unsafe { loader.load_given_package(&interp_fac, chunk.package) };
         let check_res = match load_res {
             Ok(_) => Ok(output),
             Err(err) => Err(ErrorList::from(err)),

@@ -14,6 +14,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::mem;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 // Each stack frame consists of (with descending stack address):
 //
@@ -42,7 +43,7 @@ pub struct Env<'a> {
 
 pub struct Interpreter<'a> {
     env: &'a RefCell<Env<'a>>,
-    loader: &'a RefCell<PackageLoader>,
+    loader: Arc<PackageLoader>,
     lua_runtime: &'a dyn LuaRuntime,
 
     /// Holds the memory for the interpreter's stack.
@@ -90,7 +91,7 @@ pub struct Interpreter<'a> {
 impl<'a> Interpreter<'a> {
     pub fn new(
         env: &'a RefCell<Env<'a>>,
-        loader: &'a RefCell<PackageLoader>,
+        loader: Arc<PackageLoader>,
         lua_runtime: &'a dyn LuaRuntime,
     ) -> Interpreter<'a> {
         let stack = Stack::new();
@@ -2628,8 +2629,8 @@ impl<'a> Interpreter<'a> {
             .lua_runtime
             .compile(&path, &data)
             .map_err(|mut errs| errs.0.remove(0))?;
-        let interp_fac = InterpreterFactory::new(self.env, self.loader, self.lua_runtime);
-        let (_, result) = PackageLoader::load_given_package(self.loader, interp_fac, package)?;
+        let interp_fac = InterpreterFactory::new(self.env, self.loader.clone(), self.lua_runtime);
+        let (_, result) = self.loader.load_given_package(&interp_fac, package)?;
         Ok(result.into_iter().map(|v| NanBox(v)).collect())
     }
 
@@ -2715,11 +2716,10 @@ impl<'a> Interpreter<'a> {
             .map_err(|mut errs| errs.0.remove(0))?;
         let init_index = package.init_index.unwrap() as usize;
         package.init_index = None;
-        let interp_fac = InterpreterFactory::new(self.env, self.loader, self.lua_runtime);
-        let (index, _) = PackageLoader::load_given_package(self.loader, interp_fac, package)?;
+        let interp_fac = InterpreterFactory::new(self.env, self.loader.clone(), self.lua_runtime);
+        let (index, _) = self.loader.load_given_package(&interp_fac, package)?;
         let init_closure = Closure::alloc(0, 0).as_mut().unwrap();
-        let mut loader = self.loader.borrow_mut();
-        let loaded_package = loader.unnamed_package_by_index(index).unwrap();
+        let loaded_package = self.loader.unnamed_package_by_index(index).unwrap();
         let init_func = &mut loaded_package.functions[init_index] as *mut Function;
         init_closure.function.set_ptr(init_func);
         Ok(vec![NanBox::from(init_closure)])
@@ -2782,11 +2782,10 @@ impl<'a> Interpreter<'a> {
             .map_err(|mut errs| errs.0.remove(0))?;
         let init_index = package.init_index.unwrap() as usize;
         package.init_index = None;
-        let interp_fac = InterpreterFactory::new(self.env, self.loader, self.lua_runtime);
-        let (index, _) = PackageLoader::load_given_package(self.loader, interp_fac, package)?;
+        let interp_fac = InterpreterFactory::new(self.env, self.loader.clone(), self.lua_runtime);
+        let (index, _) = self.loader.load_given_package(&interp_fac, package)?;
         let init_closure = Closure::alloc(0, 0).as_mut().unwrap();
-        let mut loader = self.loader.borrow_mut();
-        let loaded_package = loader.unnamed_package_by_index(index).unwrap();
+        let loaded_package = self.loader.unnamed_package_by_index(index).unwrap();
         let init_func = &mut loaded_package.functions[init_index] as *mut Function;
         init_closure.function.set_ptr(init_func);
         Ok(vec![NanBox::from(init_closure)])
@@ -2976,9 +2975,8 @@ impl<'a> Interpreter<'a> {
             .filter(|m| !m.is_nil())
     }
 
-    fn lua_load_std_function(&mut self, name: &str) -> Option<*const Function> {
+    unsafe fn lua_load_std_function(&mut self, name: &str) -> Option<*const Function> {
         self.loader
-            .borrow_mut()
             .package_by_name("luastd")
             .and_then(|p| p.function_by_name(name))
             .map(|f| f as *const Function)
@@ -3092,27 +3090,26 @@ impl Stack {
     }
 }
 
-#[derive(Clone, Copy)]
 pub struct InterpreterFactory<'a> {
     env: &'a RefCell<Env<'a>>,
-    loader_ref: &'a RefCell<PackageLoader>,
+    loader: Arc<PackageLoader>,
     lua_runtime: &'a dyn LuaRuntime,
 }
 
 impl<'a> InterpreterFactory<'a> {
     pub fn new(
         env: &'a RefCell<Env<'a>>,
-        loader_ref: &'a RefCell<PackageLoader>,
+        loader: Arc<PackageLoader>,
         lua_runtime: &'a dyn LuaRuntime,
     ) -> InterpreterFactory<'a> {
         InterpreterFactory {
             env,
-            loader_ref,
+            loader,
             lua_runtime,
         }
     }
 
     pub fn get(&self) -> Interpreter<'a> {
-        Interpreter::new(self.env, self.loader_ref, self.lua_runtime)
+        Interpreter::new(self.env, self.loader.clone(), self.lua_runtime)
     }
 }
