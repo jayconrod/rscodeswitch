@@ -4,7 +4,7 @@ use std::cmp::{Ord, Ordering, PartialOrd};
 use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use std::os::raw::c_void;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use lazy_static;
 use nix::sys::mman::{self, MapFlags, ProtFlags};
@@ -66,41 +66,11 @@ const SIZE_CLASS_PAGES: [usize; SIZE_CLASS_COUNT] = [
 const SIZE_CLASS_COUNT: usize = 68;
 
 lazy_static! {
-    pub static ref HEAP: Heap = Heap {
-        mu: Mutex::new(State::new()),
-    };
+    pub static ref HEAP: Heap = Heap::new();
 }
 
 pub struct Heap {
     mu: Mutex<State>,
-}
-
-impl Heap {
-    /// Allocates a block of memory of the given size in bytes, returning the
-    /// address of the first byte. The block is aligned to ALLOC_ALIGNMENT, and
-    /// its contents are zeroed.
-    ///
-    /// allocate doesn't support failure. Allocate may panic if an attempt is
-    /// made to allocate more memory than is available, but it's also possible
-    /// that the underlying operating system may provide virtual memory without
-    /// physical memory to back it; the OS may terminate the process if anything
-    /// is written to that memory, or when other processes increase memory
-    /// pressure.
-    pub fn allocate(&self, size: usize) -> *mut u8 {
-        // TODO: OPT: don't take a global lock for all allocations.
-        let mut state = self.mu.lock().unwrap();
-        state.allocate(size)
-    }
-
-    pub fn write_barrier(&self, from: usize, to: usize) {
-        // TODO: OPT: don't take a global lock for all write barriers.
-        let mut state = self.mu.lock().unwrap();
-        state.write_barrier(from, to);
-    }
-
-    pub fn write_barrier_nanbox(&self, _from: usize, _to: u64) {
-        // TODO: implement when there's something useful to do.
-    }
 }
 
 struct State {
@@ -121,32 +91,46 @@ struct State {
     gc_threshold_bytes: usize,
 }
 
-impl State {
-    fn new() -> State {
-        State {
-            spans: Vec::new(),
-            size_class_to_span_index: [None; SIZE_CLASS_COUNT],
-            page_table: PageTable::new(),
-            total_allocated_bytes: 0,
-            gc_threshold_bytes: MIN_GC_THRESHOLD,
+impl Heap {
+    fn new() -> Heap {
+        Heap {
+            mu: Mutex::new(State {
+                spans: Vec::new(),
+                size_class_to_span_index: [None; SIZE_CLASS_COUNT],
+                page_table: PageTable::new(),
+                total_allocated_bytes: 0,
+                gc_threshold_bytes: MIN_GC_THRESHOLD,
+            }),
         }
     }
 
-    fn allocate(&mut self, size: usize) -> *mut u8 {
-        self.total_allocated_bytes += size;
-        if self.total_allocated_bytes >= self.gc_threshold_bytes {
-            self.collect_garbage();
+    /// Allocates a block of memory of the given size in bytes, returning the
+    /// address of the first byte. The block is aligned to ALLOC_ALIGNMENT, and
+    /// its contents are zeroed.
+    ///
+    /// allocate doesn't support failure. Allocate may panic if an attempt is
+    /// made to allocate more memory than is available, but it's also possible
+    /// that the underlying operating system may provide virtual memory without
+    /// physical memory to back it; the OS may terminate the process if anything
+    /// is written to that memory, or when other processes increase memory
+    /// pressure.
+    pub fn allocate(&self, size: usize) -> *mut u8 {
+        // TODO: OPT: don't take a global lock for all allocations.
+        let mut st = self.mu.lock().unwrap();
+        st.total_allocated_bytes += size;
+        if st.total_allocated_bytes >= st.gc_threshold_bytes {
+            st = self.collect_garbage(st);
         }
         if size < MAX_SMALL_SIZE {
-            self.allocate_small(size)
+            self.allocate_small(&mut st, size)
         } else {
-            self.allocate_large(size)
+            self.allocate_large(&mut st, size)
         }
     }
 
     /// Handles allocations of small blocks. Small allocations are grouped
     /// together on spans that contain blocks of the same size (size class).
-    fn allocate_small(&mut self, size: usize) -> *mut u8 {
+    fn allocate_small(&self, st: &mut State, size: usize) -> *mut u8 {
         if size == 0 {
             return PAGE_BASE_ADDR as *mut u8;
         }
@@ -158,11 +142,11 @@ impl State {
 
         // Find a span of that size class with a free block.
         // Allocate a new span if needed.
-        let span_index = match self.size_class_to_span_index[size_class] {
+        let span_index = match st.size_class_to_span_index[size_class] {
             Some(i) => i,
-            None => self.allocate_small_span(size_class),
+            None => self.allocate_small_span(st, size_class),
         };
-        let span = match &mut self.spans[span_index] {
+        let span = match &mut st.spans[span_index] {
             Span::Small(s) => s,
             _ => unreachable!(),
         };
@@ -173,7 +157,7 @@ impl State {
         span.allocs.set(block_index, true);
         span.free_block_count -= 1;
         if span.free_block_count == 0 {
-            self.size_class_to_span_index[size_class] = None;
+            st.size_class_to_span_index[size_class] = None;
         }
         let addr = span.begin + block_index * rounded_size;
         addr as *mut u8
@@ -182,38 +166,38 @@ impl State {
     /// Allocates a span that will contain blocks of the same size class.
     /// The argument is a size class, not a size in bytes. Returns the index
     /// of the newly created span.
-    fn allocate_small_span(&mut self, size_class: usize) -> usize {
-        let span_index = self.spans.len();
-        let begin = self.allocate_span_pages(span_index, SIZE_CLASS_PAGES[size_class]);
+    fn allocate_small_span(&self, st: &mut State, size_class: usize) -> usize {
+        let span_index = st.spans.len();
+        let begin = self.allocate_span_pages(st, span_index, SIZE_CLASS_PAGES[size_class]);
         let size = SIZE_CLASS_PAGES[size_class] * PAGE_SIZE;
         let block_count = size / SIZE_CLASS_SIZE[size_class];
-        self.spans
+        st.spans
             .push(Span::Small(SmallSpan::new(begin, size, block_count)));
         span_index
     }
 
     /// Handles allocation of large blocks. Each large block is allocated on its
     /// own span.
-    fn allocate_large(&mut self, size: usize) -> *mut u8 {
-        let span_index = self.spans.len();
+    fn allocate_large(&self, st: &mut State, size: usize) -> *mut u8 {
+        let span_index = st.spans.len();
         let aligned_size = math::align(size, PAGE_SIZE);
         let page_count = aligned_size / PAGE_SIZE;
-        let begin = self.allocate_span_pages(span_index, page_count);
-        self.spans
+        let begin = self.allocate_span_pages(st, span_index, page_count);
+        st.spans
             .push(Span::Large(LargeSpan::new(begin, aligned_size)));
         begin as *mut u8
     }
 
     /// Allocates a contiguous range of pages to be managed by a span with
     /// the given index, which may not exist yet.
-    fn allocate_span_pages(&mut self, span_index: usize, page_count: usize) -> usize {
+    fn allocate_span_pages(&self, st: &mut State, span_index: usize, page_count: usize) -> usize {
         let size = page_count * PAGE_SIZE;
         let mut begin = PAGE_BASE_ADDR;
         'rangeloop: while begin + size < PAGE_MAX_ADDR {
             // Find an unallocated range of pages.
             let mut p = begin;
             while p < begin + size {
-                if self.page_table.find(p).is_some() {
+                if st.page_table.find(p).is_some() {
                     begin = p + PAGE_SIZE;
                     continue 'rangeloop;
                 }
@@ -251,16 +235,29 @@ impl State {
 
         for i in 0..page_count {
             let addr = begin + i * PAGE_SIZE;
-            self.page_table.set_allocated(addr, span_index);
+            st.page_table.set_allocated(addr, span_index);
         }
         begin
     }
 
-    fn collect_garbage(&mut self) {
-        // TODO: implement.
-        self.gc_threshold_bytes = self.total_allocated_bytes * 2;
+    pub fn write_barrier(&self, from: usize, to: usize) {
+        // TODO: OPT: don't take a global lock for all write barriers.
+        let mut state = self.mu.lock().unwrap();
+        state.write_barrier(from, to);
     }
 
+    pub fn write_barrier_nanbox(&self, _from: usize, _to: u64) {
+        // TODO: implement when there's something useful to do.
+    }
+
+    fn collect_garbage<'a>(&self, mut st: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
+        // TODO: implement.
+        st.gc_threshold_bytes = st.total_allocated_bytes * 2;
+        st
+    }
+}
+
+impl State {
     fn write_barrier(&mut self, from: usize, _to: usize) {
         if let Some(page) = self.find_page(from) {
             let word_index = (from & (PAGE_SIZE - 1)) >> 3;
