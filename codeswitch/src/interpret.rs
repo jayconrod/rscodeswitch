@@ -943,40 +943,12 @@ impl<'a> Interpreter<'a> {
                     binop_num!(i64, wrapping_add);
                     inst::size(inst::ADD)
                 }
-                (inst::ADD, inst::MODE_I32) => {
-                    binop_num!(i32, wrapping_add);
-                    inst::size(inst::ADD)
-                }
-                (inst::ADD, inst::MODE_I16) => {
-                    binop_num!(i16, wrapping_add);
-                    inst::size(inst::ADD)
-                }
-                (inst::ADD, inst::MODE_I8) => {
-                    binop_num!(i8, wrapping_add);
-                    inst::size(inst::ADD)
-                }
-                (inst::ADD, inst::MODE_U64) => {
-                    binop_num!(u64, wrapping_add);
-                    inst::size(inst::ADD)
-                }
-                (inst::ADD, inst::MODE_U32) => {
-                    binop_num!(u32, wrapping_add);
-                    inst::size(inst::ADD)
-                }
                 (inst::ADD, inst::MODE_U16) => {
                     binop_num!(u16, wrapping_add);
                     inst::size(inst::ADD)
                 }
-                (inst::ADD, inst::MODE_U8) => {
-                    binop_num!(u8, wrapping_add);
-                    inst::size(inst::ADD)
-                }
                 (inst::ADD, inst::MODE_F64) => {
                     binop_num!(f64, +);
-                    inst::size(inst::ADD)
-                }
-                (inst::ADD, inst::MODE_F32) => {
-                    binop_num!(f32, +);
                     inst::size(inst::ADD)
                 }
                 (inst::ADD, inst::MODE_LUA) => {
@@ -1254,6 +1226,8 @@ impl<'a> Interpreter<'a> {
                     inst::size(inst::CAPTURE)
                 }
                 (inst::CONST, inst::MODE_I64) => {
+                    // TODO: use this implementation for other modes. Other
+                    // components need the type information.
                     let v = read_imm!(u64, 1);
                     push!(v);
                     inst::size(inst::CONST)
@@ -1266,40 +1240,8 @@ impl<'a> Interpreter<'a> {
                     binop_num!(i64, wrapping_div);
                     inst::size(inst::DIV)
                 }
-                (inst::DIV, inst::MODE_I32) => {
-                    binop_num!(i32, wrapping_div);
-                    inst::size(inst::DIV)
-                }
-                (inst::DIV, inst::MODE_I16) => {
-                    binop_num!(i16, wrapping_div);
-                    inst::size(inst::DIV)
-                }
-                (inst::DIV, inst::MODE_I8) => {
-                    binop_num!(i8, wrapping_div);
-                    inst::size(inst::DIV)
-                }
-                (inst::DIV, inst::MODE_U64) => {
-                    binop_num!(u64, wrapping_div);
-                    inst::size(inst::DIV)
-                }
-                (inst::DIV, inst::MODE_U32) => {
-                    binop_num!(u32, wrapping_div);
-                    inst::size(inst::DIV)
-                }
-                (inst::DIV, inst::MODE_U16) => {
-                    binop_num!(u16, wrapping_div);
-                    inst::size(inst::DIV)
-                }
-                (inst::DIV, inst::MODE_U8) => {
-                    binop_num!(u8, wrapping_div);
-                    inst::size(inst::DIV)
-                }
                 (inst::DIV, inst::MODE_F64) => {
                     binop_num!(f64, /);
-                    inst::size(inst::DIV)
-                }
-                (inst::DIV, inst::MODE_F32) => {
-                    binop_num!(f32, /);
                     inst::size(inst::DIV)
                 }
                 (inst::DIV, inst::MODE_LUA) => {
@@ -1329,10 +1271,6 @@ impl<'a> Interpreter<'a> {
                 }
                 (inst::EQ, inst::MODE_F64) => {
                     binop_eq!(f64, ==);
-                    inst::size(inst::EQ)
-                }
-                (inst::EQ, inst::MODE_F32) => {
-                    binop_eq!(f32, ==);
                     inst::size(inst::EQ)
                 }
                 (inst::EQ, inst::MODE_BOX) => {
@@ -1377,50 +1315,12 @@ impl<'a> Interpreter<'a> {
                     push!(v.0);
                     inst::size(inst::FLOORDIV)
                 }
-                (inst::FUNCTION, inst::MODE_I64) => {
-                    let i = read_imm!(u32, 1) as usize;
-                    let f = &pp.functions[i] as *const Function as u64;
-                    push!(f);
-                    inst::size(inst::FUNCTION)
-                }
                 (inst::GE, inst::MODE_I64) => {
                     binop_cmp!(i64, >=);
                     inst::size(inst::GE)
                 }
-                (inst::GE, inst::MODE_I32) => {
-                    binop_cmp!(i32, >=);
-                    inst::size(inst::GE)
-                }
-                (inst::GE, inst::MODE_I16) => {
-                    binop_cmp!(i16, >=);
-                    inst::size(inst::GE)
-                }
-                (inst::GE, inst::MODE_I8) => {
-                    binop_cmp!(i8, >=);
-                    inst::size(inst::GE)
-                }
-                (inst::GE, inst::MODE_U64) => {
-                    binop_cmp!(u64, >=);
-                    inst::size(inst::GE)
-                }
-                (inst::GE, inst::MODE_U32) => {
-                    binop_cmp!(u32, >=);
-                    inst::size(inst::GE)
-                }
-                (inst::GE, inst::MODE_U16) => {
-                    binop_cmp!(u16, >=);
-                    inst::size(inst::GE)
-                }
-                (inst::GE, inst::MODE_U8) => {
-                    binop_cmp!(u8, >=);
-                    inst::size(inst::GE)
-                }
                 (inst::GE, inst::MODE_F64) => {
                     binop_cmp!(f64, >=);
-                    inst::size(inst::GE)
-                }
-                (inst::GE, inst::MODE_F32) => {
-                    binop_cmp!(f32, >=);
                     inst::size(inst::GE)
                 }
                 (inst::GETERROR, inst::MODE_LUA) => {
@@ -1444,80 +1344,16 @@ impl<'a> Interpreter<'a> {
                     binop_cmp!(i64, >);
                     inst::size(inst::GT)
                 }
-                (inst::GT, inst::MODE_I32) => {
-                    binop_cmp!(i32, >);
-                    inst::size(inst::GT)
-                }
-                (inst::GT, inst::MODE_I16) => {
-                    binop_cmp!(i16, >);
-                    inst::size(inst::GT)
-                }
-                (inst::GT, inst::MODE_I8) => {
-                    binop_cmp!(i8, >);
-                    inst::size(inst::GT)
-                }
-                (inst::GT, inst::MODE_U64) => {
-                    binop_cmp!(u64, >);
-                    inst::size(inst::GT)
-                }
-                (inst::GT, inst::MODE_U32) => {
-                    binop_cmp!(u32, >);
-                    inst::size(inst::GT)
-                }
-                (inst::GT, inst::MODE_U16) => {
-                    binop_cmp!(u16, >);
-                    inst::size(inst::GT)
-                }
-                (inst::GT, inst::MODE_U8) => {
-                    binop_cmp!(u8, >);
-                    inst::size(inst::GT)
-                }
                 (inst::GT, inst::MODE_F64) => {
                     binop_cmp!(f64, >);
-                    inst::size(inst::GT)
-                }
-                (inst::GT, inst::MODE_F32) => {
-                    binop_cmp!(f32, >);
                     inst::size(inst::GT)
                 }
                 (inst::LE, inst::MODE_I64) => {
                     binop_cmp!(i64, <=);
                     inst::size(inst::LE)
                 }
-                (inst::LE, inst::MODE_I32) => {
-                    binop_cmp!(i32, <=);
-                    inst::size(inst::LE)
-                }
-                (inst::LE, inst::MODE_I16) => {
-                    binop_cmp!(i16, <=);
-                    inst::size(inst::LE)
-                }
-                (inst::LE, inst::MODE_I8) => {
-                    binop_cmp!(i8, <=);
-                    inst::size(inst::LE)
-                }
-                (inst::LE, inst::MODE_U64) => {
-                    binop_cmp!(u64, <=);
-                    inst::size(inst::LE)
-                }
-                (inst::LE, inst::MODE_U32) => {
-                    binop_cmp!(u32, <=);
-                    inst::size(inst::LE)
-                }
-                (inst::LE, inst::MODE_U16) => {
-                    binop_cmp!(u16, <=);
-                    inst::size(inst::LE)
-                }
-                (inst::LE, inst::MODE_U8) => {
-                    binop_cmp!(u8, <=);
-                    inst::size(inst::LE)
-                }
                 (inst::LE, inst::MODE_F64) => {
                     binop_cmp!(f64, <=);
-                    inst::size(inst::LE)
-                }
-                (inst::LE, inst::MODE_F32) => {
-                    binop_cmp!(f32, <=);
                     inst::size(inst::LE)
                 }
                 (inst::LE, inst::MODE_LUA) => {
@@ -1589,34 +1425,6 @@ impl<'a> Interpreter<'a> {
                 }
                 (inst::LOAD, inst::MODE_I64) => {
                     push!(load!(i64, pop!(), 0, 0) as u64);
-                    inst::size(inst::LOAD)
-                }
-                (inst::LOAD, inst::MODE_I32) => {
-                    push!(load!(i32, pop!(), 0, 0) as u64);
-                    inst::size(inst::LOAD)
-                }
-                (inst::LOAD, inst::MODE_I16) => {
-                    push!(load!(i16, pop!(), 0, 0) as u64);
-                    inst::size(inst::LOAD)
-                }
-                (inst::LOAD, inst::MODE_I8) => {
-                    push!(load!(i8, pop!(), 0, 0) as u64);
-                    inst::size(inst::LOAD)
-                }
-                (inst::LOAD, inst::MODE_U32) => {
-                    push!(load!(u32, pop!(), 0, 0) as u64);
-                    inst::size(inst::LOAD)
-                }
-                (inst::LOAD, inst::MODE_U16) => {
-                    push!(load!(u16, pop!(), 0, 0) as u64);
-                    inst::size(inst::LOAD)
-                }
-                (inst::LOAD, inst::MODE_U8) => {
-                    push!(load!(u8, pop!(), 0, 0) as u64);
-                    inst::size(inst::LOAD)
-                }
-                (inst::LOAD, inst::MODE_F32) => {
-                    push!(load!(f32, pop!(), 0, 0).to_bits() as u64);
                     inst::size(inst::LOAD)
                 }
                 (inst::LOADARG, inst::MODE_I64) => {
@@ -1835,40 +1643,8 @@ impl<'a> Interpreter<'a> {
                     binop_cmp!(i64, <);
                     inst::size(inst::LT)
                 }
-                (inst::LT, inst::MODE_I32) => {
-                    binop_cmp!(i32, <);
-                    inst::size(inst::LT)
-                }
-                (inst::LT, inst::MODE_I16) => {
-                    binop_cmp!(i16, <);
-                    inst::size(inst::LT)
-                }
-                (inst::LT, inst::MODE_I8) => {
-                    binop_cmp!(i8, <);
-                    inst::size(inst::LT)
-                }
-                (inst::LT, inst::MODE_U64) => {
-                    binop_cmp!(u64, <);
-                    inst::size(inst::LT)
-                }
-                (inst::LT, inst::MODE_U32) => {
-                    binop_cmp!(u32, <);
-                    inst::size(inst::LT)
-                }
-                (inst::LT, inst::MODE_U16) => {
-                    binop_cmp!(u16, <);
-                    inst::size(inst::LT)
-                }
-                (inst::LT, inst::MODE_U8) => {
-                    binop_cmp!(u8, <);
-                    inst::size(inst::LT)
-                }
                 (inst::LT, inst::MODE_F64) => {
                     binop_cmp!(f64, <);
-                    inst::size(inst::LT)
-                }
-                (inst::LT, inst::MODE_F32) => {
-                    binop_cmp!(f32, <);
                     inst::size(inst::LT)
                 }
                 (inst::LT, inst::MODE_LUA) => {
@@ -1879,40 +1655,8 @@ impl<'a> Interpreter<'a> {
                     binop_num!(i64, wrapping_rem);
                     inst::size(inst::MOD)
                 }
-                (inst::MOD, inst::MODE_I32) => {
-                    binop_num!(i32, wrapping_rem);
-                    inst::size(inst::MOD)
-                }
-                (inst::MOD, inst::MODE_I16) => {
-                    binop_num!(i16, wrapping_rem);
-                    inst::size(inst::MOD)
-                }
-                (inst::MOD, inst::MODE_I8) => {
-                    binop_num!(i8, wrapping_rem);
-                    inst::size(inst::MOD)
-                }
-                (inst::MOD, inst::MODE_U64) => {
-                    binop_num!(u64, wrapping_rem);
-                    inst::size(inst::MOD)
-                }
-                (inst::MOD, inst::MODE_U32) => {
-                    binop_num!(u32, wrapping_rem);
-                    inst::size(inst::MOD)
-                }
-                (inst::MOD, inst::MODE_U16) => {
-                    binop_num!(u16, wrapping_rem);
-                    inst::size(inst::MOD)
-                }
-                (inst::MOD, inst::MODE_U8) => {
-                    binop_num!(u8, wrapping_rem);
-                    inst::size(inst::MOD)
-                }
                 (inst::MOD, inst::MODE_F64) => {
                     binop_num!(f64, %);
-                    inst::size(inst::MOD)
-                }
-                (inst::MOD, inst::MODE_F32) => {
-                    binop_num!(f32, %);
                     inst::size(inst::MOD)
                 }
                 (inst::MOD, inst::MODE_LUA) => {
@@ -1941,40 +1685,8 @@ impl<'a> Interpreter<'a> {
                     binop_num!(i64, wrapping_mul);
                     inst::size(inst::MUL)
                 }
-                (inst::MUL, inst::MODE_I32) => {
-                    binop_num!(i32, wrapping_mul);
-                    inst::size(inst::MUL)
-                }
-                (inst::MUL, inst::MODE_I16) => {
-                    binop_num!(i16, wrapping_mul);
-                    inst::size(inst::MUL)
-                }
-                (inst::MUL, inst::MODE_I8) => {
-                    binop_num!(i8, wrapping_mul);
-                    inst::size(inst::MUL)
-                }
-                (inst::MUL, inst::MODE_U64) => {
-                    binop_num!(u64, wrapping_mul);
-                    inst::size(inst::MUL)
-                }
-                (inst::MUL, inst::MODE_U32) => {
-                    binop_num!(u32, wrapping_mul);
-                    inst::size(inst::MUL)
-                }
-                (inst::MUL, inst::MODE_U16) => {
-                    binop_num!(u16, wrapping_mul);
-                    inst::size(inst::MUL)
-                }
-                (inst::MUL, inst::MODE_U8) => {
-                    binop_num!(u8, wrapping_mul);
-                    inst::size(inst::MUL)
-                }
                 (inst::MUL, inst::MODE_F64) => {
                     binop_num!(f64, *);
-                    inst::size(inst::MUL)
-                }
-                (inst::MUL, inst::MODE_F32) => {
-                    binop_num!(f32, *);
                     inst::size(inst::MUL)
                 }
                 (inst::MUL, inst::MODE_LUA) => {
@@ -2051,32 +1763,12 @@ impl<'a> Interpreter<'a> {
                     binop_eq!(f64, !=);
                     inst::size(inst::NE)
                 }
-                (inst::NE, inst::MODE_F32) => {
-                    binop_eq!(f32, !=);
-                    inst::size(inst::NE)
-                }
                 (inst::NEG, inst::MODE_I64) => {
                     unop_num!(i64, -);
                     inst::size(inst::NEG)
                 }
-                (inst::NEG, inst::MODE_I32) => {
-                    unop_num!(i32, -);
-                    inst::size(inst::NEG)
-                }
-                (inst::NEG, inst::MODE_I16) => {
-                    unop_num!(i16, -);
-                    inst::size(inst::NEG)
-                }
-                (inst::NEG, inst::MODE_I8) => {
-                    unop_num!(i8, -);
-                    inst::size(inst::NEG)
-                }
                 (inst::NEG, inst::MODE_F64) => {
                     unop_num!(f64, -);
-                    inst::size(inst::NEG)
-                }
-                (inst::NEG, inst::MODE_F32) => {
-                    unop_num!(f32, -);
                     inst::size(inst::NEG)
                 }
                 (inst::NEG, inst::MODE_LUA) => {
@@ -2145,18 +1837,6 @@ impl<'a> Interpreter<'a> {
                 }
                 (inst::NOTB, inst::MODE_I64) => {
                     unop_num!(i64, !);
-                    inst::size(inst::NOTB)
-                }
-                (inst::NOTB, inst::MODE_I32) => {
-                    unop_num!(i32, !);
-                    inst::size(inst::NOTB)
-                }
-                (inst::NOTB, inst::MODE_I16) => {
-                    unop_num!(i16, !);
-                    inst::size(inst::NOTB)
-                }
-                (inst::NOTB, inst::MODE_I8) => {
-                    unop_num!(i8, !);
                     inst::size(inst::NOTB)
                 }
                 (inst::NOTB, inst::MODE_LUA) => {
@@ -2234,7 +1914,7 @@ impl<'a> Interpreter<'a> {
                     // in the current function and the current value of hp,
                     // then setting hp to the new sp. Effectively, handlers
                     // are a singly linked list threaded through stack frames.
-                    let delta = read_imm!(i32, 1) as usize;
+                    let delta = read_imm!(i32, 1) as isize;
                     let eip = ((ip as isize) + (delta as isize) + 1) as u64;
                     push!(eip);
                     push!(hp as u64);
@@ -2313,30 +1993,6 @@ impl<'a> Interpreter<'a> {
                     let v = pop!() as i64;
                     let p = pop!() as usize;
                     store!(i64, p, 0, 0, v);
-                    inst::size(inst::STORE)
-                }
-                (inst::STORE, inst::MODE_I32) => {
-                    let v = pop!() as i32;
-                    let p = pop!() as usize;
-                    store!(i32, p, 0, 0, v);
-                    inst::size(inst::STORE)
-                }
-                (inst::STORE, inst::MODE_I16) => {
-                    let v = pop!() as i16;
-                    let p = pop!() as usize;
-                    store!(i16, p, 0, 0, v);
-                    inst::size(inst::STORE)
-                }
-                (inst::STORE, inst::MODE_I8) => {
-                    let v = pop!() as i8;
-                    let p = pop!() as usize;
-                    store!(i8, p, 0, 0, v);
-                    inst::size(inst::STORE)
-                }
-                (inst::STORE, inst::MODE_PTR) => {
-                    let v = pop!() as usize;
-                    let p = pop!() as usize;
-                    store!(ptr, p, 0, 0, v);
                     inst::size(inst::STORE)
                 }
                 (inst::STORE, inst::MODE_LUA) => {
@@ -2479,6 +2135,9 @@ impl<'a> Interpreter<'a> {
                     inst::size(inst::STOREPROTOTYPE)
                 }
                 (inst::STRCAT, inst::MODE_LUA) => {
+                    // TODO: probably not handling garbage collection right.
+                    // In the non-metamethod case, keep the operands on the
+                    // stack until after the allocation.
                     let r = NanBox(pop!());
                     let l = NanBox(pop!());
                     lua_try_meta_binop!(l, r, "__concat");
