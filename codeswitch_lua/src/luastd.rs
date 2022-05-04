@@ -4,10 +4,10 @@ use codeswitch::package::{Builder, Package, Type};
 
 pub fn build_std_package() -> Package {
     let mut b = Builder::new(String::from("luastd"));
-    let env_index = b.add_global("_ENV");
-    let g_index = b.add_global("_G");
-    let ipairs_iter_index = b.add_global("ipairs_iter");
-    let next_index = b.add_global("pairs");
+    let env_index = b.add_global("_ENV", Type::NanBox);
+    let g_index = b.add_global("_G", Type::NanBox);
+    let ipairs_iter_index = b.add_global("ipairs_iter", Type::NanBox);
+    let next_index = b.add_global("pairs", Type::NanBox);
 
     // assert(v, message)
     {

@@ -146,8 +146,8 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
         let imports = vec![PackageImport::new(
             String::from("luastd"),
             vec![
-                GlobalImport::new(String::from("_ENV")),
-                GlobalImport::new(String::from("_G")),
+                GlobalImport::new(String::from("_ENV"), Type::NanBox),
+                GlobalImport::new(String::from("_G"), Type::NanBox),
             ],
             Vec::new(),
         )];

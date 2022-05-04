@@ -45,6 +45,7 @@ impl fmt::Display for Package {
 
 pub struct Global {
     pub name: std::string::String,
+    pub type_: Type,
 }
 
 impl fmt::Display for Global {
@@ -94,13 +95,15 @@ impl PackageImport {
 
 pub struct GlobalImport {
     pub name: String,
+    pub type_: Type,
     pub link: *mut Global,
 }
 
 impl GlobalImport {
-    pub fn new(name: String) -> GlobalImport {
+    pub fn new(name: String, type_: Type) -> GlobalImport {
         GlobalImport {
             name,
+            type_,
             link: 0 as *mut Global,
         }
     }
@@ -259,10 +262,11 @@ impl Builder {
         fi
     }
 
-    pub fn add_global(&mut self, s: &'static str) -> u32 {
+    pub fn add_global(&mut self, name: &'static str, type_: Type) -> u32 {
         let i = self.package.globals.len() as u32;
         self.package.globals.push(Global {
-            name: String::from(s),
+            name: String::from(name),
+            type_,
         });
         i
     }

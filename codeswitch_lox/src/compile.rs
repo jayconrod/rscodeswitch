@@ -740,6 +740,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             VarKind::Global => {
                 *self.ensure_global(var.slot) = Global {
                     name: String::from(name),
+                    type_: Type::NanBox,
                 };
             }
             VarKind::Local => {}
@@ -828,6 +829,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
         if self.globals.len() <= index {
             self.globals.resize_with(index + 1, || Global {
                 name: String::from(""),
+                type_: Type::NanBox,
             });
         }
         &mut self.globals[index]
