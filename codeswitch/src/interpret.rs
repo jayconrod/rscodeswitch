@@ -19,14 +19,12 @@ use std::sync::Arc;
 // Each stack frame consists of (with descending stack address):
 //
 //   - Caller: *const Function
-//   - Caller's closure: *const Closure
 //   - Return address: *const u8
 //   - Caller's fp
-const FRAME_SIZE: usize = 32;
+const FRAME_SIZE: usize = 24;
 const FRAME_FP_OFFSET: usize = 0;
 const FRAME_IP_OFFSET: usize = 8;
-const FRAME_CP_OFFSET: usize = 16;
-const FRAME_FUNC_OFFSET: usize = 24;
+const FRAME_FUNC_OFFSET: usize = 16;
 
 // Error handlers may be pushed on the stack. Each error handler comprises:
 //
@@ -151,16 +149,44 @@ impl<'a> Interpreter<'a> {
         let mut hp = 0;
 
         // Construct the stack frame.
+        sp -= 8;
+        *(sp as *mut u64) = cp as u64;
         for i in 0..args.len() {
             sp -= 8;
             *(sp as *mut u64) = args[i];
         }
         sp -= FRAME_SIZE;
         *((sp + FRAME_FUNC_OFFSET) as *mut *const Function) = self.func;
-        *((sp + FRAME_CP_OFFSET) as *mut *const Closure) = self.cp;
         *((sp + FRAME_IP_OFFSET) as *mut *const u8) = self.ip;
         *((sp + FRAME_FP_OFFSET) as *mut usize) = self.fp;
         fp = sp;
+
+        // arg_addr returns the stack address of an argument to the current
+        // function.
+        macro_rules! arg_addr {
+            ($index:expr) => {
+                arg_addr!($index, fp)
+            };
+            ($index:expr, $fp:expr) => {{
+                let fp = $fp;
+                let index = $index;
+                if func.var_param_type.is_some() {
+                    let argc = *((fp + FRAME_SIZE) as *const u64) as usize;
+                    fp + FRAME_SIZE + argc * 8 - index * 8
+                } else {
+                    let argc = func.param_types.len();
+                    fp + FRAME_SIZE + argc * 8 - index * 8 - 8
+                }
+            }};
+        }
+
+        // cp_addr returns the address of the current function's closure.
+        // The closure pointer is pushed before the arguments.
+        macro_rules! cp_addr {
+            () => {{
+                (arg_addr!(0, fp) + 8) as usize
+            }};
+        }
 
         // save_regs writes the local values of ip and other registers into the
         // Interpreter object.
@@ -222,9 +248,8 @@ impl<'a> Interpreter<'a> {
             ($retc:expr) => {{
                 let retc = $retc;
                 ret_sp = sp;
-                sp = arg_addr!(0) + 8;
+                sp = cp_addr!() + 8;
                 let func_ptr = *((fp + FRAME_FUNC_OFFSET) as *const *const Function);
-                cp = *((fp + FRAME_CP_OFFSET) as *const *const Closure);
                 ip = *((fp + FRAME_IP_OFFSET) as *const *const u8);
                 fp = *((fp + FRAME_FP_OFFSET) as *const usize);
                 if ip.is_null() {
@@ -232,6 +257,7 @@ impl<'a> Interpreter<'a> {
                 }
                 func = func_ptr.as_ref().unwrap();
                 pp = func.package.as_mut().unwrap();
+                cp = *(cp_addr!() as *const *mut Closure);
                 for i in 0..retc {
                     let retp = ret_sp + (retc - i - 1) * 8;
                     let ret = *(retp as *const u64);
@@ -337,13 +363,12 @@ impl<'a> Interpreter<'a> {
                 sp -= FRAME_SIZE;
                 *((sp + FRAME_FUNC_OFFSET) as *mut u64) = func as *const Function as u64;
                 func = callee_func;
-                *((sp + FRAME_CP_OFFSET) as *mut u64) = cp as u64;
-                cp = 0 as *const Closure;
                 *((sp + FRAME_IP_OFFSET) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
                 ip = &callee_func.insts[0] as *const u8;
                 *((sp + FRAME_FP_OFFSET) as *mut u64) = fp as u64;
                 fp = sp;
                 pp = func.package.as_mut().unwrap();
+                cp = 0 as *const Closure;
             }};
         }
 
@@ -404,13 +429,12 @@ impl<'a> Interpreter<'a> {
                 sp -= FRAME_SIZE;
                 *((sp + FRAME_FUNC_OFFSET) as *mut u64) = func as *const Function as u64;
                 func = callee_func;
-                *((sp + FRAME_CP_OFFSET) as *mut u64) = cp as u64;
-                cp = callee;
                 *((sp + FRAME_IP_OFFSET) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
                 ip = &callee_func.insts[0] as *const u8;
                 *((sp + FRAME_FP_OFFSET) as *mut u64) = fp as u64;
                 fp = sp;
                 pp = callee_func.package.as_mut().unwrap();
+                cp = callee;
             }};
         }
 
@@ -426,6 +450,7 @@ impl<'a> Interpreter<'a> {
                         Ok(c) => c,
                         _ => unwind_errorf!("metamethod '{}' is not a function", $name),
                     };
+                    push!(0); // null cp for _adjust1
                     push!(NanBox::from(c).0);
                     push!(i.0);
                     let adjust1 = self.lua_load_std_function("_adjust1").unwrap();
@@ -462,6 +487,7 @@ impl<'a> Interpreter<'a> {
                     };
                 }
                 if let Some(c) = mm {
+                    push!(0); // null cp for _adjust1
                     push!(NanBox::from(c).0);
                     push!(l.0);
                     push!(r.0);
@@ -501,6 +527,7 @@ impl<'a> Interpreter<'a> {
                         None => {break;}
                     };
                     if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(meta_value) {
+                        push!(0); // null cp for _adjust1
                         push!(NanBox::from(c).0);
                         push!(NanBox::from(receiver).0);
                         push!(NanBox::from(key).0);
@@ -546,6 +573,7 @@ impl<'a> Interpreter<'a> {
                         }
                     };
                     if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(meta_value) {
+                        push!(0); // null cp for _adjust0
                         push!(NanBox::from(c).0);
                         push!(receiver.0);
                         push!(NanBox::from(key).0);
@@ -734,40 +762,19 @@ impl<'a> Interpreter<'a> {
             }};
         }
 
-        // shift_args! shifts a number of values on top of the stack
-        // back by a given number of slots, deleting values earlier
-        // in the stack.
-        macro_rules! shift_args {
-            ($arg_count:ident, $by:expr) => {{
+        // unshift_arg inserts $v on the stack, incrementing sp and moving
+        // $arg_count values forward by a slot.
+        macro_rules! unshift_arg {
+            ($arg_count:expr, $v: expr) => {{
                 let arg_count = $arg_count as usize;
-                let by = $by;
-                let mut from = sp + arg_count * 8 - 8;
-                let mut to = from + by * 8;
-                while from >= sp {
-                    *(to as *mut u64) = *(from as *mut u64);
-                    from -= 8;
-                    to -= 8;
+                let v = $v as u64;
+                sp -= 8;
+                for i in 0..arg_count {
+                    let to = sp + i * 8;
+                    let from = to + 8;
+                    *(to as *mut u64) = *(from as *const u64);
                 }
-                sp += by * 8;
-            }};
-        }
-
-        // arg_addr returns the stack address of an argument to the current
-        // function.
-        macro_rules! arg_addr {
-            ($index:expr) => {
-                arg_addr!($index, fp)
-            };
-            ($index:expr, $fp:expr) => {{
-                let fp = $fp;
-                let index = $index;
-                if func.var_param_type.is_some() {
-                    let argc = *((fp + FRAME_SIZE) as *const u64) as usize;
-                    fp + FRAME_SIZE + argc * 8 - index * 8
-                } else {
-                    let argc = func.param_types.len();
-                    fp + FRAME_SIZE + argc * 8 - index * 8 - 8
-                }
+                *((sp + arg_count * 8) as *mut u64) = v;
             }};
         }
 
@@ -867,6 +874,13 @@ impl<'a> Interpreter<'a> {
                 };
                 let callee_func = callee_closure.function.unwrap_ref();
 
+                // Write the closure we're going to call before the arguments.
+                // This slot should have been reserved. With the CALLNAMEDPROP
+                // instructions, it's an inserted null (for method) or contains
+                // the receiver (field). With the CALLVALUE instructions, it
+                // contains the boxed callee.
+                *((sp + arg_count * 8) as *mut u64) = callee_closure as *const Closure as u64;
+
                 // If the callee has bound arguments, insert them on the stack
                 // before the regular arguments.
                 if callee_closure.bound_arg_count > 0 {
@@ -914,15 +928,14 @@ impl<'a> Interpreter<'a> {
                 // "registers" so the function's instructions, cells,
                 // and package will be used.
                 sp -= FRAME_SIZE;
-                *((sp as usize + 24) as *mut u64) = func as *const Function as u64;
+                *((sp + FRAME_FUNC_OFFSET) as *mut *const Function) = func as *const Function;
                 func = callee_func;
-                *((sp as usize + 16) as *mut u64) = cp as u64;
-                cp = callee_closure;
-                *((sp as usize + 8) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
+                *((sp + FRAME_IP_OFFSET) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
                 ip = &func.insts[0] as *const u8;
-                *(sp as *mut u64) = fp as u64;
+                *((sp + FRAME_FP_OFFSET) as *mut usize) = fp;
                 fp = sp;
                 pp = callee_func.package.as_mut().unwrap();
+                cp = callee_closure;
             }};
         }
 
@@ -1037,7 +1050,6 @@ impl<'a> Interpreter<'a> {
                     // whether there's an error or not.
                     sp -= FRAME_SIZE;
                     *((sp + FRAME_FUNC_OFFSET) as *mut *const Function) = func;
-                    *((sp + FRAME_CP_OFFSET) as *mut *const Closure) = cp;
                     *((sp + FRAME_IP_OFFSET) as *mut usize) =
                         (ip as usize) + inst::size(inst::CALLHANDLER);
                     *((sp + FRAME_FP_OFFSET) as *mut usize) = fp;
@@ -1065,19 +1077,17 @@ impl<'a> Interpreter<'a> {
                         Ok(c) => c,
                         _ => unwind_errorf!("property {} is not a function", name),
                     };
-                    let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
-                        // If this is not a method but a regular field that
-                        // happens to contain a function, shift the
-                        // arguments back to remove the receiver from the
-                        // stack. A method will pop the receiver (and so it
-                        // remains on the stack in that case), but a
-                        // function won't.
-                        // TODO: this is horrendously inefficient. Come up
-                        // with something better.
-                        shift_args!(arg_count, 1);
-                        arg_count
-                    } else {
+                    let arg_count_including_receiver = if prop.kind == PropertyKind::Method {
+                        // If this is a method, insert the method closure on
+                        // the stack before the receiver.
+                        unshift_arg!(arg_count + 1, callee as *const Closure as u64);
                         arg_count + 1
+                    } else {
+                        // If this is not a method but a regular field that
+                        // contains a function, replace the receiver on the
+                        // stack with the callee closure.
+                        *((sp + arg_count * 8) as *mut *const Closure) = callee;
+                        arg_count
                     };
                     call_closure!(callee, arg_count_including_receiver);
                     continue;
@@ -1097,19 +1107,14 @@ impl<'a> Interpreter<'a> {
                         Some(p) => p,
                         _ => unwind_errorf!("property {} is not defined", name),
                     };
-                    let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
-                        // If this is not a method but a regular field that
-                        // happens to contain a function, shift the
-                        // arguments back to remove the receiver from the
-                        // stack. A method will pop the receiver (and so it
-                        // remains on the stack in that case), but a
-                        // function won't.
-                        // TODO: this is horrendously inefficient. Come up
-                        // with something better.
-                        shift_args!(arg_count, 1);
-                        arg_count
-                    } else {
+                    let arg_count_including_receiver = if prop.kind == PropertyKind::Method {
+                        // If this is a method, insert null on the stack before
+                        // the receiver. lua_call_closure will write the
+                        // method closure here.
+                        unshift_arg!(arg_count + 1, 0);
                         arg_count + 1
+                    } else {
+                        arg_count
                     };
                     lua_call_closure!(prop.value, arg_count_including_receiver);
                     continue;
@@ -1128,19 +1133,14 @@ impl<'a> Interpreter<'a> {
                         Some(p) => p,
                         _ => unwind_errorf!("property {} is not defined", name),
                     };
-                    let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
-                        // If this is not a method but a regular field that
-                        // happens to contain a function, shift the
-                        // arguments back to remove the receiver from the
-                        // stack. A method will pop the receiver (and so it
-                        // remains on the stack in that case), but a
-                        // function won't.
-                        // TODO: this is horrendously inefficient. Come up
-                        // with something better.
-                        shift_args!(vc, 1);
-                        vc
-                    } else {
+                    let arg_count_including_receiver = if prop.kind == PropertyKind::Method {
+                        // If this is a method, insert null on the stack before
+                        // the receiver. lua_call_closure will write the
+                        // method closure here.
+                        unshift_arg!(vc + 1, 0);
                         vc + 1
+                    } else {
+                        vc
                     };
                     lua_call_closure!(prop.value, arg_count_including_receiver);
                     continue;
@@ -1164,16 +1164,17 @@ impl<'a> Interpreter<'a> {
                         Ok(c) => c,
                         _ => unwind_errorf!("property {} is not a function", name),
                     };
-                    let arg_count_including_receiver = if prop.kind != PropertyKind::Method {
-                        // Not a method but a regular field that happens to
-                        // contain a function. See comment in CALLNAMEDPROP.
-                        shift_args!(arg_count, 2);
-                        arg_count
-                    } else {
-                        // Regular method call. We still need to remove the
-                        // prototype from the stack though.
-                        shift_args!(arg_count, 1);
+                    let arg_count_including_receiver = if prop.kind == PropertyKind::Method {
+                        // If this is a method, insert the method closure on
+                        // the stack before the receiver.
+                        unshift_arg!(arg_count + 1, callee as *const Closure as u64);
                         arg_count + 1
+                    } else {
+                        // If this is not a method but a regular field that
+                        // contains a function, replace the receiver on the
+                        // stack with the callee closure.
+                        *((sp + arg_count * 8) as *mut *const Closure) = callee;
+                        arg_count
                     };
                     call_closure!(callee, arg_count_including_receiver);
                     continue;
@@ -1186,11 +1187,7 @@ impl<'a> Interpreter<'a> {
                         Ok(c) => c,
                         _ => unwind_errorf!("called value is not a function"),
                     };
-                    // Remove the callee from the stack before the call.
-                    // CALLNAMEDPROP does this too when the called property
-                    // is a field instead of a method. See comment there.
-                    // TODO: this is a terrible, inefficient solution.
-                    shift_args!(arg_count, 1);
+                    *(callee_addr as *mut *const Closure) = callee_closure as *const Closure;
                     call_closure!(callee_closure, arg_count);
                     continue;
                 }
@@ -1198,11 +1195,6 @@ impl<'a> Interpreter<'a> {
                     let arg_count = read_imm!(u16, 1) as usize;
                     let callee_addr = sp + arg_count * 8;
                     let callee = NanBox(*(callee_addr as *const u64));
-                    // Remove the callee from the stack before the call.
-                    // CALLNAMEDPROP does this too when the called property
-                    // is a field instead of a method. See comment there.
-                    // TODO: this is a terrible, inefficient solution.
-                    shift_args!(arg_count, 1);
                     lua_call_closure!(callee, arg_count);
                     continue;
                 }
@@ -1214,7 +1206,6 @@ impl<'a> Interpreter<'a> {
                     // of arguments.
                     let callee_addr = sp + vc * 8;
                     let callee = NanBox(*(callee_addr as *const u64));
-                    shift_args!(vc, 1);
                     lua_call_closure!(callee, vc);
                     continue;
                 }
@@ -1807,7 +1798,7 @@ impl<'a> Interpreter<'a> {
                     // there is no handler.
                     // If there is no error, either because the handler was
                     // started with CALLHANDLER or because STOPERROR was called,
-                    // pop vc and ip from the stack.
+                    // pop the handler's frame and resume at its return address.
                     save_regs!();
                     if self.error.is_some() {
                         match self.unwind() {
@@ -1818,7 +1809,10 @@ impl<'a> Interpreter<'a> {
                             Err(err) => return Err(err),
                         }
                     } else {
-                        return_ok!(0);
+                        sp = fp + FRAME_SIZE;
+                        ip = *((fp + FRAME_IP_OFFSET) as *const *const u8);
+                        fp = *((fp + FRAME_FP_OFFSET) as *const usize);
+                        continue;
                     }
                 }
                 (inst::NOP, inst::MODE_I64) => inst::size(inst::NOP),
@@ -2626,7 +2620,7 @@ impl<'a> Interpreter<'a> {
         let fp = self.sp - FRAME_SIZE;
         *((fp + FRAME_FUNC_OFFSET) as *mut *const Function) = self.func;
         self.func = 0 as *const Function;
-        *((fp + FRAME_CP_OFFSET) as *mut *const Closure) = self.cp;
+        let caller_cp = self.cp;
         self.cp = 0 as *const Closure;
         *((fp + FRAME_IP_OFFSET) as *mut *const u8) = self.ip;
         self.ip = 0 as *const u8;
@@ -2644,7 +2638,7 @@ impl<'a> Interpreter<'a> {
         debug_assert_eq!(self.fp, fp);
         debug_assert_eq!(self.sp, fp);
         self.func = *((fp + FRAME_FUNC_OFFSET) as *const *const Function);
-        self.cp = *((fp + FRAME_CP_OFFSET) as *const *const Closure);
+        self.cp = caller_cp;
         self.ip = *((fp + FRAME_IP_OFFSET) as *const *const u8);
         self.fp = *((fp + FRAME_FP_OFFSET) as *const usize);
         self.sp = fp + FRAME_SIZE;
@@ -2727,7 +2721,6 @@ impl<'a> Interpreter<'a> {
             // handler. Also, pop the handler, and any words pushed after it.
             while self.fp < self.hp {
                 self.func = *((self.fp + FRAME_FUNC_OFFSET) as *const *const Function);
-                self.cp = *((self.fp + FRAME_CP_OFFSET) as *const *const Closure);
                 self.ip = *((self.fp + FRAME_IP_OFFSET) as *const *const u8);
                 self.fp = *(self.fp as *const usize);
             }
@@ -2735,10 +2728,21 @@ impl<'a> Interpreter<'a> {
             let hip = *((self.hp + HANDLER_IP_OFFSET) as *const *const u8);
             self.hp = *((self.hp + HANDLER_HP_OFFSET) as *const usize);
 
+            // Load cp from this frame. It's an argument, so it won't be easily
+            // accessible after we push the frame below.
+            let func = self.func.as_ref().unwrap();
+            let cp_addr = if func.var_param_type.is_some() {
+                let argc = *((self.fp + FRAME_SIZE) as *const usize);
+                self.fp + FRAME_SIZE + argc * 8 + 8
+            } else {
+                let argc = func.param_types.len();
+                self.fp + FRAME_SIZE + argc * 8
+            };
+            self.cp = *(cp_addr as *const *const Closure);
+
             // Push a stack frame for the handler.
             self.sp -= FRAME_SIZE;
             *((self.sp + FRAME_FUNC_OFFSET) as *mut *const Function) = self.func;
-            *((self.sp + FRAME_CP_OFFSET) as *mut *const Closure) = self.cp;
             *((self.sp + FRAME_IP_OFFSET) as *mut *const u8) = self.ip;
             self.ip = hip;
             *((self.sp + FRAME_FP_OFFSET) as *mut usize) = self.fp;

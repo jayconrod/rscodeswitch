@@ -525,6 +525,7 @@ pub fn build_std_package() -> Package {
         b.asm.bif(&mut store_metatable_label);
         let si = b.ensure_string("metatable must be table or nil");
         b.asm.string(si);
+        b.asm.mode(inst::MODE_STRING);
         b.asm.panic(0);
 
         // Store the metatable into the table, then return the old one.
