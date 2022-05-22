@@ -1376,27 +1376,23 @@ impl<'src, 'ss, 'lm, 'err> Compiler<'src, 'ss, 'lm, 'err> {
 
     fn compile_call(&mut self, call: &Call<'src>, rmode: ResultMode) {
         self.compile_expr(&call.callee);
-        let extra = if call.method_name.is_some() {
-            // Lua doesn't have methods. A call like a:b(c) just copies the
-            // receiver on the stack.
+        let extra = if let Some(name) = call.method_name {
+            // Lua doesn't have methods. A call like a:b(c) is equivalent to
+            // a.b(a, c) except a only gets evaluated once.
+            let si = self.ensure_string(name.text.as_bytes(), name.pos());
             self.asm.dup();
+            self.asm.mode(inst::MODE_LUA);
+            self.asm.loadnamedpropornil(si);
+            self.asm.swap();
             1
         } else {
             0
         };
         let arg_len = self.compile_expr_list(&call.arguments, extra);
         self.asm.mode(inst::MODE_LUA);
-        if let Some(name) = call.method_name {
-            let si = self.ensure_string(name.text.as_bytes(), name.pos());
-            match arg_len {
-                ExprListLen::Static(n) => self.asm.callnamedprop(si, n),
-                ExprListLen::Dynamic => self.asm.callnamedpropv(si),
-            }
-        } else {
-            match arg_len {
-                ExprListLen::Static(n) => self.asm.callvalue(n),
-                ExprListLen::Dynamic => self.asm.callvaluev(),
-            }
+        match arg_len {
+            ExprListLen::Static(n) => self.asm.callvalue(n),
+            ExprListLen::Dynamic => self.asm.callvaluev(),
         }
 
         match rmode {

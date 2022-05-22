@@ -312,7 +312,7 @@ impl<'a, 'b> Resolver<'a, 'b> {
                 }
                 self.leave();
                 self.leave();
-                self.shift_captured_params_in_function(params, body, *body_scope);
+                self.shift_captured_params_in_function(*this_var, params, body, *body_scope);
             }
             Decl::Class {
                 name,
@@ -631,19 +631,32 @@ impl<'a, 'b> Resolver<'a, 'b> {
     /// slots by the number of captured parameters.
     fn shift_captured_params_in_function(
         &mut self,
+        this_var_id: Option<usize>,
         params: &Vec<Param<'a>>,
         body: &Block<'a>,
         body_scope: usize,
     ) {
+        let this_captured = match this_var_id {
+            Some(vid) if self.ss.vars[vid].kind == VarKind::Capture => 1,
+            _ => 0,
+        };
         let param_capture_count = params
             .iter()
             .filter(|p| self.ss.vars[p.var].kind == VarKind::Capture)
-            .count();
+            .count()
+            + this_captured;
         self.shift_vars_in_scope(body_scope, param_capture_count);
         for decl in &body.decls {
             self.shift_vars_in_decl(decl, param_capture_count);
         }
         let mut cell_slot = 0;
+        match this_var_id {
+            Some(vid) if self.ss.vars[vid].kind == VarKind::Capture => {
+                self.ss.vars[vid].cell_slot = cell_slot;
+                cell_slot += 1;
+            }
+            _ => (),
+        }
         for p in params {
             let var = &mut self.ss.vars[p.var];
             if var.kind == VarKind::Capture {

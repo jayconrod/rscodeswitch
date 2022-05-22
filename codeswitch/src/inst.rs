@@ -15,7 +15,7 @@ pub const BIF: u8 = 28;
 pub const CALLHANDLER: u8 = 80;
 pub const CALLNAMEDPROP: u8 = 45;
 pub const CALLNAMEDPROPV: u8 = 74;
-pub const CALLNAMEDPROPWITHPROTOTYPE: u8 = 47;
+// pub const CALLNAMEDPROPWITHPROTOTYPE: u8 = 47;
 pub const CALLVALUE: u8 = 32;
 pub const CALLVALUEV: u8 = 69;
 pub const CAPTURE: u8 = 38;
@@ -198,7 +198,7 @@ pub const fn size(op: u8) -> usize {
         ALLOC | B | BIF | CALLNAMEDPROPV | FUNCTION | LOADGLOBAL | LOADNAMEDPROP
         | LOADNAMEDPROPORNIL | PUSHHANDLER | STOREGLOBAL | STOREMETHOD | STORENAMEDPROP
         | STRING => 5,
-        CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE | LOADIMPORTGLOBAL | STOREIMPORTGLOBAL => 7,
+        CALLNAMEDPROP | LOADIMPORTGLOBAL | STOREIMPORTGLOBAL => 7,
         CONST | NEWCLOSURE => 9,
         _ => 255,
     }
@@ -216,7 +216,6 @@ pub fn mnemonic(op: u8) -> &'static str {
         CALLHANDLER => "callhandler",
         CALLNAMEDPROP => "callnamedprop",
         CALLNAMEDPROPV => "callnamedpropv",
-        CALLNAMEDPROPWITHPROTOTYPE => "callnamedpropwithprototype",
         CALLVALUE => "callvalue",
         CALLVALUEV => "callvaluev",
         CAPTURE => "capture",
@@ -460,12 +459,6 @@ impl Assembler {
     pub fn callnamedpropv(&mut self, name_index: u32) {
         self.write_u8(CALLNAMEDPROPV);
         self.write_u32(name_index);
-    }
-
-    pub fn callnamedpropwithprototype(&mut self, name_index: u32, arg_count: u16) {
-        self.write_u8(CALLNAMEDPROPWITHPROTOTYPE);
-        self.write_u32(name_index);
-        self.write_u16(arg_count);
     }
 
     pub fn callvalue(&mut self, arg_count: u16) {
@@ -985,7 +978,7 @@ pub fn disassemble(insts: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
                     }
                 }
             }
-            CALLNAMEDPROP | CALLNAMEDPROPWITHPROTOTYPE => {
+            CALLNAMEDPROP => {
                 if p + 7 > insts.len() {
                     return Err(fmt::Error);
                 }

@@ -669,35 +669,6 @@ pub fn build_std_package() -> Package {
 
     // TODO: debug
 
-    // _adjust0(f, ...): calls function f with arguments. Returns nothing.
-    {
-        b.asm.loadarg(0);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.loadvarargs();
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.callvaluev();
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.adjustv(0);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.retv();
-        b.finish_function("_adjust0", 1, true);
-    }
-
-    // _adjust1(f, ...): calls functionf with arguments. Returns the first
-    // value returned by f or nil if f returned nothing.
-    {
-        b.asm.loadarg(0);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.loadvarargs();
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.callvaluev();
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.adjustv(1);
-        b.asm.mode(inst::MODE_LUA);
-        b.asm.retv();
-        b.finish_function("_adjust1", 1, true);
-    }
-
     // init - allocates and populates the _ENV table.
     let ti = b.ensure_type(Type::Object);
     b.asm.alloc(ti);

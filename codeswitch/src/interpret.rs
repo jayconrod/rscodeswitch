@@ -18,9 +18,13 @@ use std::sync::Arc;
 
 // Each stack frame consists of (with descending stack address):
 //
+//   - Caller's closure pointer (cp)
+//   - Arguments to callee
+//   - Number of arguments if callee has variadic parameters
 //   - Caller: *const Function
 //   - Return address: *const u8
-//   - Caller's fp
+//   - Caller's fp (fp points here)
+//   - Caller's local variables
 const FRAME_SIZE: usize = 24;
 const FRAME_FP_OFFSET: usize = 0;
 const FRAME_IP_OFFSET: usize = 8;
@@ -33,6 +37,23 @@ const FRAME_FUNC_OFFSET: usize = 16;
 const HANDLER_SIZE: usize = 16;
 const HANDLER_HP_OFFSET: usize = 0;
 const HANDLER_IP_OFFSET: usize = 8;
+
+// Stubs are bits of code a function can return to in order to adjust return
+// values. A call instruction may insert an extra stack frame returning to
+// a stub when needed, if it needs to do something after the call but before
+// the next instruction. A stub return address has the high bit set; return
+// instructions check for this. The other 7 bits in the high byte are the
+// stub number. The whole return address is passed to the stub function as
+// data, so other information may be encoded in the low 7 bytes.
+const STUB_BIT: u64 = 1 << 63;
+const STUB_ID_SHIFT: u64 = 56;
+const STUB_ID_MASK: u64 = 0x7f;
+const STUB_BOX_RETURN: u64 = 1;
+
+const STUB_BOX_RETURN_ARG_COUNT_SHIFT: u64 = 0;
+const STUB_BOX_RETURN_ARG_COUNT_MASK: u64 = 0xffff;
+const STUB_BOX_RETURN_RET_COUNT_SHIFT: u64 = 16;
+const STUB_BOX_RETURN_RET_COUNT_MASK: u64 = 0xffff;
 
 pub struct Env<'a> {
     pub r: &'a mut dyn Read,
@@ -145,7 +166,6 @@ impl<'a> Interpreter<'a> {
         let mut sp = self.sp;
         let mut fp;
         let mut ip = &func.insts[0] as *const u8;
-        let mut ret_sp; // used to return at the end
         let mut hp = 0;
 
         // Construct the stack frame.
@@ -240,29 +260,42 @@ impl<'a> Interpreter<'a> {
             }};
         }
 
-        // return_ok returns normally from a function, popping the stack frame.
-        // If the return address is non-zero, return_ok moves results into the
-        // caller's stack frame and continues. If the return address is zero,
-        // return_ok leaves ret_sp pointing to the last result and breaks.
+        // return_ok returns normally from a function.
+        // If the return address has STUB_BIT set, return_ok invokes a stub.
+        // If the return address is non-zero, return_ok pops the stack frame
+        // and moves return values into the caller's frame in place of
+        // arguments then continues. If the return address is zero, return_ok
+        // leaves sp pointing to the last result and breaks.
         macro_rules! return_ok {
             ($retc:expr) => {{
-                let retc = $retc;
-                ret_sp = sp;
-                sp = cp_addr!() + 8;
-                let func_ptr = *((fp + FRAME_FUNC_OFFSET) as *const *const Function);
+                vc = $retc;
                 ip = *((fp + FRAME_IP_OFFSET) as *const *const u8);
-                fp = *((fp + FRAME_FP_OFFSET) as *const usize);
                 if ip.is_null() {
                     break;
                 }
+                if (ip as u64) & STUB_BIT != 0 {
+                    save_regs!();
+                    self.invoke_stub();
+                    load_regs!();
+                    if ip.is_null() {
+                        break;
+                    }
+                    continue;
+                }
+                let mut dst = cp_addr!() + 8;
+                let mut src = sp + vc * 8;
+                let func_ptr = *((fp + FRAME_FUNC_OFFSET) as *const *const Function);
+                ip = *((fp + FRAME_IP_OFFSET) as *const *const u8);
+                fp = *((fp + FRAME_FP_OFFSET) as *const usize);
                 func = func_ptr.as_ref().unwrap();
                 pp = func.package.as_mut().unwrap();
                 cp = *(cp_addr!() as *const *mut Closure);
-                for i in 0..retc {
-                    let retp = ret_sp + (retc - i - 1) * 8;
-                    let ret = *(retp as *const u64);
-                    push!(ret);
+                while src != sp {
+                    src -= 8;
+                    dst -= 8;
+                    *(dst as *mut u64) = *(src as *const u64);
                 }
+                sp = dst;
                 continue;
             }};
         }
@@ -344,64 +377,39 @@ impl<'a> Interpreter<'a> {
             }};
         }
 
-        // call_function pushes a stack frame and sets registers, beginning a
-        // call to the given function. The next instruction executed will be the
-        // first in the function. After the function returns, the next
-        // instruction will be the one after the current instruction.
-        macro_rules! call_function {
-            ($callee:expr, $arg_count:expr) => {{
-                let callee: *const Function = $callee;
-                let callee_func = callee.as_ref().unwrap();
-                let arg_count: usize = $arg_count;
-                if callee_func.var_param_type.is_some() {
-                    push!(arg_count as u64);
-                    vc = arg_count - callee_func.param_types.len();
-                } else {
-                    debug_assert_eq!(callee_func.param_types.len(), arg_count);
-                    vc = 0;
-                }
-                sp -= FRAME_SIZE;
-                *((sp + FRAME_FUNC_OFFSET) as *mut u64) = func as *const Function as u64;
-                func = callee_func;
-                *((sp + FRAME_IP_OFFSET) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
-                ip = &callee_func.insts[0] as *const u8;
-                *((sp + FRAME_FP_OFFSET) as *mut u64) = fp as u64;
-                fp = sp;
-                pp = func.package.as_mut().unwrap();
-                cp = 0 as *const Closure;
-            }};
-        }
-
+        // Pushes stack frames in order to call the given closure.
+        //
+        // The caller must has pushed the unboxed callee itself (cp) followed
+        // by arg_count arguments. If the call is to a named property that
+        // turned out to be a field rather than a method, omit_receiver should
+        // be set, and the receiver should be before the first argument.
+        //
+        // If the callee is non-variadic and the number of arguments including
+        // bound arguments does not match the callee, an error is raised.
+        // If the callee is variadic and the number of arguments including
+        // bound arguments is less than the number of parameters, an error
+        // is raised.
+        //
+        // In the common case where there are no bound arguments and the
+        // receiver is not omitted, call_closure pushes stack frame for the
+        // callee and resumes execution and its first instruction.
+        //
+        // Otherwise, call_closure pushes a stub stack frame with the correct
+        // arguments and another frame for the callee. When the callee returns,
+        // STUB_BOX_RETURN will pop both frames and move the return values
+        // into the caller's frame, starting where cp was pushed.
         macro_rules! call_closure {
-            ($callee:expr, $arg_count:expr) => {{
+            ($callee:expr, $arg_count:expr, $omit_receiver:expr) => {{
                 let callee: &Closure = $callee;
                 let arg_count: usize = $arg_count;
+                let omit_receiver: bool = $omit_receiver;
                 let callee_func = callee.function.unwrap_ref();
-
-                // If the callee has bound arguments, insert them on the stack
-                // before the regular arguments.
-                if callee.bound_arg_count > 0 {
-                    let bound_arg_begin = sp + arg_count * 8 - 8;
-                    let delta = callee.bound_arg_count as usize * 8;
-                    let mut from = sp;
-                    sp -= delta;
-                    let mut to = sp;
-                    while from <= bound_arg_begin {
-                        *(to as *mut u64) = *(from as *mut u64);
-                        to += 8;
-                        from += 8;
-                    }
-                    for i in 0..callee.bound_arg_count {
-                        let to = (bound_arg_begin - i as usize * 8) as *mut u64;
-                        *to = callee.bound_arg(i);
-                    }
-                }
+                let return_ip = ip as usize + inst::size(*ip) as usize;
 
                 // If the callee is not variadic and the number of arguments
-                // differs from the number of parameters, or if the callee is
-                // variadic and there are too few arguments, raise an error.
-                // If the callee is variadic, push the number of arguments
-                // and set vc to the number of variadic arguments.
+                // differs from the number of parameters, or if the callee
+                // is variadic and there are too few arguments, raise an
+                // error.
                 let total_arg_count = arg_count + callee.bound_arg_count as usize;
                 if total_arg_count > u16::MAX as usize {
                     unwind_errorf!("too many arguments");
@@ -416,23 +424,83 @@ impl<'a> Interpreter<'a> {
                         total_arg_count
                     );
                 }
-                if callee_func.var_param_type.is_some() {
-                    push!(total_arg_count as u64);
-                    vc = total_arg_count - param_count;
+
+                // Push frame for the call.
+                if callee.bound_arg_count > 0 || omit_receiver {
+                    // If the callee has bound arguments or if we need to omit
+                    // the receiver, push an extra stack frame and copy
+                    // arguments there. We can't do any dynamic adjustment of
+                    // the caller's frame, since that will make safe points
+                    // unusable, so we need to do the adjustment in this extra
+                    // frame. The callee will return through a stub that will
+                    // fix everything up.
+                    let caller_sp = sp;
+                    sp -= FRAME_SIZE;
+                    *((sp + FRAME_FUNC_OFFSET) as *mut *const Function) = func;
+                    *((sp + FRAME_IP_OFFSET) as *mut usize) = return_ip;
+                    let caller_pop_count = if omit_receiver {
+                        (arg_count + 1) as u64
+                    } else {
+                        arg_count as u64
+                    };
+                    let stub = STUB_BIT
+                        | (STUB_BOX_RETURN << STUB_ID_SHIFT)
+                        | (caller_pop_count << STUB_BOX_RETURN_ARG_COUNT_SHIFT)
+                        | (STUB_BOX_RETURN_RET_COUNT_MASK << STUB_BOX_RETURN_RET_COUNT_SHIFT);
+                    ip = stub as *const u8;
+                    *((sp + FRAME_FP_OFFSET) as *mut usize) = fp;
+                    fp = sp;
+
+                    // Unboxed callee.
+                    push!(callee as *const Closure as u64);
+
+                    // Bound arguments.
+                    for i in 0..callee.bound_arg_count {
+                        push!(callee.bound_arg(i));
+                    }
+
+                    // Arguments from caller.
+                    let mut src = caller_sp + 8 * arg_count;
+                    while src != caller_sp {
+                        src -= 8;
+                        push!(*(src as *mut u64));
+                    }
+
+                    // If the callee is variadic, push the total number of
+                    // arguments and set vc to the number of variadic arguments.
+                    if callee_func.var_param_type.is_some() {
+                        push!(total_arg_count as u64);
+                        vc = total_arg_count - param_count;
+                    } else {
+                        vc = 0;
+                    }
+
+                    // Callee's stack frame.
+                    sp -= FRAME_SIZE;
+                    *((sp + FRAME_FUNC_OFFSET) as *mut u64) = 0;
+                    func = callee_func;
+                    *((sp + FRAME_IP_OFFSET) as *mut *const u8) = ip;
+                    ip = &func.insts[0] as *const u8;
+                    *((sp + FRAME_FP_OFFSET) as *mut usize) = fp;
+                    fp = sp;
                 } else {
-                    vc = 0;
+                    // Common case: no adjustment needed before or after the
+                    // call. Just build a frame for the callee.
+                    if callee_func.var_param_type.is_some() {
+                        push!(total_arg_count as u64);
+                        vc = total_arg_count - param_count;
+                    } else {
+                        vc = 0;
+                    }
+                    sp -= FRAME_SIZE;
+                    *((sp + FRAME_FUNC_OFFSET) as *mut *const Function) = func;
+                    func = callee_func;
+                    *((sp + FRAME_IP_OFFSET) as *mut usize) = return_ip;
+                    ip = &func.insts[0] as *const u8;
+                    *((sp + FRAME_FP_OFFSET) as *mut usize) = fp;
+                    fp = sp;
                 }
 
-                // Constrct a stack frame for the callee and set the registers
-                // so the function's instructions, cells, and package will be
-                // used.
-                sp -= FRAME_SIZE;
-                *((sp + FRAME_FUNC_OFFSET) as *mut u64) = func as *const Function as u64;
-                func = callee_func;
-                *((sp + FRAME_IP_OFFSET) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
-                ip = &callee_func.insts[0] as *const u8;
-                *((sp + FRAME_FP_OFFSET) as *mut u64) = fp as u64;
-                fp = sp;
                 pp = callee_func.package.as_mut().unwrap();
                 cp = callee;
             }};
@@ -444,17 +512,15 @@ impl<'a> Interpreter<'a> {
         // not have the metamethod, control falls through.
         macro_rules! lua_try_meta_unop {
             ($i:expr, $name:literal) => {{
-                let i = $i;
+                let i: NanBox = $i;
                 if let Some(mm) = Interpreter::lua_load_meta_value(i, $name) {
                     let c: &Closure = match mm.try_into() {
                         Ok(c) => c,
                         _ => unwind_errorf!("metamethod '{}' is not a function", $name),
                     };
-                    push!(0); // null cp for _adjust1
-                    push!(NanBox::from(c).0);
+                    push!(0); // cp to be filled in by lua_call_closure
                     push!(i.0);
-                    let adjust1 = self.lua_load_std_function("_adjust1").unwrap();
-                    call_function!(adjust1, 2);
+                    lua_call_closure!(NanBox::from(c), 1, Some(1));
                     continue;
                 }
             }};
@@ -487,12 +553,10 @@ impl<'a> Interpreter<'a> {
                     };
                 }
                 if let Some(c) = mm {
-                    push!(0); // null cp for _adjust1
-                    push!(NanBox::from(c).0);
+                    push!(0); // cp to be filled in by lua_call_closure
                     push!(l.0);
                     push!(r.0);
-                    let adjust1 = self.lua_load_std_function("_adjust1").unwrap();
-                    call_function!(adjust1, 3);
+                    lua_call_closure!(NanBox::from(c), 2, Some(1));
                     continue;
                 }
             }};
@@ -527,12 +591,10 @@ impl<'a> Interpreter<'a> {
                         None => {break;}
                     };
                     if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(meta_value) {
-                        push!(0); // null cp for _adjust1
-                        push!(NanBox::from(c).0);
-                        push!(NanBox::from(receiver).0);
+                        push!(0); // cp to be filled in by lua_call_closure
+                        push!(receiver.0);
                         push!(NanBox::from(key).0);
-                        let adjust1 = self.lua_load_std_function("_adjust1").unwrap();
-                        call_function!(adjust1, 3);
+                        lua_call_closure!(NanBox::from(c), 2, Some(1));
                         continue $mainloop;
                     }
                     receiver = meta_value;
@@ -573,13 +635,11 @@ impl<'a> Interpreter<'a> {
                         }
                     };
                     if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(meta_value) {
-                        push!(0); // null cp for _adjust0
-                        push!(NanBox::from(c).0);
+                        push!(0); // cp to be filled in by lua_call_closure
                         push!(receiver.0);
                         push!(NanBox::from(key).0);
                         push!(value.0);
-                        let adjust0 = self.lua_load_std_function("_adjust0").unwrap();
-                        call_function!(adjust0, 4);
+                        lua_call_closure!(NanBox::from(c), 3, Some(0));
                         continue $mainloop;
                     }
                     receiver = meta_value;
@@ -762,22 +822,6 @@ impl<'a> Interpreter<'a> {
             }};
         }
 
-        // unshift_arg inserts $v on the stack, incrementing sp and moving
-        // $arg_count values forward by a slot.
-        macro_rules! unshift_arg {
-            ($arg_count:expr, $v: expr) => {{
-                let arg_count = $arg_count as usize;
-                let v = $v as u64;
-                sp -= 8;
-                for i in 0..arg_count {
-                    let to = sp + i * 8;
-                    let from = to + 8;
-                    *(to as *mut u64) = *(from as *const u64);
-                }
-                *((sp + arg_count * 8) as *mut u64) = v;
-            }};
-        }
-
         // maybe_box_int converts an unboxed integer to a small or big boxed
         // integer. If the integer doesn't fit in a small box, a big box is
         // allocated.
@@ -855,85 +899,148 @@ impl<'a> Interpreter<'a> {
             }};
         }
 
+        // Similar to call_closure with the following differences.
+        //
+        // The callee is a boxed value. If it's not a closure but has a __call
+        // metamethod, that's called instead with the callee as the first
+        // argument.
+        //
+        // If the total number of arguments including bound arguments is less
+        // than the number of static parameters, nil arguments are added.
+        // If the total number of arguments is greater and the callee is not
+        // variadic, excess arguments are not passed.
         macro_rules! lua_call_closure {
-            ($callee:expr, $arg_count:expr) => {{
+            ($callee:expr, $arg_count:expr, $ret_count:expr) => {{
                 let callee: NanBox = $callee;
                 let arg_count: usize = $arg_count;
+                let ret_count: Option<usize> = $ret_count;
+                let return_ip = ip as usize + inst::size(*ip) as usize;
 
                 // If the callee is not a function, try the __call metamethod.
-                let callee_closure = if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(callee)
-                {
-                    c
-                } else if let Some(v) = Interpreter::lua_load_meta_value(callee, "__call") {
-                    match v.try_into() {
-                        Ok(c) => c,
-                        _ => unwind_errorf!("metamethod '__call' is not a function"),
-                    }
-                } else {
-                    unwind_errorf!("called value is not a function")
-                };
+                let (callee_closure, meta_arg_count) =
+                    if let Ok(c) = <NanBox as TryInto<&Closure>>::try_into(callee) {
+                        (c, 0)
+                    } else if let Some(v) = Interpreter::lua_load_meta_value(callee, "__call") {
+                        match v.try_into() {
+                            Ok(c) => (c, 1),
+                            _ => unwind_errorf!("metamethod '__call' is not a function"),
+                        }
+                    } else {
+                        unwind_errorf!("called value is not a function")
+                    };
                 let callee_func = callee_closure.function.unwrap_ref();
 
-                // Write the closure we're going to call before the arguments.
-                // This slot should have been reserved. With the CALLNAMEDPROP
-                // instructions, it's an inserted null (for method) or contains
-                // the receiver (field). With the CALLVALUE instructions, it
-                // contains the boxed callee.
-                *((sp + arg_count * 8) as *mut u64) = callee_closure as *const Closure as u64;
+                // Write the unboxed callee closure before the arguments.
+                // CALLVALUE and CALLVALUEV use this slot for the boxed callee.
+                *((sp + arg_count * 8) as *mut *const Closure) = callee_closure as *const Closure;
 
-                // If the callee has bound arguments, insert them on the stack
-                // before the regular arguments.
-                if callee_closure.bound_arg_count > 0 {
-                    let bound_arg_begin = sp + arg_count * 8 - 8;
-                    let delta = callee_closure.bound_arg_count as usize * 8;
-                    let mut from = sp;
-                    sp -= delta;
-                    let mut to = sp;
-                    while from <= bound_arg_begin {
-                        *(to as *mut u64) = *(from as *mut u64);
-                        to += 8;
-                        from += 8;
-                    }
-                    for i in 0..callee_closure.bound_arg_count {
-                        let to = (bound_arg_begin - i as usize * 8) as *mut u64;
-                        *to = callee_closure.bound_arg(i);
-                    }
-                }
-
-                // If there are fewer arguments than parameters, push nils. If
-                // the callee is variadic, push the number of arguments,
-                // including pushed nils. If the callee is not variadic and
-                // there are more arguments than parameters, pop the extra
-                // arguments.
-                let mut total_arg_count = arg_count + callee_closure.bound_arg_count as usize;
+                // Check whether we have too many or not enough arguments.
+                let total_arg_count =
+                    arg_count + callee_closure.bound_arg_count as usize + meta_arg_count;
                 if total_arg_count > u16::MAX as usize {
                     unwind_errorf!("too many arguments");
                 }
                 let param_count = callee_func.param_types.len();
-                if total_arg_count < param_count {
-                    for _ in 0..(param_count - total_arg_count) {
+                let excess_arg_count =
+                    if callee_func.var_param_type.is_none() && total_arg_count > param_count {
+                        total_arg_count - param_count
+                    } else {
+                        0
+                    };
+                let pad_arg_count = if total_arg_count < param_count {
+                    param_count - total_arg_count
+                } else {
+                    0
+                };
+                let adjusted_arg_count = total_arg_count - excess_arg_count + pad_arg_count;
+
+                // Push frame for the call.
+                if callee_closure.bound_arg_count > 0
+                    || meta_arg_count > 0
+                    || excess_arg_count > 0
+                    || pad_arg_count > 0
+                    || ret_count.is_some()
+                {
+                    // If we need to adjust the arguments in any way, push an
+                    // extra stack frame and copy the arguments there. We can't
+                    // do any dynamic adjustment of the caller's frame, since
+                    // that would make safe points unusable. The callee will
+                    // return through a stub that will fix everything up.
+                    let caller_sp = sp;
+                    sp -= FRAME_SIZE;
+                    *((sp + FRAME_FUNC_OFFSET) as *mut *const Function) = func;
+                    *((sp + FRAME_IP_OFFSET) as *mut usize) = return_ip;
+                    let stub = STUB_BIT
+                        | (STUB_BOX_RETURN << STUB_ID_SHIFT)
+                        | ((arg_count as u64) << STUB_BOX_RETURN_ARG_COUNT_SHIFT)
+                        | (ret_count
+                            .map(|c| c as u64)
+                            .unwrap_or(STUB_BOX_RETURN_RET_COUNT_MASK)
+                            << STUB_BOX_RETURN_RET_COUNT_SHIFT);
+                    ip = stub as *const u8;
+                    *((sp + FRAME_FP_OFFSET) as *mut usize) = fp;
+                    fp = sp;
+
+                    // Unboxed callee.
+                    push!(callee_closure as *const Closure as u64);
+
+                    // Original callee if this is a meta call.
+                    if meta_arg_count > 0 {
+                        push!(callee.0);
+                    }
+
+                    // Bound arguments.
+                    for i in 0..callee_closure.bound_arg_count {
+                        push!(callee_closure.bound_arg(i));
+                    }
+
+                    // Arguments from caller.
+                    let mut src = caller_sp + 8 * arg_count;
+                    for _ in 0..(arg_count - excess_arg_count) {
+                        src -= 8;
+                        push!(*(src as *mut u64));
+                    }
+
+                    // nil padding arguments.
+                    for _ in 0..pad_arg_count {
                         push!(NanBox::from_nil().0);
                     }
-                    total_arg_count = param_count;
-                }
-                if callee_func.var_param_type.is_some() {
-                    push!(total_arg_count as u64);
-                    vc = total_arg_count - param_count;
+
+                    // If the callee is variadic, push the total number of
+                    // arguments and set vc to the number of variadic arguments.
+                    if callee_func.var_param_type.is_some() {
+                        push!(adjusted_arg_count as u64);
+                        vc = adjusted_arg_count - param_count;
+                    } else {
+                        vc = 0;
+                    }
+
+                    // Callee's stack frame.
+                    sp -= FRAME_SIZE;
+                    *((sp + FRAME_FUNC_OFFSET) as *mut u64) = 0;
+                    func = callee_func;
+                    *((sp + FRAME_IP_OFFSET) as *mut *const u8) = ip;
+                    ip = &func.insts[0] as *const u8;
+                    *((sp + FRAME_FP_OFFSET) as *mut usize) = fp;
+                    fp = sp;
                 } else {
-                    sp += (total_arg_count - param_count) * 8;
-                    vc = 0;
+                    // Common case: no adjustment needed before or after
+                    // the call. Just build a frame for the callee.
+                    if callee_func.var_param_type.is_some() {
+                        push!(adjusted_arg_count as u64);
+                        vc = adjusted_arg_count - param_count;
+                    } else {
+                        vc = 0;
+                    }
+                    sp -= FRAME_SIZE;
+                    *((sp + FRAME_FUNC_OFFSET) as *mut *const Function) = func;
+                    func = callee_func;
+                    *((sp + FRAME_IP_OFFSET) as *mut usize) = return_ip;
+                    ip = &func.insts[0] as *const u8;
+                    *((sp + FRAME_FP_OFFSET) as *mut usize) = fp;
+                    fp = sp;
                 }
 
-                // Construct a stack frame for the callee, and set the
-                // "registers" so the function's instructions, cells,
-                // and package will be used.
-                sp -= FRAME_SIZE;
-                *((sp + FRAME_FUNC_OFFSET) as *mut *const Function) = func as *const Function;
-                func = callee_func;
-                *((sp + FRAME_IP_OFFSET) as *mut u64) = ip as u64 + inst::size(*ip) as u64;
-                ip = &func.insts[0] as *const u8;
-                *((sp + FRAME_FP_OFFSET) as *mut usize) = fp;
-                fp = sp;
                 pp = callee_func.package.as_mut().unwrap();
                 cp = callee_closure;
             }};
@@ -1059,17 +1166,29 @@ impl<'a> Interpreter<'a> {
                     continue;
                 }
                 (inst::CALLNAMEDPROP, inst::MODE_BOX) => {
+                    // Calls a function from a named property (first immediate
+                    // value) in a boxed object. If callnamedprop has N
+                    // arguments (second immediate value), then slot N+1 contains
+                    // the receiver, and slot N+2 contains the object to load
+                    // the named property from. Ordinarily, these slots will
+                    // both contain the receiver, but for super method calls,
+                    // N+2 may contain a boxed superclass. Either way,
+                    // callnamedprop writes the boxed callee to N+2 as cp. If
+                    // the property is a method, it's then called like a normal
+                    // function. If the property is a field closure, it's called
+                    // through a stub, omitting the receiver. Slots are popped
+                    // through N+2, and the results are pushed.
                     let name_index = read_imm!(u32, 1) as usize;
                     let name = &pp.strings[name_index];
                     let key = NanBox::from(name).try_into().unwrap();
                     let arg_count = read_imm!(u16, 5) as usize;
-                    let receiver_addr = sp + arg_count * 8;
-                    let receiver = NanBox(*(receiver_addr as *const u64));
-                    let receiver_obj: &Object = match receiver.try_into() {
+                    let methods_addr = sp + 8 * (arg_count + 1);
+                    let methods = NanBox(*(methods_addr as *const u64));
+                    let methods_obj: &Object = match methods.try_into() {
                         Ok(o) => o,
-                        _ => unwind_errorf!("receiver is not an object: {:?}", receiver),
+                        _ => unwind_errorf!("receiver is not an object: {:?}", methods),
                     };
-                    let prop = match receiver_obj.lookup_property(key) {
+                    let prop = match methods_obj.lookup_property(key) {
                         Some(p) => p,
                         _ => unwind_errorf!("property {} is not defined", name),
                     };
@@ -1077,106 +1196,14 @@ impl<'a> Interpreter<'a> {
                         Ok(c) => c,
                         _ => unwind_errorf!("property {} is not a function", name),
                     };
-                    let arg_count_including_receiver = if prop.kind == PropertyKind::Method {
-                        // If this is a method, insert the method closure on
-                        // the stack before the receiver.
-                        unshift_arg!(arg_count + 1, callee as *const Closure as u64);
-                        arg_count + 1
+                    *(methods_addr as *mut *const Closure) = callee as *const Closure;
+                    let (effective_arg_count, omit_receiver) = if prop.kind == PropertyKind::Method
+                    {
+                        (arg_count + 1, false)
                     } else {
-                        // If this is not a method but a regular field that
-                        // contains a function, replace the receiver on the
-                        // stack with the callee closure.
-                        *((sp + arg_count * 8) as *mut *const Closure) = callee;
-                        arg_count
+                        (arg_count, true)
                     };
-                    call_closure!(callee, arg_count_including_receiver);
-                    continue;
-                }
-                (inst::CALLNAMEDPROP, inst::MODE_LUA) => {
-                    let name_index = read_imm!(u32, 1) as usize;
-                    let name = &pp.strings[name_index];
-                    let key = NanBox::from(name).try_into().unwrap();
-                    let arg_count = read_imm!(u16, 5) as usize;
-                    let receiver_addr = sp + arg_count * 8;
-                    let receiver = NanBox(*(receiver_addr as *const u64));
-                    let receiver_obj: &Object = match receiver.try_into() {
-                        Ok(o) => o,
-                        _ => unwind_errorf!("receiver is not an object: {:?}", receiver),
-                    };
-                    let prop = match receiver_obj.lookup_property(key) {
-                        Some(p) => p,
-                        _ => unwind_errorf!("property {} is not defined", name),
-                    };
-                    let arg_count_including_receiver = if prop.kind == PropertyKind::Method {
-                        // If this is a method, insert null on the stack before
-                        // the receiver. lua_call_closure will write the
-                        // method closure here.
-                        unshift_arg!(arg_count + 1, 0);
-                        arg_count + 1
-                    } else {
-                        arg_count
-                    };
-                    lua_call_closure!(prop.value, arg_count_including_receiver);
-                    continue;
-                }
-                (inst::CALLNAMEDPROPV, inst::MODE_LUA) => {
-                    let name_index = read_imm!(u32, 1) as usize;
-                    let name = &pp.strings[name_index];
-                    let key = NanBox::from(name).try_into().unwrap();
-                    let receiver_addr = sp + vc * 8;
-                    let raw_receiver = NanBox(*(receiver_addr as *const u64));
-                    let receiver: &Object = match raw_receiver.try_into() {
-                        Ok(o) => o,
-                        _ => unwind_errorf!("receiver is not an object: {:?}", raw_receiver),
-                    };
-                    let prop = match receiver.lookup_property(key) {
-                        Some(p) => p,
-                        _ => unwind_errorf!("property {} is not defined", name),
-                    };
-                    let arg_count_including_receiver = if prop.kind == PropertyKind::Method {
-                        // If this is a method, insert null on the stack before
-                        // the receiver. lua_call_closure will write the
-                        // method closure here.
-                        unshift_arg!(vc + 1, 0);
-                        vc + 1
-                    } else {
-                        vc
-                    };
-                    lua_call_closure!(prop.value, arg_count_including_receiver);
-                    continue;
-                }
-                (inst::CALLNAMEDPROPWITHPROTOTYPE, inst::MODE_BOX) => {
-                    let name_index = read_imm!(u32, 1) as usize;
-                    let name = &pp.strings[name_index];
-                    let key = NanBox::from(name).try_into().unwrap();
-                    let arg_count = read_imm!(u16, 5) as usize;
-                    let prototype_addr = sp + arg_count * 8;
-                    let prototype = NanBox(*(prototype_addr as *const u64));
-                    let prototype_obj: &Object = match prototype.try_into() {
-                        Ok(p) => p,
-                        _ => unwind_errorf!("prototype is not an object: {:?}", prototype),
-                    };
-                    let prop = match prototype_obj.lookup_property(key) {
-                        Some(p) => p,
-                        _ => unwind_errorf!("property {} is not defined", key),
-                    };
-                    let callee: &Closure = match prop.value.try_into() {
-                        Ok(c) => c,
-                        _ => unwind_errorf!("property {} is not a function", name),
-                    };
-                    let arg_count_including_receiver = if prop.kind == PropertyKind::Method {
-                        // If this is a method, insert the method closure on
-                        // the stack before the receiver.
-                        unshift_arg!(arg_count + 1, callee as *const Closure as u64);
-                        arg_count + 1
-                    } else {
-                        // If this is not a method but a regular field that
-                        // contains a function, replace the receiver on the
-                        // stack with the callee closure.
-                        *((sp + arg_count * 8) as *mut *const Closure) = callee;
-                        arg_count
-                    };
-                    call_closure!(callee, arg_count_including_receiver);
+                    call_closure!(callee, effective_arg_count, omit_receiver);
                     continue;
                 }
                 (inst::CALLVALUE, inst::MODE_BOX) => {
@@ -1188,14 +1215,14 @@ impl<'a> Interpreter<'a> {
                         _ => unwind_errorf!("called value is not a function"),
                     };
                     *(callee_addr as *mut *const Closure) = callee_closure as *const Closure;
-                    call_closure!(callee_closure, arg_count);
+                    call_closure!(callee_closure, arg_count, false);
                     continue;
                 }
                 (inst::CALLVALUE, inst::MODE_LUA) => {
                     let arg_count = read_imm!(u16, 1) as usize;
                     let callee_addr = sp + arg_count * 8;
                     let callee = NanBox(*(callee_addr as *const u64));
-                    lua_call_closure!(callee, arg_count);
+                    lua_call_closure!(callee, arg_count, None);
                     continue;
                 }
                 (inst::CALLVALUEV, inst::MODE_LUA) => {
@@ -1206,7 +1233,7 @@ impl<'a> Interpreter<'a> {
                     // of arguments.
                     let callee_addr = sp + vc * 8;
                     let callee = NanBox(*(callee_addr as *const u64));
-                    lua_call_closure!(callee, vc);
+                    lua_call_closure!(callee, vc, None);
                     continue;
                 }
                 (inst::CAPTURE, inst::MODE_I64) => {
@@ -1415,7 +1442,9 @@ impl<'a> Interpreter<'a> {
                     inst::size(inst::LEN)
                 }
                 (inst::LOAD, inst::MODE_I64) => {
-                    push!(load!(i64, pop!(), 0, 0) as u64);
+                    let p = pop!();
+                    let v = load!(i64, p, 0, 0) as u64;
+                    push!(v);
                     inst::size(inst::LOAD)
                 }
                 (inst::LOADARG, inst::MODE_I64) => {
@@ -1916,6 +1945,7 @@ impl<'a> Interpreter<'a> {
                     inst::size(inst::PUSHHANDLER)
                 }
                 (inst::PROTOTYPE, inst::MODE_I64) => {
+                    // Pushes the prototype field from the current closure.
                     let c = cp.as_ref().unwrap();
                     let p = c.prototype.unwrap();
                     assert!(!p.is_null());
@@ -2287,28 +2317,88 @@ impl<'a> Interpreter<'a> {
         }
 
         // We break out of the loop above after popping a stack frame with a
-        // null func and return address. ret_sp points to the last result.
+        // null return address. sp points to the last result.
         // We need to move results into a Vec for native code, the save
         // registers and return.
-        let retc = if func.var_return_type.is_some() {
-            assert!(vc >= func.return_types.len());
-            vc
-        } else {
-            func.return_types.len()
-        };
-        let mut rets = Vec::with_capacity(retc);
-        for i in 0..retc {
-            let retp = ret_sp + (retc - i - 1) * 8;
+        let mut rets = Vec::with_capacity(vc);
+        for i in 0..vc {
+            let retp = sp + (vc - i - 1) * 8;
             let ret = *(retp as *const u64);
             rets.push(ret);
         }
         self.func = 0 as *const Function;
         self.vc = vc;
         self.cp = 0 as *const Closure;
-        self.sp = sp;
-        self.fp = fp;
+        self.sp = cp_addr!() + 8;
+        self.fp = self.sp;
         self.ip = 0 as *const u8;
         Ok(rets)
+    }
+
+    /// Runs code for a stub. Called from return instructions when a return
+    /// address has STUB_BIT set. See comment with STUB_BIT at the top.
+    ///
+    /// When a stub is invoked, the stack frame has not been popped. Only the
+    /// return ip (containing the stub id and data) has been loaded. The stub
+    /// is responsible for popping the callee's frame and its own.
+    unsafe fn invoke_stub(&mut self) {
+        let data = self.ip as u64;
+        let stub_id = (data >> STUB_ID_SHIFT) & STUB_ID_MASK;
+        match stub_id {
+            STUB_BOX_RETURN => self.stub_box_return(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Invoked when returning from a call instruction that needed to adjust
+    /// arguments using an extra stub frame. This stub copies return values
+    /// not into the caller's frame (actually the stub frame) but the frame
+    /// before that. A stub frame is needed when arguments need to be inserted
+    /// (like for bound arguments in a closure) or removed (receiver for
+    /// field closure in callnamedprop.box).
+    ///
+    /// The low two bytes in ip give a number of extra slots to pop beyond
+    /// the caller's arguments. This is used to pop extra arguments that
+    /// weren't passed to the callee (receiver for field closure in
+    /// callnamedprop.box).
+    ///
+    /// The next two bytes (if not 0xffff) give a number of return values to
+    /// force. Excess return values are dropped. Boxed nil values may be added.
+    unsafe fn stub_box_return(&mut self) {
+        let raw_ip = self.ip as u64;
+        let arg_count =
+            ((raw_ip >> STUB_BOX_RETURN_ARG_COUNT_SHIFT) & STUB_BOX_RETURN_ARG_COUNT_MASK) as usize;
+        let force_ret_count =
+            ((raw_ip >> STUB_BOX_RETURN_RET_COUNT_SHIFT) & STUB_BOX_RETURN_RET_COUNT_MASK) as usize;
+
+        let callee_func = self.func.as_ref().unwrap();
+        let retc = if callee_func.var_return_type.is_some() {
+            self.vc
+        } else {
+            callee_func.return_types.len()
+        };
+        let stub_fp = *((self.fp + FRAME_FP_OFFSET) as *const usize);
+        let caller_fp = *((stub_fp + FRAME_FP_OFFSET) as *const usize);
+        self.func = *((stub_fp + FRAME_FUNC_OFFSET) as *const *const Function);
+        self.ip = *((stub_fp + FRAME_IP_OFFSET) as *const *const u8);
+        let cp_addr = stub_fp + FRAME_SIZE + arg_count * 8;
+        self.cp = *(cp_addr as *const *const Closure);
+        let mut dst = cp_addr + 8;
+        let mut src = self.sp + retc * 8;
+        let copy_retc = retc.min(force_ret_count);
+        for _ in 0..copy_retc {
+            dst -= 8;
+            src -= 8;
+            *(dst as *mut u64) = *(src as *const u64);
+        }
+        if (force_ret_count as u64 != STUB_BOX_RETURN_RET_COUNT_MASK) && retc < force_ret_count {
+            for _ in 0..(force_ret_count - retc) {
+                dst -= 8;
+                *(dst as *mut u64) = NanBox::from_nil().0;
+            }
+        }
+        self.sp = dst;
+        self.fp = caller_fp;
     }
 
     unsafe fn sys_lua_dofile(&mut self, args: &[NanBox]) -> Result<Vec<NanBox>, Error> {
@@ -2681,13 +2771,6 @@ impl<'a> Interpreter<'a> {
             .filter(|m| !m.is_nil())
     }
 
-    unsafe fn lua_load_std_function(&mut self, name: &str) -> Option<*const Function> {
-        self.loader
-            .package_by_name("luastd")
-            .and_then(|p| p.function_by_name(name))
-            .map(|f| f as *const Function)
-    }
-
     unsafe fn unwind_with_error(&mut self, error: Error) -> Result<(), Error> {
         // TODO: wrap any previous error. Currently, we ignore it, which makes
         // double panics confusing to debug.
@@ -2761,12 +2844,19 @@ impl<'a> Interpreter<'a> {
         let mut fp = self.fp;
         let mut ip = self.ip;
         while level > 0 {
+            let raw_ip = *((fp + FRAME_IP_OFFSET) as *const u64);
+            let next_fp = *((fp + FRAME_FP_OFFSET) as *const usize);
+            if raw_ip & STUB_BIT != 0 {
+                ip = raw_ip as *const u8;
+                fp = next_fp;
+                continue;
+            }
             func = match (*((fp + FRAME_FUNC_OFFSET) as *const *const Function)).as_ref() {
                 Some(f) => f,
                 None => break,
             };
-            ip = *((fp + FRAME_IP_OFFSET) as *const *const u8);
-            fp = *((fp + FRAME_FP_OFFSET) as *const usize);
+            ip = raw_ip as *const u8;
+            fp = next_fp;
             level -= 1;
         }
         let inst_offset = (ip as usize - &func.insts[0] as *const u8 as usize)

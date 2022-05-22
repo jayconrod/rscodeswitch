@@ -1,0 +1,18 @@
+class A {
+  init(x) {
+    this.x = x;
+    fun get2() { return this.x; }
+    this.get2 = get2;
+  }
+
+  get1() {
+    return this.x;
+  }
+}
+var a = A(1);
+
+// Check that calling and returning from a bound method works correctly.
+print 2 + (a.get1)(); // Output: 3
+
+// Check that calling and returning from a field closure works correctly.
+print 3 + a.get2(); // Output: 4

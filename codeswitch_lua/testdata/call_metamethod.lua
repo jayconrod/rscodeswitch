@@ -8,5 +8,5 @@ local t = {}
 setmetatable(t, mt)
 
 print(t("a", "b", "c"))
--- Output: call a b c
+-- Output: call <object> a b c
 -- Output: 1 2 3

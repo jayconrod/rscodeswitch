@@ -142,6 +142,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
             }
             Decl::Function {
                 name,
+                this_var,
                 params,
                 body,
                 var,
@@ -149,7 +150,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 pos,
                 ..
             } => {
-                let fn_index = self.compile_function(*name, params, body, *arg_scope, false, *pos);
+                let fn_index =
+                    self.compile_function(*name, *this_var, params, body, *arg_scope, false, *pos);
+
                 // Create a closure in the enclosing function.
                 // The closure has pointers to cells of variables captured from
                 // this function and enclosing functions.
@@ -195,6 +198,10 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 self.asm().nanbox();
                 if let Some(arg_count) = init_param_count {
                     self.asm().dup();
+                    self.asm().prototype();
+                    self.asm().mode(inst::MODE_OBJECT);
+                    self.asm().nanbox();
+                    self.asm().swap();
                     for i in 0..arg_count {
                         self.asm().loadarg(i);
                     }
@@ -265,6 +272,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                     match method {
                         Decl::Function {
                             name,
+                            this_var,
                             params,
                             body,
                             arg_scope,
@@ -283,8 +291,9 @@ impl<'a, 'b> Compiler<'a, 'b> {
                                 continue;
                             }
                             self.asm().dup();
-                            let fn_index =
-                                self.compile_function(*name, params, body, *arg_scope, true, *pos);
+                            let fn_index = self.compile_function(
+                                *name, *this_var, params, body, *arg_scope, true, *pos,
+                            );
                             self.compile_closure(fn_index, *arg_scope, *pos);
                             let name_index = self.ensure_string(name.text.as_bytes(), name.pos);
                             self.asm().mode(inst::MODE_LUA);
@@ -313,6 +322,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
     fn compile_function(
         &mut self,
         name: Token<'a>,
+        this_var: Option<usize>,
         params: &Vec<Param<'a>>,
         body: &Block<'a>,
         arg_scope: usize,
@@ -320,22 +330,31 @@ impl<'a, 'b> Compiler<'a, 'b> {
         pos: Pos,
     ) -> u32 {
         // Start compiling the function.
-        // Before anything else, move captured parameters into cells.
         self.asm_stack.push(Assembler::new());
         self.line(pos);
+
+        // Move captured parameters into cells.
         let mut cell_slot = 0;
-        for param in params {
-            if self.scopes.vars[param.var].kind == VarKind::Capture {
-                let ti = self.ensure_type(Type::NanBox);
-                self.asm().alloc(ti);
-                self.asm().dup();
-                let arg_slot = self.scopes.vars[param.var].slot as u16;
-                self.asm().loadarg(arg_slot);
-                self.asm().mode(inst::MODE_LUA);
-                self.asm().store();
-                assert_eq!(self.scopes.vars[param.var].cell_slot, cell_slot);
-                cell_slot += 1;
+        let mut maybe_move_captured_param = |vid: usize| {
+            let var = &self.scopes.vars[vid];
+            if var.kind != VarKind::Capture {
+                return;
             }
+            let ti = self.ensure_type(Type::NanBox);
+            self.asm().alloc(ti);
+            self.asm().dup();
+            let arg_slot = var.slot as u16;
+            self.asm().loadarg(arg_slot);
+            self.asm().mode(inst::MODE_LUA);
+            self.asm().store();
+            assert_eq!(var.cell_slot, cell_slot);
+            cell_slot += 1;
+        };
+        if let Some(vid) = this_var {
+            maybe_move_captured_param(vid);
+        }
+        for param in params {
+            maybe_move_captured_param(param.var);
         }
 
         // Compile the function body.
@@ -592,6 +611,7 @@ impl<'a, 'b> Compiler<'a, 'b> {
                 match callee.as_ref() {
                     Expr::Property { receiver, name, .. } => {
                         self.compile_expr(receiver);
+                        self.asm().dup();
                         for arg in arguments {
                             self.compile_expr(arg);
                         }
@@ -603,15 +623,16 @@ impl<'a, 'b> Compiler<'a, 'b> {
                         self.compile_var_use(&self.scopes.var_uses[*var_use]);
                         self.asm().dup();
                         self.asm().mode(inst::MODE_LUA);
-                        self.asm().loadprototype();
+                        self.asm().loadprototype(); // class of receiver
                         self.asm().mode(inst::MODE_LUA);
-                        self.asm().loadprototype();
+                        self.asm().loadprototype(); // superclass of that class
+                        self.asm().swap();
                         for arg in arguments {
                             self.compile_expr(arg);
                         }
                         let si = self.ensure_string(name.text.as_bytes(), name.pos);
                         self.asm().mode(inst::MODE_BOX);
-                        self.asm().callnamedpropwithprototype(si, arg_count);
+                        self.asm().callnamedprop(si, arg_count);
                     }
                     _ => {
                         self.compile_expr(callee);
